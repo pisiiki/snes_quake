@@ -1,0 +1,222 @@
+; Once-per-span strict-interior proof for contested technique-4 brush spans.
+; This stays after the pinned endpoint and row-stage auxiliary code so its
+; independent size cannot perturb those persistent-cache placements.
+;
+; TexturePerspectiveFactorQ12 always returns a factor in [0,4096]. The
+; generated lightmapped-brush contract below guarantees that each signed-Q4
+; row-edge delta has an unambiguous, non-wrapping signed representation.
+; Consequently every perspective sample lies in the closed interval between
+; the row's two edge coordinates, even though integer perspective factors need
+; not be monotone between adjacent screen samples. Proving both row edges are
+; strict bilinear interiors is therefore conservative and exact for every
+; possible fly-camera block anchor. When depth does not decrease across the
+; row, the implemented perspective factor is monotone, so the already-sampled
+; first/final visible coordinates provide a tighter equally exact interval.
+; Select that proof up front; decreasing-depth rows use conservative edges.
+
+.assert BSP_BRUSH_LIGHTMAPPED_TEXCOORD_AXIS_SPAN_Q4_MAX < $8000, error, "Lightmapped brush row-edge proof requires non-wrapping signed-Q4 axis spans"
+
+.segment "GSU_AUX_CODE"
+
+BrushArbiterSpanPrepareLightmap:
+        ; Retain the final exact pixel-center as the final coordinate block's
+        ; anchor and, for monotone-depth rows, as the tight proof endpoint.
+        lm      R0, (TEXTURE_SPAN_END_X)
+        jal     TexturePerspectiveSampleSpan
+        nop
+        sm      (BRUSH_ARBITER_FINAL_S), R5
+        sm      (BRUSH_ARBITER_FINAL_T), R6
+
+        ; Missing lightmaps retain their established checked fallback.
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bpl     BrushArbiterSpanLightmapPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockSetup
+BrushArbiterSpanLightmapPresent:
+        ; Nondecreasing depth makes the implemented perspective factor
+        ; monotone. R5/R6 still hold the exact final visible coordinate, so load
+        ; only the exact first coordinate into R2/R3. Decreasing-depth factors
+        ; can backtrack after integer division and must use conservative edges.
+        lm      R0, (TEXTURE_DELTA_DEPTH)
+        moves   R0, R0
+        bmi     BrushArbiterSpanLightmapUseRowEdges
+        nop
+        lm      R2, (TEXTURE_SPAN_S)
+        lm      R3, (TEXTURE_SPAN_T)
+        bra     BrushArbiterSpanLightmapCoordinatesReady
+        nop
+BrushArbiterSpanLightmapUseRowEdges:
+        lm      R2, (TEXTURE_LEFT_S)
+        lm      R5, (TEXTURE_RIGHT_S)
+        lm      R3, (TEXTURE_LEFT_T)
+        lm      R6, (TEXTURE_RIGHT_T)
+BrushArbiterSpanLightmapCoordinatesReady:
+        ; A bilinear interior cell has relative block coordinate strictly below
+        ; dimension-1. Unsigned comparisons reject both negative and high
+        ; coordinates without separate clamps. R2/R5 are the selected S pair;
+        ; R3/R6 are the selected T pair.
+        move    R0, R2
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
+        with    R0
+        sub     R1
+        lm      R1, (LIGHTMAP_WIDTH)
+        dec     R1
+        with    R0
+        cmp     R1
+        bcc     BrushArbiterSpanProofFirstSInterior
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanLightmapProofFailed
+BrushArbiterSpanProofFirstSInterior:
+        move    R0, R5
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
+        with    R0
+        sub     R1
+        lm      R1, (LIGHTMAP_WIDTH)
+        dec     R1
+        with    R0
+        cmp     R1
+        bcc     BrushArbiterSpanProofSecondSInterior
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanLightmapProofFailed
+BrushArbiterSpanProofSecondSInterior:
+        move    R0, R3
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_T)
+        with    R0
+        sub     R1
+        lm      R1, (LIGHTMAP_HEIGHT)
+        dec     R1
+        with    R0
+        cmp     R1
+        bcc     BrushArbiterSpanProofFirstTInterior
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanLightmapProofFailed
+BrushArbiterSpanProofFirstTInterior:
+        move    R0, R6
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_T)
+        with    R0
+        sub     R1
+        lm      R1, (LIGHTMAP_HEIGHT)
+        dec     R1
+        with    R0
+        cmp     R1
+        bcc     BrushArbiterSpanLightmapProofReady
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanLightmapProofFailed
+
+BrushArbiterSpanLightmapProofFailed:
+        ; A decreasing-depth factor can backtrack after integer division, so a
+        ; failed row-edge proof enables exact classification at every existing
+        ; projective block anchor. Nondecreasing visible-endpoint misses remain
+        ; on the generic checked sampler.
+        lm      R0, (TEXTURE_DELTA_DEPTH)
+        moves   R0, R0
+        bpl     BrushArbiterSpanLightmapProofFallbackReady
+        nop
+        move    R0, #1
+        sm      (BRUSH_ARBITER_BLOCK_PROOF), R0
+BrushArbiterSpanLightmapProofFallbackReady:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockSetup
+
+BrushArbiterSpanLightmapProofReady:
+        ; Every exact block anchor lies within the active proven interval. The
+        ; short signed block DDAs are monotone between consecutive exact anchors,
+        ; so they cannot leave that same bilinear interior interval.
+        iwt     R0, #$8000
+        sm      (LIGHTMAP_BLOCK_FAST), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockSetup
+
+; Exact fallback for a decreasing-depth span whose conservative row-edge proof
+; failed. The caller has the current exact block start in TEXTURE_SPAN_S/T and
+; its exact end in R5/R6. If all four coordinates are strict bilinear interiors,
+; the signed quotient/remainder DDA is monotone between them and the whole block
+; can use LightmapSampleInteriorDirect. R10 is the continuation; preserve R5/R6.
+BrushArbiterSpanPrepareBlockLightmap:
+        move    R0, #0
+        sm      (LIGHTMAP_BLOCK_FAST), R0
+        lm      R2, (TEXTURE_SPAN_S)
+        lm      R3, (TEXTURE_SPAN_T)
+
+        move    R0, R2
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
+        with    R0
+        sub     R1
+        lm      R1, (LIGHTMAP_WIDTH)
+        dec     R1
+        with    R0
+        cmp     R1
+        bcc     BrushArbiterSpanBlockProofStartSInterior
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockProofReturn
+BrushArbiterSpanBlockProofStartSInterior:
+        move    R0, R5
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
+        with    R0
+        sub     R1
+        lm      R1, (LIGHTMAP_WIDTH)
+        dec     R1
+        with    R0
+        cmp     R1
+        bcc     BrushArbiterSpanBlockProofEndSInterior
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockProofReturn
+BrushArbiterSpanBlockProofEndSInterior:
+        move    R0, R3
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_T)
+        with    R0
+        sub     R1
+        lm      R1, (LIGHTMAP_HEIGHT)
+        dec     R1
+        with    R0
+        cmp     R1
+        bcc     BrushArbiterSpanBlockProofStartTInterior
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockProofReturn
+BrushArbiterSpanBlockProofStartTInterior:
+        move    R0, R6
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_T)
+        with    R0
+        sub     R1
+        lm      R1, (LIGHTMAP_HEIGHT)
+        dec     R1
+        with    R0
+        cmp     R1
+        bcs     BrushArbiterSpanBlockProofReturn
+        nop
+        iwt     R0, #$8000
+        sm      (LIGHTMAP_BLOCK_FAST), R0
+BrushArbiterSpanBlockProofReturn:
+        jmp     R10
+        nop

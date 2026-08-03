@@ -1,0 +1,560 @@
+; Row-local dynamic-brush candidate span.  The caller has already prepared
+; ordered projective edge intersections, material state, and (for technique 4)
+; the face lightmap cache. Contested spans retain exact depth ownership, while
+; disjoint technique-4 spans tail into the shared lightmapped block kernel.
+
+BRUSH_ARBITER_SPAN_RETURN       = BRUSH_STATE + $D0
+BRUSH_ARBITER_COMPOSE_ROUTINE   = BRUSH_STATE + $D2
+BRUSH_ARBITER_DRAW_ROUTINE      = BRUSH_STATE + $D4
+BRUSH_ARBITER_DEPTH_ROUTINE     = BRUSH_STATE + $D6
+BRUSH_ARBITER_FINAL_S           = BRUSH_STATE + $D8
+BRUSH_ARBITER_FINAL_T           = BRUSH_STATE + $DA
+BRUSH_ARBITER_BLOCK_PROOF       = BRUSH_STATE + $DC
+BRUSH_ARBITER_BLOCK_END_T       = BRUSH_STATE + $DE
+BRUSH_ARBITER_DDA_RETURN         = BRUSH_STATE + $E0
+BRUSH_ARBITER_SCREEN_FACTOR      = BRUSH_STATE + $E2
+BRUSH_ARBITER_SCREEN_REMAINDER   = BRUSH_STATE + $E4
+BRUSH_ARBITER_SCREEN_STEP        = BRUSH_STATE + $E6
+BRUSH_ARBITER_SCREEN_STEP_REM    = BRUSH_STATE + $E8
+BRUSH_ARBITER_SCREEN_DEN         = BRUSH_STATE + $EA
+BRUSH_ARBITER_RAW_NUMERATOR      = BRUSH_STATE + $EE
+
+.assert BRUSH_ARBITER_RAW_NUMERATOR <= BRUSH_STATE + $FE, error, "Brush span state exceeds its private tail"
+
+; Input is entirely memory-backed:
+;   CONVEX_MIN_X/MAX_X              ordered raw Q7 edge X
+;   TEXTURE_LEFT/RIGHT_{S,T,SHADE}  signed Q4 S/T and signed Q6 depth
+;   TEXTURE_SPAN_X/END_X            first/last covered logical X
+;   CONVEX_RASTER_Y                 covered logical Y
+;   TEXTURE_RENDER_MODE             3=distance, 2=albedo, 1=lightmap
+;   BRUSH_ARBITER_COMPOSE_ROUTINE   selects albedo/distance/lightmap output
+; The depth row is initialized to $FFFF by the group arbiter. A parallel
+; winner-identity row preserves the reference renderer's metadata authority
+; when near-to-far replay encounters equal depths.
+BrushArbiterDrawCandidateSpan:
+        ; Keep the protected albedo, distance, and untextured paths on their
+        ; established instruction streams. This gate targets technique 4.
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        beq     BrushArbiterSpanNearDepthCheck
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanMayWin
+BrushArbiterSpanNearDepthCheck:
+        lm      R0, (BRUSH_ARB_ROW_STAGE_MODE)
+        move    R1, #2
+        with    R0
+        cmp     R1
+        beq     BrushArbiterSpanMayWin
+        nop
+        ; Perspective-correct positive depth stays between the two edge
+        ; endpoints.  If that conservative near bound already loses against
+        ; every owned pixel in this span, no coordinate, depth, texture, or
+        ; lightmap work can affect the exact result.
+        lm      R5, (TEXTURE_LEFT_SHADE)
+        lm      R6, (TEXTURE_RIGHT_SHADE)
+        move    R0, R5
+        with    R0
+        cmp     R6
+        bcc     BrushArbiterSpanNearDepthReady
+        nop
+        move    R5, R6
+BrushArbiterSpanNearDepthReady:
+        lm      R0, (TEXTURE_SPAN_X)
+        move    R1, R0
+        with    R1
+        add     R1
+        iwt     R10, #GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET
+        with    R10
+        add     R1
+        move    R6, R10
+        lm      R12, (TEXTURE_SPAN_END_X)
+        with    R12
+        sub     R0
+        inc     R12
+        iwt     R13, #BrushArbiterSpanNearDepthLoop
+BrushArbiterSpanNearDepthLoop:
+        movew   R0, (R10)
+        with    R5
+        cmp     R0
+        bcc     BrushArbiterSpanTrimPrefix
+        nop
+        ; Contested rows may now visit a higher-authority equal-depth face
+        ; after its peer. Let the exact pixel tie-break decide that boundary.
+        beq     BrushArbiterSpanTrimPrefix
+        nop
+        inc     R10
+        inc     R10
+        loop
+        nop
+        lm      R11, (BRUSH_ARBITER_SPAN_RETURN)
+        ret
+        nop
+BrushArbiterSpanTrimPrefix:
+        ; Every preceding cell is provably owned by nearer geometry. Advance
+        ; only by complete eight-pixel projective blocks, retaining the exact
+        ; S/T anchors and depth factors the untrimmed candidate would use.
+        move    R2, R10
+        with    R2
+        sub     R6
+        with    R2
+        lsr
+        iwt     R1, #$FFF8
+        with    R2
+        and     R1
+        beq     BrushArbiterSpanMayWin
+        nop
+        lm      R0, (TEXTURE_SPAN_X)
+        with    R0
+        add     R2
+        sm      (TEXTURE_SPAN_X), R0
+BrushArbiterDrawDisjointSpan:
+BrushArbiterSpanMayWin:
+
+        ; Preserve the complete edge segment.  Both the block color anchors and
+        ; the independent per-pixel depth samples use these exact endpoints.
+        lm      R0, (TEXTURE_LEFT_S)
+        sm      (TEXTURE_BASE_S), R0
+        lm      R1, (TEXTURE_RIGHT_S)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_S), R1
+        lm      R0, (TEXTURE_LEFT_T)
+        sm      (TEXTURE_BASE_T), R0
+        lm      R1, (TEXTURE_RIGHT_T)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_T), R1
+        lm      R0, (TEXTURE_LEFT_SHADE)
+        sm      (TEXTURE_BASE_DEPTH), R0
+        lm      R1, (TEXTURE_RIGHT_SHADE)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_DEPTH), R1
+
+        ; Cache the raw-Q7 screen denominator reciprocal once.  Depth's second
+        ; perspective division has its own lookup and does not overwrite this.
+        lm      R2, (CONVEX_MAX_X)
+        lm      R1, (CONVEX_MIN_X)
+        with    R2
+        sub     R1
+        sm      (BRUSH_ARBITER_SCREEN_DEN), R2
+        moves   R2, R2
+        bne     BrushArbiterSpanPrepareReciprocal
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanLegacyAnchor
+BrushArbiterSpanPrepareReciprocal:
+        jal     TexturePrepareDivideQ12
+        nop
+
+        lm      R0, (BRUSH_ARB_ROW_STAGE_MODE)
+        move    R1, #2
+        with    R0
+        cmp     R1
+        ; Disjoint rows amortize the shared block kernel. The few contested
+        ; survivors are short enough that preparing the depth DDA costs more
+        ; than the exact legacy per-pixel divisions.
+        bne     BrushArbiterSpanContestedAnchor
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanNoDepthAnchor
+BrushArbiterSpanContestedAnchor:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanLegacyDepthAnchor
+        ; The former depth-DDA experiment below this jump was unreachable: the
+        ; contested path has always selected the exact legacy sampler, and no
+        ; other source referenced its entry or internal labels. Its removed
+        ; bytes are retained by the renderer's fixed entry slot, giving the live
+        ; span proof room without moving downstream cache kernels.
+BrushArbiterSpanLegacyAnchor:
+        lm      R0, (BRUSH_ARB_ROW_STAGE_MODE)
+        move    R1, #2
+        with    R0
+        cmp     R1
+        bne     BrushArbiterSpanLegacyDepthAnchor
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanNoDepthAnchor
+BrushArbiterSpanLegacyDepthAnchor:
+        ; Only fallback spans need the legacy per-pixel route. Hot DDA spans
+        ; publish their own route above without first writing this one.
+        iwt     R0, #BrushArbiterDepthLegacy
+        sm      (BRUSH_ARBITER_DEPTH_ROUTINE), R0
+        lm      R0, (TEXTURE_SPAN_X)
+        jal     TexturePerspectiveSampleSpan
+        nop
+        bra     BrushArbiterSpanAnchorReady
+        nop
+BrushArbiterSpanNoDepthAnchor:
+        ; Disjoint rows tail entirely into the shared lightmap kernel; no
+        ; brush-side depth/compose continuation is reachable from here.
+        lm      R0, (TEXTURE_SPAN_X)
+        jal     TexturePerspectiveSampleSpan
+        nop
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        beq     BrushArbiterDisjointSingleton
+        nop
+        GSU_ABSOLUTE_GOTO TextureLightmapBlockSetup
+BrushArbiterDisjointSingleton:
+        move    R0, #0
+        sm      (LIGHTMAP_BLOCK_FAST), R0
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        GSU_ABSOLUTE_GOTO TextureLightmapSpanLoop
+BrushArbiterSpanAnchorReady:
+        ; Direct spans may leave a prepared cell classification behind. Reset
+        ; it only when the checked/singleton arbiter is actually entered.
+        move    R0, #0
+        sm      (LIGHTMAP_BLOCK_FAST), R0
+        ; The exact block-proof fallback is private to one technique-4 span.
+        ; Clear it for every arbiter span so other modes cannot inherit it.
+        sm      (BRUSH_ARBITER_BLOCK_PROOF), R0
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        bne     BrushArbiterSpanFirstBlock
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPixel
+BrushArbiterSpanFirstBlock:
+        ; Technique 4 can prove the complete current span stays inside its
+        ; bilinear lightmap bounds from the conservative row-edge coordinate
+        ; intervals. Sample the exact final pixel-center once only to retain it
+        ; for the final coordinate block. Missing or border-touching spans stay
+        ; on the checked sampler; other modes keep their established setup.
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        bne     BrushArbiterSpanBlockSetup
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPrepareLightmap
+
+; Build one full-span-anchored block [X,min(X+8,last)].  The generic coordinate
+; builder is slower than the specialized hot renderers but byte-exact with
+; their signed quotient/remainder sequence and keeps this arbiter independent.
+BrushArbiterSpanBlockSetup:
+        lm      R0, (TEXTURE_SPAN_X)
+        move    R4, R0
+        with    R4
+        add     #8
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R4
+        cmp     R1
+        bmi     BrushArbiterSpanBlockEndReady
+        nop
+        move    R4, R1
+BrushArbiterSpanBlockEndReady:
+        sm      (TEXTURE_BLOCK_END_X), R4
+        ; The technique-4 proof helper already cached this exact final anchor.
+        ; Reuse it so proof preparation does not add a perspective sample.
+        lm      R0, (TEXTURE_SPAN_END_X)
+        with    R4
+        cmp     R0
+        bne     BrushArbiterSpanSampleBlockEnd
+        nop
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        bne     BrushArbiterSpanSampleBlockEnd
+        nop
+        lm      R5, (BRUSH_ARBITER_FINAL_S)
+        lm      R6, (BRUSH_ARBITER_FINAL_T)
+        bra     BrushArbiterSpanBlockCoordinatesReady
+        nop
+BrushArbiterSpanSampleBlockEnd:
+        move    R0, R4
+        jal     TexturePerspectiveSampleSpan
+        nop
+BrushArbiterSpanBlockCoordinatesReady:
+        sm      (BRUSH_ARBITER_BLOCK_END_T), R6
+
+        ; Only decreasing-depth rows that failed their conservative whole-span
+        ; proof pay the exact per-block classifier. Every other span preserves
+        ; the established setup and LIGHTMAP_BLOCK_FAST selection.
+        lm      R0, (BRUSH_ARBITER_BLOCK_PROOF)
+        moves   R0, R0
+        beq     BrushArbiterSpanBlockLightmapReady
+        nop
+        iwt     R10, #BrushArbiterSpanBlockLightmapReady
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPrepareBlockLightmap
+BrushArbiterSpanBlockLightmapReady:
+
+        lm      R0, (TEXTURE_BLOCK_END_X)
+        lm      R1, (TEXTURE_SPAN_X)
+        with    R0
+        sub     R1
+        sm      (TEXTURE_SPAN_DEN), R0
+
+        ; Signed S quotient/remainder.
+        move    R0, R5
+        lm      R1, (TEXTURE_SPAN_S)
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     BrushArbiterSpanSPositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+BrushArbiterSpanSPositive:
+        move    R8, R4
+        lm      R1, (TEXTURE_SPAN_DEN)
+        jal     TextureDivideBlockUnsigned
+        move    R7, R2
+        move    R9, R3
+
+        ; Signed T quotient/remainder.
+        lm      R0, (BRUSH_ARBITER_BLOCK_END_T)
+        lm      R1, (TEXTURE_SPAN_T)
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     BrushArbiterSpanTPositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+BrushArbiterSpanTPositive:
+        move    R10, R8
+        move    R8, R4
+        lm      R1, (TEXTURE_SPAN_DEN)
+        jal     TextureDivideBlockUnsigned
+        move    R11, R8
+        move    R8, R2
+        move    R13, R3
+        move    R4, R10
+        iwt     R0, #BrushArbiterSpanPixel
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
+
+BrushArbiterSpanPixel:
+        ; Ownership uses exact per-pixel projective Q6 depth, independently of
+        ; the eight-pixel approximation retained for S/T and therefore color.
+        lm      R12, (BRUSH_ARBITER_DEPTH_ROUTINE)
+        jmp     R12
+        nop
+
+BrushArbiterSpanDepthReady:
+        lm      R0, (TEXTURE_SPAN_X)
+        with    R0
+        add     R0
+        iwt     R2, #GSU_BRUSH_ARBITER_WINNER_ROW_OFFSET
+        with    R2
+        add     R0
+        iwt     R10, #GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET
+        with    R10
+        add     R0
+        movew   R1, (R10)
+        ; Frustum clipping guarantees positive Q6 camera depth. A strictly
+        ; nearer candidate wins immediately; equality consults metadata authority.
+        with    R5
+        cmp     R1
+        bcc     BrushArbiterSpanWinner
+        nop
+        beq     BrushArbiterSpanDepthTie
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanAdvance
+
+BrushArbiterSpanDepthTie:
+        ; Near-ordering is only a work heuristic. Equal depth retains the
+        ; original metadata authority exactly, independent of visit order.
+        movew   R0, (R2)
+        lm      R1, (BRUSH_ARB_CANDIDATE_CURSOR)
+        with    R1
+        cmp     R0
+        bcc     BrushArbiterSpanWinner
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanAdvance
+
+BrushArbiterSpanWinner:
+        movew   (R10), R5
+        lm      R0, (BRUSH_ARB_CANDIDATE_CURSOR)
+        movew   (R2), R0
+BrushArbiterSpanCompose:
+        ; Perspective reciprocal lookup changes ROMB.  Restore the packed
+        ; texture bank before either generic winner sampler reads a texel.
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        lm      R8, (TEXTURE_SPAN_S)
+        lm      R9, (TEXTURE_SPAN_T)
+        move    R5, R8
+        move    R6, R9
+        lm      R11, (BRUSH_ARBITER_COMPOSE_ROUTINE)
+        lm      R12, (TEXTURE_SAMPLE_ROUTINE)
+        jmp     R12
+        nop
+
+BrushArbiterSpanAlbedo:
+        ; Technique 2: the packed albedo index is already the final 8bpp color.
+        color
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPlot
+
+BrushArbiterSpanDistance:
+        ; Technique 3: arbitration already evaluated exact perspective Q6
+        ; depth at this pixel. Map it to a compact Quake colormap row, then
+        ; remap the winning texture index without another perspective divide.
+        ; Reloading the just-written row entry confines this work to mode 3,
+        ; leaving the protected albedo/lightmap winner stream unchanged.
+        move    R12, R0
+        lm      R4, (TEXTURE_SPAN_X)
+        with    R4
+        add     R4
+        iwt     R10, #GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET
+        with    R10
+        add     R4
+        movew   R4, (R10)
+        with    R4
+        hib
+        iwt     R10, #GSU_TEXTURE_DEPTH_SHADE_OFFSET
+        with    R10
+        add     R4
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        swap
+        with    R0
+        add     R12
+        iwt     R10, #GSU_TEXTURE_COLORMAP_OFFSET
+        with    R10
+        add     R0
+        move    R0, #0
+        moveb   R0, (R10)
+        color
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPlot
+
+BrushArbiterSpanLightmapped:
+        ; Technique 4: reconstruct the exact lightmap result from the same
+        ; absolute Q4 block coordinate. The span proof publishes only the
+        ; negative strict-interior route; missing and border spans remain zero
+        ; and checked. LightmapSample preserves R12, so keep albedo in R12.
+        move    R12, R0
+        jal     LightmapSample
+        with    R4
+        swap
+        with    R4
+        add     R12
+        moveb   R0, (R4)
+        color
+
+BrushArbiterSpanPlot:
+        lm      R0, (TEXTURE_SPAN_X)
+        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R10
+        add     R0
+        moveb   R1, (R10)
+        lm      R2, (TEXTURE_PLOT_Y)
+        plot
+
+BrushArbiterSpanAdvance:
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        beq     BrushArbiterSpanDone
+        nop
+        inc     R0
+        sm      (TEXTURE_SPAN_X), R0
+
+        ; Advance the established block DDA even for a losing candidate.
+        lm      R10, (TEXTURE_COORD_PTR)
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        sm      (TEXTURE_COORD_PTR), R10
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+
+        ; A shared block endpoint is the exact anchor for the next block.  The
+        ; full-span endpoint is rendered directly without constructing another.
+        lm      R1, (TEXTURE_BLOCK_END_X)
+        with    R0
+        cmp     R1
+        beq     BrushArbiterSpanAtBlockEnd
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPixel
+BrushArbiterSpanAtBlockEnd:
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        bne     BrushArbiterSpanBuildNextBlock
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPixel
+BrushArbiterSpanBuildNextBlock:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockSetup
+
+BrushArbiterSpanDone:
+        lm      R11, (BRUSH_ARBITER_SPAN_RETURN)
+        ret
+        nop
+
+; Evaluate S/T from a screen-space Q12 factor already prepared by the exact
+; depth DDA setup. This is TexturePerspectiveSampleSpan's shared suffix.
+BrushArbiterSampleCoordinatesFromFactor:
+        sm      (BRUSH_ARBITER_DDA_RETURN), R11
+        lm      R3, (BRUSH_ARBITER_SCREEN_FACTOR)
+        jal     TexturePerspectiveFactorQ12
+        nop
+        lm      R5, (TEXTURE_BASE_S)
+        lm      R7, (TEXTURE_DELTA_S)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        move    R8, R5
+        lm      R5, (TEXTURE_BASE_T)
+        lm      R7, (TEXTURE_DELTA_T)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        move    R6, R5
+        move    R5, R8
+        lm      R11, (BRUSH_ARBITER_DDA_RETURN)
+        ret
+        nop
+
+BrushArbiterDepthDda:
+        lm      R3, (BRUSH_ARBITER_SCREEN_FACTOR)
+        jal     TexturePerspectiveFactorQ12
+        ; Reuse the invariant R5/R7 pair returned by the factor routine.
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        ; Advance floor(4096*n/d) exactly. Each remainder sum is below 2d,
+        ; so at most one carry is possible before the endpoint clamp.
+        lm      R3, (BRUSH_ARBITER_SCREEN_FACTOR)
+        lm      R1, (BRUSH_ARBITER_SCREEN_STEP)
+        with    R3
+        add     R1
+        lm      R4, (BRUSH_ARBITER_SCREEN_REMAINDER)
+        lm      R1, (BRUSH_ARBITER_SCREEN_STEP_REM)
+        with    R4
+        add     R1
+        lm      R2, (BRUSH_ARBITER_SCREEN_DEN)
+        with    R4
+        cmp     R2
+        bcc     BrushArbiterDepthDdaNoCarry
+        nop
+        with    R4
+        sub     R2
+        inc     R3
+BrushArbiterDepthDdaNoCarry:
+        iwt     R1, #4096
+        with    R3
+        cmp     R1
+        bcc     BrushArbiterDepthDdaStore
+        nop
+        move    R3, R1
+        move    R4, #0
+BrushArbiterDepthDdaStore:
+        sm      (BRUSH_ARBITER_SCREEN_FACTOR), R3
+        sm      (BRUSH_ARBITER_SCREEN_REMAINDER), R4
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanDepthReady

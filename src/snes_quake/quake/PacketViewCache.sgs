@@ -1,0 +1,98 @@
+; After selection, the remap head is phase-idle. Cache each packet-local
+; vertex's exact Q6 {right, up, depth} and frustum outcode once per render.
+PACKET_VIEW_CACHE = WORLD_VERTEX_REMAP
+PACKET_VIEW_CACHE_RECORD_BYTES = 8
+.assert PACKET_VIEW_CACHE + PACKET_VERTEX_CAPACITY * PACKET_VIEW_CACHE_RECORD_BYTES <= GSU_BRUSH_LEAF_HEADS_OFFSET, error, "Packet view cache overlaps brush state"
+
+BuildPacketViewCache:
+        sm      (TEXTURE_FACE_RETURN), R11
+        lm      R0, (GSU_TELEMETRY_PACKET_VERTEX_COUNT)
+        sm      (CONVEX_EDGE_COUNT), R0
+        moves   R0, R0
+        beq     BuildPacketViewCacheDone
+        nop
+        move    R0, #0
+        sm      (CLIP_VERTEX_INDEX), R0
+        iwt     R0, #PACKET_VIEW_CACHE
+        sm      (CONVEX_OUTPUT_CURSOR), R0
+BuildPacketViewCacheLoop:
+        jal     ClipTransformVertex
+        nop
+        BSP_CLASSIFY_CLIP_OUTCODE
+        move    R7, R0
+        lm      R10, (CONVEX_OUTPUT_CURSOR)
+        lm      R0, (CLIP_RIGHT)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (CLIP_UP)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (CLIP_DEPTH)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        movew   (R10), R7
+        inc     R10
+        inc     R10
+        sm      (CONVEX_OUTPUT_CURSOR), R10
+        lm      R0, (CLIP_VERTEX_INDEX)
+        inc     R0
+        sm      (CLIP_VERTEX_INDEX), R0
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        bne     BuildPacketViewCacheLoop
+        nop
+BuildPacketViewCacheDone:
+        lm      R11, (TEXTURE_FACE_RETURN)
+        ret
+        nop
+
+LoadPacketViewVertex:
+        lm      R0, (CLIP_VERTEX_INDEX)
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R10, #PACKET_VIEW_CACHE
+        with    R10
+        add     R1
+        lm      R9, (CONVEX_OUTPUT_CURSOR)
+        movew   R0, (R10)
+        movew   (R9), R0
+        inc     R10
+        inc     R10
+        inc     R9
+        inc     R9
+        movew   R0, (R10)
+        movew   (R9), R0
+        inc     R10
+        inc     R10
+        inc     R9
+        inc     R9
+        movew   R0, (R10)
+        movew   (R9), R0
+        inc     R10
+        inc     R10
+        inc     R9
+        inc     R9
+        movew   R2, (R10)
+        lm      R0, (TEXTURE_CUR_S)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        lm      R0, (TEXTURE_CUR_T)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        sm      (CONVEX_OUTPUT_CURSOR), R9
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        inc     R0
+        sm      (CONVEX_OUTPUT_COUNT), R0
+        ret
+        nop

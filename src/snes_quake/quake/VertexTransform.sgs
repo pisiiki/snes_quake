@@ -1,0 +1,151 @@
+; Transform signed Q2 world coordinates already resident in R1/R2/R3. Keep
+; this cache entry in the line immediately before the generic decoder: its
+; 512-byte window contains the shared transform core without adding a branch
+; to the much hotter packet-vertex entry.
+ClipTransformQ2Registers:
+        cache
+        sm      (CLIP_TRANSFORM_RETURN), R11
+        GSU_ABSOLUTE_GOTO ClipTransformQ2Coordinates
+
+; Transform one raw compact packet vertex into signed Q6 view coordinates.
+GSU_CACHE_KERNEL_BEGIN ClipTransformVertex
+        sm      (CLIP_TRANSFORM_RETURN), R11
+        lm      R0, (CLIP_VERTEX_INDEX)
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R10, #VERTICES
+        with    R10
+        add     R1
+
+        move    R0, #0
+        moveb   R0, (R10)
+        inc     R10
+        with    R0
+        sex
+        move    R1, R0
+
+        move    R0, #0
+        moveb   R0, (R10)
+        inc     R10
+        with    R0
+        sex
+        move    R2, R0
+
+        move    R0, #0
+        moveb   R0, (R10)
+        inc     R10
+        with    R0
+        sex
+        move    R3, R0
+        move    R7, #0
+        moveb   R7, (R10)
+
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        move    R0, R7
+        with    R0
+        and     #3
+        with    R1
+        add     R0
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        move    R0, R7
+  .repeat 2
+        with    R0
+        lsr
+  .endrepeat
+        with    R0
+        and     #3
+        with    R2
+        add     R0
+        with    R3
+        add     R3
+        with    R3
+        add     R3
+        move    R0, R7
+  .repeat 4
+        with    R0
+        lsr
+  .endrepeat
+        with    R0
+        and     #3
+        with    R3
+        add     R0
+
+ClipTransformQ2Coordinates:
+        lm      R0, (CAMERA_X)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R1
+        sub     R0
+        sm      (DX), R1
+        lm      R0, (CAMERA_Y)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R2
+        sub     R0
+        sm      (DY), R2
+        lm      R0, (CAMERA_Z)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R3
+        sub     R0
+        sm      (DZ), R3
+
+        lm      R5, (YAW_COS)
+        lm      R7, (DX)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 2
+        lm      R5, (YAW_SIN)
+        lm      R7, (DY)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 2
+        with    R12
+        add     R0
+        sm      (VIEW_FORWARD), R12
+
+        lm      R5, (YAW_COS)
+        lm      R7, (DY)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 2
+        lm      R5, (YAW_SIN)
+        lm      R7, (DX)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 2
+        with    R12
+        sub     R0
+        sm      (CLIP_RIGHT), R12
+
+        lm      R5, (PITCH_COS)
+        lm      R7, (DZ)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 2
+        lm      R5, (PITCH_SIN)
+        lm      R7, (VIEW_FORWARD)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 6
+        with    R12
+        sub     R0
+        sm      (CLIP_UP), R12
+
+        lm      R5, (PITCH_COS)
+        lm      R7, (VIEW_FORWARD)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 6
+        lm      R5, (PITCH_SIN)
+        lm      R7, (DZ)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 2
+        with    R12
+        add     R0
+        sm      (CLIP_DEPTH), R12
+
+        lm      R11, (CLIP_TRANSFORM_RETURN)
+        ret
+        nop
+GSU_CACHE_KERNEL_END ClipTransformVertex

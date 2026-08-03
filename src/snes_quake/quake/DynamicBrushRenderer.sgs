@@ -1,0 +1,219 @@
+; Enabled-only dynamic-brush renderer staged into bank $70 below expansion
+; tables. State zero never enters this segment.
+
+.segment "GSU_BRUSH_CODE"
+
+.export GSU_BrushTextureCode, GSU_BrushTextureShadeCode
+.export GSU_BrushTextureDistanceCode, GSU_BrushTextureLightmapCode
+.export GSU_UntexturedDistanceCode, GSU_BrushUntexturedDistanceCode
+
+DynamicBrushOverlayStart:
+
+.include "DynamicBrushMerge.sgs"
+.include "DynamicBrushRaster.sgs"
+.include "DynamicBrushArbiter.sgs"
+.include "DynamicBrushArbiterSpan.sgs"
+; Keep retained renderer/cache addresses stable while dead setup space is
+; reclaimed by live span work. GSU_BrushTextureCode remains at $70A6AF.
+  .repeat $1AAF - (* - DynamicBrushOverlayStart)
+        nop
+  .endrepeat
+
+GSU_BrushTextureCode:
+        move    R0, #2
+        bra     BrushRendererStart
+        nop
+
+GSU_BrushTextureShadeCode:
+        move    R0, #0
+        bra     BrushRendererStart
+        nop
+
+GSU_BrushTextureDistanceCode:
+        ; Distance shading keeps its standalone shaded-raster dispatch while
+        ; selecting the projective edge/arbitration contract below. Only the
+        ; winning texel's final compose operation differs.
+        move    R0, #3
+        sm      (TEXTURE_RENDER_MODE), R0
+        iwt     R1, #BrushArbiterSpanDistance
+        bra     BrushRendererComposeReady
+        nop
+
+GSU_BrushTextureLightmapCode:
+        move    R0, #1
+
+BrushRendererStart:
+        sm      (TEXTURE_RENDER_MODE), R0
+        iwt     R1, #BrushArbiterSpanAlbedo
+        dec     R0
+        bne     BrushRendererComposeReady
+        nop
+        iwt     R1, #BrushArbiterSpanLightmapped
+BrushRendererComposeReady:
+        sm      (BRUSH_ARBITER_COMPOSE_ROUTINE), R1
+        move    R0, #1
+        ramb
+        move    R0, #$11
+        cmode
+        iwt     R10, #COMMAND+11
+        move    R0, #0
+        moveb   R0, (R10)
+        sm      (GSU_TELEMETRY_BRUSH_VISUAL_STATE), R0
+
+        jal     LoadProjectedPacketState
+        nop
+        ; Packet selection's Q2 camera cache is phase-overlaid with the
+        ; near-clip return words. Dynamic fragments invoke that clipper many
+        ; times, so preserve a brush-private copy for every later face cull.
+        lm      R0, (CAMERA_X)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (BRUSH_CAMERA_Q2_X), R0
+        lm      R0, (CAMERA_Y)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (BRUSH_CAMERA_Q2_Y), R0
+        lm      R0, (CAMERA_Z)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (BRUSH_CAMERA_Q2_Z), R0
+        jal     BrushBuildMixedTokens
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushRenderFallbackWorld
+        nop
+        ; Zero admitted brush links leave the staged packet as the complete
+        ; painter-ordered result. Reuse its normal renderer and avoid building
+        ; a view cache only to traverse an equivalent world-only token stream.
+        lm      R0, (BRUSH_LINK_COUNT)
+        moves   R0, R0
+        beq     BrushRenderFallbackWorld
+        nop
+        jal     BuildPacketViewCache
+        nop
+        jal     BrushRenderMixedTokens
+        nop
+        bra     BrushRenderComplete
+        nop
+BrushRenderFallbackWorld:
+        lm      R0, (TEXTURE_RENDER_MODE)
+        move    R1, #3
+        with    R0
+        cmp     R1
+        beq     BrushRenderWorldDistance
+        nop
+        move    R1, #4
+        with    R0
+        cmp     R1
+        beq     BrushRenderWorldDistance
+        nop
+        moves   R0, R0
+        beq     BrushRenderWorldShaded
+        nop
+        jal     TextureRenderFaces
+        nop
+        bra     BrushRenderComplete
+        nop
+BrushRenderWorldShaded:
+        jal     TextureRenderFacesShaded
+        nop
+        bra     BrushRenderComplete
+        nop
+BrushRenderWorldDistance:
+        jal     TextureRenderFacesDistance
+        nop
+BrushRenderComplete:
+        GSU_FLUSH_PLOT 0, 0
+        iwt     R10, #TELEMETRY
+        iwt     R0, #$B529
+        movew   (R10), R0
+        stop
+        nop
+
+; Append static/dynamic distance fallback code after the pre-existing brush
+; renderer so retained modes keep their linked layout and instruction stream.
+DEFINE_TEXTURE_SHADED_RASTER TextureRasterPolygonDistance, 1
+DEFINE_TEXTURE_SHADED_FACE TextureRenderConvexFaceDistance, TextureRasterPolygonDistance, TextureRasterPolygonUntexturedDistance
+DEFINE_TEXTURE_SHADE_FACE_WALKER TextureRenderFacesDistance, TextureRenderConvexFaceDistance, 1
+TextureBuildCoordinateBlockDistanceRegisters:
+        iwt     R0, #TextureDistanceCoordinateBlockReady
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
+
+.include "UntexturedDistanceRenderer.sgs"
+.include "PacketViewCache.sgs"
+
+; Test-only coverage entry is cold and fits the always-loaded overlay. Keeping
+; it here leaves the production GSUCODE cache layout independent of diagnostics.
+GSU_CACHE_KERNEL_BEGIN GSU_CoverageCode
+        moves   R0, R0
+        beq     CoveragePhaseZero
+        nop
+        iwt     R4, #$AAAA
+        iwt     R5, #$5555
+        bra     CoveragePatternReady
+        nop
+CoveragePhaseZero:
+        iwt     R4, #$5555
+        iwt     R5, #$AAAA
+CoveragePatternReady:
+        move    R0, #0
+        ramb
+        iwt     R10, #FRAMEBUFFER
+        iwt     R12, #GSU_LOGICAL_BYTES / 4
+        iwt     R13, #CoveragePatternLoop
+CoveragePatternLoop:
+        movew   (R10), R4
+        inc     R10
+        inc     R10
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        loop
+        nop
+        move    R0, #1
+        ramb
+        iwt     R10, #COMMAND+5
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        sex
+        beq     CoverageFlatColorMode
+        nop
+        move    R0, #$12
+        cmode
+        bra     CoverageColorModeReady
+        nop
+CoverageFlatColorMode:
+        move    R0, #$10
+        cmode
+CoverageColorModeReady:
+        jal     LoadProjectedPacketState
+        nop
+        jal     RasterHotKernel
+        nop
+        jal     RenderFaces
+        nop
+        GSU_FLUSH_PLOT 0, 0
+        move    R0, #0
+        ramb
+        jal     ExpandFrame
+        nop
+        move    R0, #1
+        ramb
+        iwt     R10, #TELEMETRY
+        iwt     R0, #$B529
+        movew   (R10), R0
+        stop
+        nop
+GSU_CACHE_KERNEL_END GSU_CoverageCode
+
+.include "TextureColdSpanSetup.sgs"
+
+.assert * - GSU_BrushTextureCode <= GSU_BRUSH_CODE_CAPACITY, error, "Dynamic-brush renderer exceeds staged overlay"

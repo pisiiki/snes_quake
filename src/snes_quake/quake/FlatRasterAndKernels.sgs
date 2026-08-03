@@ -1,0 +1,1802 @@
+; Keep the dominant interior decoder inside the lightmap interpolation cache
+; window. The technique-0/1 flat loop occupies this routine's former cold slot.
+LightmapSampleInteriorDirect:
+        move    R3, R8
+        with    R8
+        hib
+        with    R8
+        sex
+        iwt     R1, #$00F0
+        with    R3
+        and     R1
+
+        move    R5, R9
+        with    R9
+        hib
+        with    R9
+        sex
+        with    R5
+        and     R1
+
+        lm      R1, (LIGHTMAP_WIDTH)
+        with    R9
+        mult    R1
+        with    R8
+        add     R9
+        move    R6, R8
+        GSU_ABSOLUTE_GOTO LightmapSampleAdjustedHorizontalReady
+  .repeat 2
+        nop
+  .endrepeat
+
+; Face setup proves this route has equal power-of-two axes in one packed ROM
+; bank. A Q4 mask and width-specific row-shift continuation replace four T
+; shifts plus the per-pixel width multiply.
+TextureSampleAbsolutePowerOfTwoSingleBank:
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+TextureSampleAbsolutePowerOfTwoSingleBankRegisters:
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+        with    R5
+        and     R1
+  .repeat 4
+        with    R5
+        lsr
+  .endrepeat
+        with    R6
+        and     R1
+        lm      R12, (TEXTURE_STEP_SHADE_Q8)
+        jmp     R12
+        nop
+TextureSamplePowerOfTwoRowShift3:
+        with    R6
+        add     R6
+TextureSamplePowerOfTwoRowShift2:
+        with    R6
+        add     R6
+TextureSamplePowerOfTwoRowShift1:
+        with    R6
+        add     R6
+TextureSamplePowerOfTwoRowReady:
+        with    R6
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R6
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        ; Every texture sample supplies a new absolute R14 address, so the
+        ; macro's sequential-read increment would be dead work here.
+        to      R0
+        getb
+        ret
+        nop
+
+TextureLightmapInteriorSpanLoop:
+        move    R8, R5
+        move    R9, R6
+        jal     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        move    R12, R0
+        GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect
+
+; Put the repeated coordinate DDA first so its complete loop fits in the
+; lightmap sampler's active cache window.
+TextureBuildCoordinateLoop:
+        with    R5
+        add     R7
+        with    R1
+        add     R9
+        move    R0, R1
+        with    R0
+        sub     R3
+        bmi     TextureBuildCoordinateSReady
+        nop
+        move    R1, R0
+        with    R5
+        add     R4
+TextureBuildCoordinateSReady:
+        with    R6
+        add     R8
+        with    R2
+        add     R13
+        move    R0, R2
+        with    R0
+        sub     R3
+        bmi     TextureBuildCoordinateTReady
+        nop
+        move    R2, R0
+        with    R6
+        add     R11
+TextureBuildCoordinateTReady:
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        movew   (R10), R6
+        inc     R10
+        inc     R10
+        dec     R12
+        bne     TextureBuildCoordinateLoop
+        nop
+TextureBuildCoordinateDone:
+        iwt     R0, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        sm      (TEXTURE_COORD_PTR), R0
+        lm      R11, (TEXTURE_COORD_RETURN)
+        ret
+        nop
+
+; The setup entries below used this 100-byte cold slot. Relocating them to
+; auxiliary code leaves the complete repeated DDA above in the active
+; lightmap cache and lets the equally hot reciprocal mirror share the exact
+; cache tail with the common bilinear lightmap sampler. Miss handling remains
+; in the sampler's former cold slot.
+TextureCoordinateSetupSlotStart:
+TextureDivideQ12Lookup:
+TextureDivideQ12HotMirrorStart:
+        ; R2 is the one-based denominator. Comparing against one past the
+        ; mirror and biasing its base by one entry avoids forming d-1 on every
+        ; hit; only the uncommon ROM fallback needs the zero-based index.
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_ENTRIES+1
+        with    R2
+        cmp     R4
+        bcs     TextureDivideQ12HotMirrorMissCached
+        nop
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_OFFSET-GSU_DIVIDE_Q12_RECIPROCAL_ENTRY_BYTES
+        with    R4
+        add     R2
+        move    R0, #0
+        ramb
+        movew   R12, (R4)
+        inc     R4
+        inc     R4
+        movew   R13, (R4)
+        move    R0, #1
+        ramb
+        jmp     R10
+        nop
+TextureDivideQ12HotMirrorMissCached:
+        bra     TextureDivideQ12HotMirrorMissCold
+        nop
+LightmapSampleBlockBilinearCached:
+        with    R3
+        and     R1
+        move    R5, R9
+        with    R5
+        and     R1
+        lm      R8, (LIGHTMAP_BLOCK_UL)
+        lm      R9, (LIGHTMAP_BLOCK_UR)
+        lm      R6, (LIGHTMAP_BLOCK_LL)
+        lm      R11, (LIGHTMAP_BLOCK_LR)
+        GSU_ABSOLUTE_GOTO LightmapSampleLowerReady
+TextureDivideQ12HotMirrorMissCold:
+        move    R1, R2
+        dec     R1
+        GSU_ABSOLUTE_GOTO TextureDivideQ12HotMirrorMiss
+  .repeat $73 - (* - TextureCoordinateSetupSlotStart)
+        nop
+  .endrepeat
+LightmapPrepareCachedContinue:
+        move    R0, R7
+        with    R0
+        sub     R1
+        bmi     LightmapPrepareEndTInterior
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+LightmapPrepareEndTInterior:
+        move    R9, R7
+        with    R9
+        sub     R13
+        iwt     R0, #$8000              ; Proven interior block.
+        sm      (LIGHTMAP_BLOCK_FAST), R0
+        moves   R8, R8
+        beq     LightmapPrepareSameS
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+LightmapPrepareSameS:
+        moves   R9, R9
+        beq     LightmapPrepareSameT
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+LightmapPrepareSameT:
+
+        lm      R1, (LIGHTMAP_WIDTH)
+        move    R0, R13
+        with    R0
+        umult   R1
+        with    R0
+        add     R12
+        move    R6, R0
+        lm      R10, (LIGHTMAP_ROM_ADDRESS)
+        with    R10
+        add     R6
+        move    R0, #0
+        moveb   R0, (R10)
+        sm      (LIGHTMAP_BLOCK_UL), R0
+        inc     R10
+        move    R0, #0
+        moveb   R0, (R10)
+        sm      (LIGHTMAP_BLOCK_UR), R0
+        dec     R10
+        with    R10
+        add     R1
+        move    R0, #0
+        moveb   R0, (R10)
+        sm      (LIGHTMAP_BLOCK_LL), R0
+        inc     R10
+        move    R0, #0
+        moveb   R0, (R10)
+        sm      (LIGHTMAP_BLOCK_LR), R0
+        GSU_ABSOLUTE_GOTO LightmapClassifyCachedCell
+        ; The lightmapped edge depth hoist consumes 32 bytes of this cold gap
+        ; while keeping RenderConvexFace and every later cache kernel pinned.
+  .repeat 0
+        nop
+  .endrepeat
+LightmapPrepareBlockDone:
+        GSU_ABSOLUTE_GOTO TextureLightmapSelectBlockRoutine
+
+        ; Absorb cold setup/selector size changes while every qualified
+        ; cache-kernel address remains stable.
+        .repeat 0
+        nop
+        .endrepeat
+
+;-------------------------------------------------------------------------------
+; Clip one complete convex BSP face against a wide four-plane view pyramid,
+; project it at Q7 subpixel precision, then emit one exact pixel-center span
+; per covered row. The wide planes bound division without acting as a semantic
+; near plane: |right|/depth and |up|/depth are at most one after clipping.
+GSU_CACHE_KERNEL_BEGIN RenderConvexFace
+        sm      (CONVEX_RETURN), R11
+        iwt     R0, #CONVEX_VIEW_A
+        sm      (CONVEX_OUTPUT_CURSOR), R0
+        move    R0, #0
+        sm      (CONVEX_OUTPUT_COUNT), R0
+        lm      R0, (CONVEX_FACE_VERTICES)
+        sm      (CONVEX_EDGE_COUNT), R0
+ConvexTransformLoop:
+        lm      R10, (CONVEX_INDEX_PTR)
+        movew   R0, (R10)
+        inc     R10
+        inc     R10
+        sm      (CONVEX_INDEX_PTR), R10
+        sm      (CLIP_VERTEX_INDEX), R0
+        jal     ClipTransformVertex
+        nop
+        CONVEX_EMIT_VIEW CLIP_RIGHT, CLIP_UP, CLIP_DEPTH
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        bne     ConvexTransformLoop
+        nop
+
+        iwt     R0, #CONVEX_VIEW_A
+        sm      (CONVEX_INPUT_PTR), R0
+        iwt     R0, #CONVEX_VIEW_B
+        sm      (CONVEX_OUTPUT_PTR), R0
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        sm      (CONVEX_COUNT), R0
+        move    R0, #0
+        sm      (CONVEX_PLANE), R0
+ConvexPlaneLoop:
+        jal     ConvexClipPlane
+        nop
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        move    R1, #3
+        with    R0
+        cmp     R1
+        bcs     ConvexPlaneHasPolygon
+        nop
+        GSU_ABSOLUTE_GOTO ConvexFaceDone
+ConvexPlaneHasPolygon:
+        sm      (CONVEX_COUNT), R0
+        lm      R1, (CONVEX_INPUT_PTR)
+        lm      R2, (CONVEX_OUTPUT_PTR)
+        sm      (CONVEX_INPUT_PTR), R2
+        sm      (CONVEX_OUTPUT_PTR), R1
+        lm      R0, (CONVEX_PLANE)
+        inc     R0
+        sm      (CONVEX_PLANE), R0
+        move    R1, #4
+        with    R0
+        cmp     R1
+        bne     ConvexPlaneLoop
+        nop
+
+        jal     ConvexProjectPolygon
+        nop
+        moves   R0, R0
+        beq     ConvexFaceDone
+        nop
+        jal     ConvexRasterPolygon
+        nop
+ConvexFaceDone:
+        lm      R11, (CONVEX_RETURN)
+        ret
+        nop
+GSU_CACHE_KERNEL_END RenderConvexFace
+
+; Return unsigned magnitude in R0 and 1=inside/0=outside in R1 for the current
+; wide frustum plane. Halving both Q6 terms before the sum keeps the exact
+; signed result in one word; the common scale cancels in edge interpolation.
+ConvexComputeDistance:
+        move    R4, R3
+        with    R4
+        asr
+        lm      R0, (CONVEX_PLANE)
+        move    R5, R0
+        with    R5
+        and     #2
+        beq     ConvexDistanceUseRight
+        nop
+        move    R5, R2
+        bra     ConvexDistanceAxisReady
+        nop
+ConvexDistanceUseRight:
+        move    R5, R1
+ConvexDistanceAxisReady:
+        with    R5
+        asr
+        lm      R0, (CONVEX_PLANE)
+        moves   R0, R0
+        beq     ConvexDistanceAdd
+        nop
+        dec     R0
+        beq     ConvexDistanceSubtract
+        nop
+        dec     R0
+        beq     ConvexDistanceSubtract
+        nop
+ConvexDistanceAdd:
+        with    R4
+        add     R5
+        bra     ConvexDistanceSigned
+        nop
+ConvexDistanceSubtract:
+        with    R4
+        sub     R5
+ConvexDistanceSigned:
+        moves   R4, R4
+        bmi     ConvexDistanceOutside
+        nop
+        move    R0, R4
+        move    R1, #1
+        ret
+        nop
+ConvexDistanceOutside:
+        move    R0, #0
+        with    R0
+        sub     R4
+        move    R1, #0
+        ret
+        nop
+
+GSU_CACHE_KERNEL_BEGIN ConvexClipPlane
+        sm      (CONVEX_CLIP_RETURN), R11
+        move    R0, #0
+        sm      (CONVEX_OUTPUT_COUNT), R0
+        lm      R0, (CONVEX_OUTPUT_PTR)
+        sm      (CONVEX_OUTPUT_CURSOR), R0
+
+        ; Seed the closed edge walk with the last input vertex.
+        lm      R0, (CONVEX_COUNT)
+        dec     R0
+        move    R1, R0
+        with    R1
+        add     R1                       ; 2n
+        move    R2, R1
+        with    R2
+        add     R2                       ; 4n
+        with    R1
+        add     R2                       ; 6n
+        lm      R10, (CONVEX_INPUT_PTR)
+        with    R10
+        add     R1
+        CONVEX_LOAD_VIEW R10, CONVEX_PREV_RIGHT, CONVEX_PREV_UP, CONVEX_PREV_DEPTH
+        lm      R1, (CONVEX_PREV_RIGHT)
+        lm      R2, (CONVEX_PREV_UP)
+        lm      R3, (CONVEX_PREV_DEPTH)
+        jal     ConvexComputeDistance
+        nop
+        sm      (CONVEX_PREV_MAG), R0
+        sm      (CONVEX_PREV_INSIDE), R1
+
+        lm      R0, (CONVEX_INPUT_PTR)
+        sm      (CONVEX_CURRENT_PTR), R0
+        lm      R0, (CONVEX_COUNT)
+        sm      (CONVEX_EDGE_COUNT), R0
+ConvexClipEdgeLoop:
+        lm      R10, (CONVEX_CURRENT_PTR)
+        CONVEX_LOAD_VIEW R10, CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH
+        inc     R10
+        inc     R10
+        sm      (CONVEX_CURRENT_PTR), R10
+        lm      R1, (CONVEX_CUR_RIGHT)
+        lm      R2, (CONVEX_CUR_UP)
+        lm      R3, (CONVEX_CUR_DEPTH)
+        jal     ConvexComputeDistance
+        nop
+        sm      (CONVEX_CUR_MAG), R0
+        sm      (CONVEX_CUR_INSIDE), R1
+
+        lm      R0, (CONVEX_PREV_INSIDE)
+        lm      R1, (CONVEX_CUR_INSIDE)
+        with    R0
+        xor     R1
+        bne     :+
+        nop
+        iwt     R13, #ConvexClipNoTransition
+        jmp     R13
+        nop
+:
+        moves   R1, R1
+        beq     ConvexClipPreviousInside
+        nop
+        BSP_CLIP_COPY_VIEW CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, CONVEX_IN_RIGHT, CONVEX_IN_UP, CONVEX_IN_DEPTH
+        BSP_CLIP_COPY_VIEW CONVEX_PREV_RIGHT, CONVEX_PREV_UP, CONVEX_PREV_DEPTH, CONVEX_OUT_RIGHT, CONVEX_OUT_UP, CONVEX_OUT_DEPTH
+        lm      R0, (CONVEX_CUR_MAG)
+        sm      (CONVEX_INSIDE_MAG), R0
+        lm      R0, (CONVEX_PREV_MAG)
+        sm      (CONVEX_OUTSIDE_MAG), R0
+        bra     ConvexClipInterpolate
+        nop
+ConvexClipPreviousInside:
+        BSP_CLIP_COPY_VIEW CONVEX_PREV_RIGHT, CONVEX_PREV_UP, CONVEX_PREV_DEPTH, CONVEX_IN_RIGHT, CONVEX_IN_UP, CONVEX_IN_DEPTH
+        BSP_CLIP_COPY_VIEW CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, CONVEX_OUT_RIGHT, CONVEX_OUT_UP, CONVEX_OUT_DEPTH
+        lm      R0, (CONVEX_PREV_MAG)
+        sm      (CONVEX_INSIDE_MAG), R0
+        lm      R0, (CONVEX_CUR_MAG)
+        sm      (CONVEX_OUTSIDE_MAG), R0
+ConvexClipInterpolate:
+        jal     ConvexInterpolateEdge
+        nop
+        CONVEX_EMIT_VIEW CONVEX_INTER_RIGHT, CONVEX_INTER_UP, CONVEX_INTER_DEPTH
+ConvexClipNoTransition:
+        lm      R0, (CONVEX_CUR_INSIDE)
+        moves   R0, R0
+        beq     ConvexClipAdvance
+        nop
+        CONVEX_EMIT_VIEW CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH
+ConvexClipAdvance:
+        BSP_CLIP_COPY_VIEW CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, CONVEX_PREV_RIGHT, CONVEX_PREV_UP, CONVEX_PREV_DEPTH
+        lm      R0, (CONVEX_CUR_MAG)
+        sm      (CONVEX_PREV_MAG), R0
+        lm      R0, (CONVEX_CUR_INSIDE)
+        sm      (CONVEX_PREV_INSIDE), R0
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        beq     :+
+        nop
+        iwt     R13, #ConvexClipEdgeLoop
+        jmp     R13
+        nop
+:
+        lm      R11, (CONVEX_CLIP_RETURN)
+        ret
+        nop
+GSU_CACHE_KERNEL_END ConvexClipPlane
+
+GSU_CACHE_KERNEL_BEGIN ConvexInterpolateEdge
+        sm      (CONVEX_INTERPOLATE_RETURN), R11
+        lm      R1, (CONVEX_INSIDE_MAG)
+        lm      R2, (CONVEX_OUTSIDE_MAG)
+ConvexInterpolateScale:
+        move    R0, R1
+        with    R0
+        add     R2
+        bcs     ConvexInterpolateScaleDown
+        nop
+        bpl     ConvexInterpolateDivideReady
+        nop
+ConvexInterpolateScaleDown:
+        with    R1
+        lsr
+        with    R2
+        lsr
+        bne     ConvexInterpolateScale
+        nop
+        move    R2, #1
+        bra     ConvexInterpolateScale
+        nop
+ConvexInterpolateDivideReady:
+        move    R0, R1                   ; Remainder/numerator.
+        move    R1, R0
+        with    R1
+        add     R2                       ; Positive denominator.
+        move    R3, #0
+        move    R12, #12
+        iwt     R13, #ConvexInterpolateDivideLoop
+ConvexInterpolateDivideLoop:
+        with    R0
+        add     R0
+        with    R3
+        add     R3
+        move    R2, R0
+        with    R2
+        sub     R1
+        bcc     ConvexInterpolateDivideNext
+        nop
+        move    R0, R2
+        inc     R3
+ConvexInterpolateDivideNext:
+        loop
+        nop
+
+        iwt     R1, #2048
+        move    R0, R3
+        with    R0
+        cmp     R1
+        bcc     ConvexInterpolateInsideBase
+        nop
+        iwt     R0, #4096
+        with    R0
+        sub     R3
+        sm      (CONVEX_FACTOR), R0
+        BSP_CLIP_COPY_VIEW CONVEX_OUT_RIGHT, CONVEX_OUT_UP, CONVEX_OUT_DEPTH, CONVEX_BASE_RIGHT, CONVEX_BASE_UP, CONVEX_BASE_DEPTH
+        lm      R0, (CONVEX_IN_RIGHT)
+        lm      R1, (CONVEX_OUT_RIGHT)
+        with    R0
+        sub     R1
+        sm      (CONVEX_DELTA_RIGHT), R0
+        lm      R0, (CONVEX_IN_UP)
+        lm      R1, (CONVEX_OUT_UP)
+        with    R0
+        sub     R1
+        sm      (CONVEX_DELTA_UP), R0
+        lm      R0, (CONVEX_IN_DEPTH)
+        lm      R1, (CONVEX_OUT_DEPTH)
+        with    R0
+        sub     R1
+        sm      (CONVEX_DELTA_DEPTH), R0
+        bra     ConvexInterpolateComponents
+        nop
+ConvexInterpolateInsideBase:
+        sm      (CONVEX_FACTOR), R3
+        BSP_CLIP_COPY_VIEW CONVEX_IN_RIGHT, CONVEX_IN_UP, CONVEX_IN_DEPTH, CONVEX_BASE_RIGHT, CONVEX_BASE_UP, CONVEX_BASE_DEPTH
+        lm      R0, (CONVEX_OUT_RIGHT)
+        lm      R1, (CONVEX_IN_RIGHT)
+        with    R0
+        sub     R1
+        sm      (CONVEX_DELTA_RIGHT), R0
+        lm      R0, (CONVEX_OUT_UP)
+        lm      R1, (CONVEX_IN_UP)
+        with    R0
+        sub     R1
+        sm      (CONVEX_DELTA_UP), R0
+        lm      R0, (CONVEX_OUT_DEPTH)
+        lm      R1, (CONVEX_IN_DEPTH)
+        with    R0
+        sub     R1
+        sm      (CONVEX_DELTA_DEPTH), R0
+ConvexInterpolateComponents:
+        lm      R5, (CONVEX_BASE_RIGHT)
+        lm      R7, (CONVEX_DELTA_RIGHT)
+        lm      R8, (CONVEX_FACTOR)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R2, R7, R8
+        with    R5
+        add     R2
+        sm      (CONVEX_INTER_RIGHT), R5
+        lm      R5, (CONVEX_BASE_UP)
+        lm      R7, (CONVEX_DELTA_UP)
+        lm      R8, (CONVEX_FACTOR)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R2, R7, R8
+        with    R5
+        add     R2
+        sm      (CONVEX_INTER_UP), R5
+        lm      R5, (CONVEX_BASE_DEPTH)
+        lm      R7, (CONVEX_DELTA_DEPTH)
+        lm      R8, (CONVEX_FACTOR)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R2, R7, R8
+        with    R5
+        add     R2
+        sm      (CONVEX_INTER_DEPTH), R5
+        lm      R11, (CONVEX_INTERPOLATE_RETURN)
+        ret
+        nop
+        ; Keep the next pinned cache kernel stable after specializing the three
+        ; Q12 multiplications above. This padding is unreachable after RET.
+        .repeat 0
+        nop
+        .endrepeat
+GSU_CACHE_KERNEL_END ConvexInterpolateEdge
+
+.include "quake/VertexTransform.sgs"
+
+GSU_CACHE_KERNEL_BEGIN ConvexProjectPolygon
+        sm      (CONVEX_PROJECT_RETURN), R11
+        iwt     R0, #24576
+        sm      (CONVEX_MIN_Y), R0
+        iwt     R0, #-8192
+        sm      (CONVEX_MAX_Y), R0
+        lm      R0, (CONVEX_INPUT_PTR)
+        sm      (CONVEX_CURRENT_PTR), R0
+        iwt     R0, #CONVEX_SCREEN
+        sm      (CONVEX_SCREEN_PTR), R0
+        lm      R0, (CONVEX_COUNT)
+        sm      (CONVEX_SCREEN_COUNT), R0
+        sm      (CONVEX_EDGE_COUNT), R0
+ConvexProjectLoop:
+        lm      R10, (CONVEX_CURRENT_PTR)
+        CONVEX_LOAD_VIEW R10, CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH
+        inc     R10
+        inc     R10
+        sm      (CONVEX_CURRENT_PTR), R10
+
+        ; Both screen components share this vertex's exact depth reciprocal.
+        lm      R2, (CONVEX_CUR_DEPTH)
+        jal     TexturePrepareDivideQ12
+        nop
+        lm      R1, (CONVEX_CUR_RIGHT)
+        lm      R2, (CONVEX_CUR_DEPTH)
+        jal     ConvexProjectComponent
+        nop
+        iwt     R1, #8192               ; 64 logical pixels in Q7.
+        with    R0
+        add     R1
+        lm      R10, (CONVEX_SCREEN_PTR)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+
+        lm      R1, (CONVEX_CUR_UP)
+        lm      R2, (CONVEX_CUR_DEPTH)
+        jal     ConvexProjectComponent
+        nop
+        iwt     R1, #7168               ; 56 logical pixels in Q7.
+        with    R1
+        sub     R0
+        movew   (R10), R1
+
+        lm      R2, (CONVEX_MIN_Y)
+        move    R3, R1
+        with    R3
+        sub     R2
+        bpl     ConvexProjectMinReady
+        nop
+        sm      (CONVEX_MIN_Y), R1
+        move    R0, R10
+        dec     R0
+        dec     R0
+        sm      (CONVEX_TOP_PTR), R0
+ConvexProjectMinReady:
+        lm      R2, (CONVEX_MAX_Y)
+        move    R3, R2
+        with    R3
+        sub     R1
+        bpl     ConvexProjectMaxReady
+        nop
+        sm      (CONVEX_MAX_Y), R1
+ConvexProjectMaxReady:
+        inc     R10
+        inc     R10
+        sm      (CONVEX_SCREEN_PTR), R10
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        beq     ConvexProjectDone
+        nop
+        GSU_ABSOLUTE_GOTO ConvexProjectLoop
+ConvexProjectDone:
+        lm      R0, (CONVEX_SCREEN_PTR)
+        sm      (CONVEX_SCREEN_END_PTR), R0
+        lm      R0, (CONVEX_TOP_PTR)
+        sm      (CONVEX_FORWARD_PTR), R0
+        sm      (CONVEX_REVERSE_PTR), R0
+
+        ; Pixel centers cover minY <= y*128+64 < maxY. Compute that bounded
+        ; logical row interval once; CONVEX_TOP_PTR is free to hold lastY.
+        lm      R0, (CONVEX_MIN_Y)
+        iwt     R1, #63
+        with    R0
+        add     R1
+  .repeat 7
+        with    R0
+        asr
+  .endrepeat
+        moves   R0, R0
+        bpl     ConvexRasterFirstYPositive
+        nop
+        move    R0, #0
+ConvexRasterFirstYPositive:
+        move    R1, #111
+        with    R1
+        sub     R0
+        bpl     ConvexRasterFirstYReady
+        nop
+        GSU_ABSOLUTE_GOTO ConvexProjectRejected
+ConvexRasterFirstYReady:
+        sm      (CONVEX_RASTER_Y), R0
+
+        lm      R0, (CONVEX_MAX_Y)
+        iwt     R1, #65
+        with    R0
+        sub     R1
+  .repeat 7
+        with    R0
+        asr
+  .endrepeat
+        moves   R0, R0
+        bpl     ConvexRasterLastYPositive
+        nop
+        GSU_ABSOLUTE_GOTO ConvexProjectRejected
+ConvexRasterLastYPositive:
+        move    R1, #111
+        move    R2, R1
+        with    R2
+        sub     R0
+        bpl     ConvexRasterLastYReady
+        nop
+        move    R0, R1
+ConvexRasterLastYReady:
+        lm      R1, (CONVEX_RASTER_Y)
+        move    R2, R0
+        with    R2
+        sub     R1
+        bpl     ConvexRasterRowsReady
+        nop
+        GSU_ABSOLUTE_GOTO ConvexProjectRejected
+ConvexRasterRowsReady:
+        sm      (CONVEX_TOP_PTR), R0
+        move    R0, #1
+        bra     ConvexProjectReturn
+        nop
+ConvexProjectRejected:
+        move    R0, #0
+ConvexProjectReturn:
+        lm      R11, (CONVEX_PROJECT_RETURN)
+        ret
+        nop
+GSU_CACHE_KERNEL_END ConvexProjectPolygon
+
+; R1=signed Q6 component, R2=positive Q6 depth. Return signed Q7 screen
+; delta in R0. Eleven quotient bits make focal*Q7 exactly quotient*6.
+ConvexProjectComponent:
+        move    R0, #0
+        sm      (CONVEX_CUR_INSIDE), R0
+        moves   R1, R1
+        bpl     ConvexProjectMagnitudeReady
+        nop
+        move    R0, #0
+        with    R0
+        sub     R1
+        move    R1, R0
+        move    R0, #1
+        sm      (CONVEX_CUR_INSIDE), R0
+ConvexProjectMagnitudeReady:
+        moves   R2, R2
+        bpl     ConvexProjectDepthPositive
+        nop
+        move    R2, #1
+        bra     ConvexProjectDepthReady
+        nop
+ConvexProjectDepthPositive:
+        bne     ConvexProjectDepthReady
+        nop
+        move    R2, #1
+ConvexProjectDepthReady:
+        move    R0, R1
+        with    R0
+        cmp     R2
+        bcc     ConvexProjectDivide
+        nop
+        iwt     R3, #2048
+        bra     ConvexProjectScale
+        nop
+ConvexProjectDivide:
+        move    R0, R1
+        ; The shared corrected reciprocal returns floor(component*4096/depth).
+        ; Halving that exact Q12 quotient is identical to the former eleven-bit
+        ; restoring division's floor(component*2048/depth).
+        move    R7, R11
+        move    R5, R10
+        jal     TextureDivideQ12Prepared
+        nop
+        move    R10, R5
+        move    R11, R7
+        with    R3
+        lsr
+ConvexProjectScale:
+        move    R0, R3
+        with    R0
+        add     R0                       ; 2q
+        move    R1, R3
+        with    R1
+        add     R1
+        with    R1
+        add     R1                       ; 4q
+        with    R0
+        add     R1                       ; 6q
+        lm      R1, (CONVEX_CUR_INSIDE)
+        moves   R1, R1
+        beq     ConvexProjectComponentDone
+        nop
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+ConvexProjectComponentDone:
+        ret
+        nop
+
+GSU_CACHE_KERNEL_BEGIN ConvexRasterPolygon
+        sm      (CONVEX_RASTER_RETURN), R11
+ConvexRasterRowLoop:
+        lm      R0, (CONVEX_RASTER_Y)
+  .repeat 7
+        with    R0
+        add     R0
+  .endrepeat
+        iwt     R1, #64
+        with    R0
+        add     R1
+        sm      (CONVEX_SAMPLE_Y), R0
+
+        ; Advance each boundary from the top vertex only when its next vertex
+        ; no longer lies above the half-open row sample. The edge-count guard
+        ; makes malformed input terminate rather than spin inside a frame.
+        lm      R10, (CONVEX_FORWARD_PTR)
+        lm      R12, (CONVEX_SCREEN_COUNT)
+ConvexRasterForwardAdvance:
+        move    R9, R10
+        with    R9
+        add     #4
+        lm      R0, (CONVEX_SCREEN_END_PTR)
+        with    R9
+        cmp     R0
+        bne     ConvexRasterForwardNextReady
+        nop
+        iwt     R9, #CONVEX_SCREEN
+ConvexRasterForwardNextReady:
+        move    R8, R9
+        inc     R8
+        inc     R8
+        movew   R1, (R8)
+        lm      R0, (CONVEX_SAMPLE_Y)
+        move    R2, R1
+        with    R2
+        sub     R0
+        moves   R2, R2
+        bmi     ConvexRasterForwardStep
+        nop
+        beq     ConvexRasterForwardStep
+        nop
+        sm      (CONVEX_FORWARD_PTR), R10
+        movew   R4, (R10)
+        inc     R10
+        inc     R10
+        movew   R5, (R10)
+        movew   R6, (R9)
+        move    R10, R9
+        inc     R10
+        inc     R10
+        movew   R7, (R10)
+        jal     ConvexIntersectActiveEdge
+        nop
+        sm      (CONVEX_MIN_X), R0
+        bra     ConvexRasterReverseBegin
+        nop
+ConvexRasterForwardStep:
+        move    R10, R9
+        dec     R12
+        bne     ConvexRasterForwardAdvance
+        nop
+        GSU_ABSOLUTE_GOTO ConvexRasterDone
+
+ConvexRasterReverseBegin:
+        lm      R10, (CONVEX_REVERSE_PTR)
+        lm      R12, (CONVEX_SCREEN_COUNT)
+ConvexRasterReverseAdvance:
+        iwt     R0, #CONVEX_SCREEN
+        with    R10
+        cmp     R0
+        bne     ConvexRasterReverseNoWrap
+        nop
+        lm      R9, (CONVEX_SCREEN_END_PTR)
+        with    R9
+        sub     #4
+        bra     ConvexRasterReverseNextReady
+        nop
+ConvexRasterReverseNoWrap:
+        move    R9, R10
+        with    R9
+        sub     #4
+ConvexRasterReverseNextReady:
+        move    R8, R9
+        inc     R8
+        inc     R8
+        movew   R1, (R8)
+        lm      R0, (CONVEX_SAMPLE_Y)
+        move    R2, R1
+        with    R2
+        sub     R0
+        moves   R2, R2
+        bpl     ConvexRasterReverseNonNegative
+        nop
+ConvexRasterReverseStep:
+        move    R10, R9
+        dec     R12
+        bne     ConvexRasterReverseContinue
+        nop
+        GSU_ABSOLUTE_GOTO ConvexRasterDone
+ConvexRasterReverseContinue:
+        GSU_ABSOLUTE_GOTO ConvexRasterReverseAdvance
+ConvexRasterReverseNonNegative:
+        beq     ConvexRasterReverseStep
+        nop
+        sm      (CONVEX_REVERSE_PTR), R10
+        movew   R4, (R10)
+        inc     R10
+        inc     R10
+        movew   R5, (R10)
+        movew   R6, (R9)
+        move    R10, R9
+        inc     R10
+        inc     R10
+        movew   R7, (R10)
+        jal     ConvexIntersectActiveEdge
+        nop
+
+        lm      R1, (CONVEX_MIN_X)
+        move    R2, R0
+        with    R2
+        sub     R1
+        bpl     ConvexRasterXOrderReady
+        nop
+        sm      (CONVEX_MIN_X), R0
+        sm      (CONVEX_MAX_X), R1
+        bra     ConvexRasterXBoundsReady
+        nop
+ConvexRasterXOrderReady:
+        sm      (CONVEX_MAX_X), R0
+ConvexRasterXBoundsReady:
+        lm      R1, (CONVEX_MIN_X)
+        iwt     R0, #62
+        with    R1
+        add     R0                     ; ceil((min - 65) / 128)
+  .repeat 7
+        with    R1
+        asr
+  .endrepeat
+        moves   R1, R1
+        bpl     ConvexRasterFirstReady
+        nop
+        move    R1, #0
+ConvexRasterFirstReady:
+        lm      R3, (CONVEX_MAX_X)
+        iwt     R0, #63
+        with    R3
+        sub     R0                     ; floor((max - 63) / 128)
+  .repeat 7
+        with    R3
+        asr
+  .endrepeat
+        move    R0, #127
+        move    R4, R0
+        with    R4
+        sub     R3
+        bpl     ConvexRasterLastReady
+        nop
+        move    R3, R0
+ConvexRasterLastReady:
+        move    R0, R3
+        with    R0
+        sub     R1
+        bmi     ConvexRasterNextRow
+        nop
+        lm      R2, (CONVEX_RASTER_Y)
+        jal     GSU_DrawHLine
+        nop
+ConvexRasterNextRow:
+        lm      R0, (CONVEX_RASTER_Y)
+        lm      R1, (CONVEX_TOP_PTR)
+        with    R0
+        cmp     R1
+        beq     ConvexRasterDone
+        nop
+        inc     R0
+        sm      (CONVEX_RASTER_Y), R0
+        GSU_ABSOLUTE_GOTO ConvexRasterRowLoop
+ConvexRasterDone:
+        lm      R11, (CONVEX_RASTER_RETURN)
+        ret
+        nop
+
+; R4:R5 is the active upper endpoint and R6:R7 the lower endpoint. The chain
+; walk already enforces y0 <= sample < y1, so only the exact old Q10
+; interpolation remains in the hot path.
+ConvexIntersectActiveEdge:
+        lm      R0, (CONVEX_SAMPLE_Y)
+        move    R1, R0
+        with    R1
+        sub     R5
+        sm      (CONVEX_DIV_NUM), R1
+        move    R0, R7
+        with    R0
+        sub     R5
+        sm      (CONVEX_DIV_DEN), R0
+        sm      (CONVEX_BASE_RIGHT), R4
+        move    R0, R6
+        with    R0
+        sub     R4
+        sm      (CONVEX_DELTA_RIGHT), R0
+
+        lm      R0, (CONVEX_DIV_NUM)
+        lm      R2, (CONVEX_DIV_DEN)
+        move    R3, #0
+        move    R12, #10
+        iwt     R13, #ConvexIntersectDivideLoop
+ConvexIntersectDivideLoop:
+        with    R0
+        add     R0
+        with    R3
+        add     R3
+        move    R4, R0
+        with    R4
+        sub     R2
+        bcc     ConvexIntersectDivideNext
+        nop
+        move    R0, R4
+        inc     R3
+ConvexIntersectDivideNext:
+        loop
+        nop
+        lm      R5, (CONVEX_BASE_RIGHT)
+        lm      R7, (CONVEX_DELTA_RIGHT)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R3, 10
+        with    R5
+        add     R0
+        move    R0, R5
+        move    R1, #1
+        ret
+        nop
+GSU_CACHE_KERNEL_END ConvexRasterPolygon
+
+; Warm the stable horizontal-span cache window once per frame.
+GSU_CACHE_KERNEL_BEGIN RasterHotKernel
+        ret
+        nop
+
+GSU_DrawHLine:
+        moves   R2, R2
+        bmi     HLineDone
+        nop
+        move    R0, #111
+        with    R0
+        sub     R2
+        bmi     HLineDone
+        nop
+
+        move    R0, R3
+        with    R0
+        sub     R1
+        bpl     HLineForward
+        nop
+        move    R0, R1
+        move    R1, R3
+        move    R3, R0
+HLineForward:
+        ; Keep the projected edge endpoints exact. Coverage repairs belong in
+        ; packet/shared-edge ownership, never in unconditional span padding.
+        moves   R3, R3
+        bmi     HLineDone
+        nop
+        move    R0, #127
+        with    R0
+        sub     R1
+        bmi     HLineDone
+        nop
+        moves   R1, R1
+        bpl     HLineLeftReady
+        nop
+        move    R1, #0
+HLineLeftReady:
+        move    R0, #127
+        with    R0
+        sub     R3
+        bpl     HLineRightReady
+        nop
+        move    R3, #127
+HLineRightReady:
+        move    R12, R3
+        with    R12
+        sub     R1
+        inc     R12
+        iwt     R13, #HLineLoop
+HLineLoop:
+        plot
+        loop
+        nop
+HLineDone:
+        ret
+        nop
+GSU_CACHE_KERNEL_END RasterHotKernel
+
+;-------------------------------------------------------------------------------
+; Expand each logical 8x8 4bpp tile into four physical tiles. Lookup tables
+; duplicate every source bit horizontally; duplicate stores handle vertical
+; doubling. Both SNES plane pairs and all 28,672 destination bytes are written.
+GSU_CACHE_KERNEL_BEGIN ExpandFrame
+        sm      (EXPAND_RETURN), R11
+        iwt     R0, #FRAMEBUFFER
+        sm      (SOURCE_POINTER), R0
+        iwt     R0, #OUTPUT
+        sm      (ROW_DESTINATION), R0
+        move    R0, #14
+        sm      (ROWS_LEFT), R0
+
+ExpandRowLoop:
+        lm      R0, (ROW_DESTINATION)
+        sm      (TILE_DESTINATION), R0
+        move    R0, #16
+        sm      (COLUMNS_LEFT), R0
+
+ExpandColumnLoop:
+        lm      R7, (SOURCE_POINTER)
+        lm      R8, (TILE_DESTINATION)
+        move    R9, R8
+        move    R0, #32
+        with    R9
+        add     R0
+        jal     ExpandFourRows
+        nop
+
+        lm      R8, (TILE_DESTINATION)
+        iwt     R0, #1024
+        with    R8
+        add     R0
+        move    R9, R8
+        move    R0, #32
+        with    R9
+        add     R0
+        jal     ExpandFourRows
+        nop
+
+        move    R0, #16
+        with    R7
+        add     R0
+        sm      (SOURCE_POINTER), R7
+        lm      R0, (TILE_DESTINATION)
+        move    R1, #64
+        with    R0
+        add     R1
+        sm      (TILE_DESTINATION), R0
+        lm      R0, (COLUMNS_LEFT)
+        dec     R0
+        sm      (COLUMNS_LEFT), R0
+        bne     ExpandColumnLoop
+        nop
+
+        lm      R0, (ROW_DESTINATION)
+        iwt     R1, #2048
+        with    R0
+        add     R1
+        sm      (ROW_DESTINATION), R0
+        lm      R0, (ROWS_LEFT)
+        dec     R0
+        sm      (ROWS_LEFT), R0
+        bne     ExpandRowLoop
+        nop
+
+        lm      R11, (EXPAND_RETURN)
+        ret
+        nop
+
+; R7=source low-plane rows, R8=left output tile, R9=right output tile.
+; Each call expands four rows from both the 0/1 and 2/3 plane pairs. R7 advances
+; by eight bytes; the caller skips the first tile's remaining high-plane bytes
+; after the second call.
+ExpandFourRows:
+        move    R6, R7
+        move    R0, #16
+        with    R6
+        add     R0
+
+        move    R12, #4
+        iwt     R13, #ExpandLowPlaneRowsLoop
+ExpandLowPlaneRowsLoop:
+        move    R4, #0
+        moveb   R4, (R7)
+        inc     R7
+        move    R5, #0
+        moveb   R5, (R7)
+        inc     R7
+
+        iwt     R10, #GSU_EXPAND_LEFT_OFFSET
+        with    R10
+        add     R4
+        move    R0, #0
+        moveb   R0, (R10)
+        iwt     R10, #GSU_EXPAND_RIGHT_OFFSET
+        with    R10
+        add     R4
+        move    R2, #0
+        moveb   R2, (R10)
+
+        iwt     R10, #GSU_EXPAND_LEFT_OFFSET
+        with    R10
+        add     R5
+        move    R1, #0
+        moveb   R1, (R10)
+        iwt     R10, #GSU_EXPAND_RIGHT_OFFSET
+        with    R10
+        add     R5
+        move    R3, #0
+        moveb   R3, (R10)
+
+        moveb   (R8), R0
+        inc     R8
+        moveb   (R8), R1
+        inc     R8
+        moveb   (R8), R0
+        inc     R8
+        moveb   (R8), R1
+        inc     R8
+
+        moveb   (R9), R2
+        inc     R9
+        moveb   (R9), R3
+        inc     R9
+        moveb   (R9), R2
+        inc     R9
+        moveb   (R9), R3
+        inc     R9
+        loop
+        nop
+
+        move    R12, #4
+        iwt     R13, #ExpandHighPlaneRowsLoop
+ExpandHighPlaneRowsLoop:
+        move    R4, #0
+        moveb   R4, (R6)
+        inc     R6
+        move    R5, #0
+        moveb   R5, (R6)
+        inc     R6
+
+        iwt     R10, #GSU_EXPAND_LEFT_OFFSET
+        with    R10
+        add     R4
+        move    R0, #0
+        moveb   R0, (R10)
+        iwt     R10, #GSU_EXPAND_RIGHT_OFFSET
+        with    R10
+        add     R4
+        move    R2, #0
+        moveb   R2, (R10)
+
+        iwt     R10, #GSU_EXPAND_LEFT_OFFSET
+        with    R10
+        add     R5
+        move    R1, #0
+        moveb   R1, (R10)
+        iwt     R10, #GSU_EXPAND_RIGHT_OFFSET
+        with    R10
+        add     R5
+        move    R3, #0
+        moveb   R3, (R10)
+
+        moveb   (R8), R0
+        inc     R8
+        moveb   (R8), R1
+        inc     R8
+        moveb   (R8), R0
+        inc     R8
+        moveb   (R8), R1
+        inc     R8
+
+        moveb   (R9), R2
+        inc     R9
+        moveb   (R9), R3
+        inc     R9
+        moveb   (R9), R2
+        inc     R9
+        moveb   (R9), R3
+        inc     R9
+        loop
+        nop
+
+        ret
+        nop
+GSU_CACHE_KERNEL_END ExpandFrame
+
+; These exact restoring divides sit after the pinned cache kernels so unrolling
+; removes loop control from the texture hot path without perturbing cache
+; placement. R0/R2 are the Q12 numerator/denominator and return the quotient in
+; R3; R0/R1 are the unsigned numerator/denominator and return quotient/remainder
+; in R2/R3.
+.macro TEXTURE_DIVIDE_Q12_STEP
+        .local Next
+        with    R0
+        add     R0
+        with    R3
+        add     R3
+        with    R0
+        cmp     R2
+        bcc     Next
+        nop
+        with    R0
+        sub     R2
+        inc     R3
+Next:
+.endmacro
+
+; The table stores ceil(2^27/d) as two base-2^15 limbs. Prepared span
+; divisions and ordinary depth divisions share the lookup without sharing
+; reciprocals: the latter denominator varies for every perspective sample.
+TexturePrepareDivideQ12:
+        iwt     R10, #TexturePrepareDivideQ12Ready
+        GSU_ABSOLUTE_GOTO TextureDivideQ12Lookup
+
+TextureDivideQ12:
+        move    R8, R0                  ; numerator
+        move    R9, R2                  ; denominator
+        iwt     R10, #TextureDivideQ12LoadedCached
+        GSU_ABSOLUTE_GOTO TextureDivideQ12Lookup
+  .repeat $32 - (* - TexturePrepareDivideQ12)
+        nop
+  .endrepeat
+TextureDivideQ12HotMirrorMiss:
+        move    R0, #GSU_DIVIDE_Q12_RECIPROCAL_FIRST_ROM_BANK
+        iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ENTRIES_PER_BANK
+TextureDivideQ12SelectBank:
+        with    R1
+        cmp     R4
+        bcc     TextureDivideQ12BankReady
+        nop
+        with    R1
+        sub     R4
+        inc     R0
+        bra     TextureDivideQ12SelectBank
+        nop
+TextureDivideQ12BankReady:
+        romb
+        move    R2, R1
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS
+        with    R4
+        add     R2
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R12           ; high base-2^15 limb
+        BSP_ROM_LOAD_WORD R13           ; low base-2^15 limb
+        jmp     R10
+        nop
+
+TexturePrepareDivideQ12Ready:
+        sm      (TEXTURE_RECIPROCAL_HIGH), R12
+        sm      (TEXTURE_RECIPROCAL_LOW), R13
+        ret
+        nop
+
+        ; The prepared route now occupies a cold gap immediately before the
+        ; cached multiply prefix. Preserve the correction and every later
+        ; cache-kernel address after removing its former 15-byte trampoline.
+  .repeat 18
+        nop
+  .endrepeat
+        ; The exact correction now runs beside the cached reciprocal multiply.
+        ; Preserve TextureDivideUnsigned and every later cache-kernel address.
+  .repeat 22
+        nop
+  .endrepeat
+
+.macro TEXTURE_DIVIDE_UNSIGNED_STEP
+        .local Next
+        with    R0
+        add     R0
+        from    R3
+        to      R3
+        rol
+        with    R2
+        add     R2
+        move    R4, R3
+        with    R4
+        sub     R1
+        bcc     Next
+        nop
+        move    R3, R4
+        inc     R2
+Next:
+.endmacro
+
+TextureDivideUnsigned:
+        move    R2, #0
+        move    R3, #0
+  .repeat 16
+        TEXTURE_DIVIDE_UNSIGNED_STEP
+  .endrepeat
+        ret
+        nop
+
+; Technique 4's projective blocks are at most eight pixels wide. Handle the
+; common power-of-two widths directly and tail-call the exact general divider
+; for the short 3/5/6/7-pixel remainder blocks.
+TextureDivideBlockUnsigned:
+        move    R4, R1
+        with    R4
+        sub     #8
+        beq     TextureDivideBlock8
+        nop
+        move    R4, R1
+        with    R4
+        sub     #4
+        beq     TextureDivideBlock4
+        nop
+        move    R4, R1
+        with    R4
+        sub     #2
+        beq     TextureDivideBlock2
+        nop
+        move    R4, R1
+        dec     R4
+        beq     TextureDivideBlock1
+        nop
+        move    R4, R1
+        with    R4
+        sub     #3
+        beq     TextureDivideBlock3
+        nop
+        move    R4, R1
+        with    R4
+        sub     #5
+        beq     TextureDivideBlock5
+        nop
+        move    R4, R1
+        with    R4
+        sub     #6
+        beq     TextureDivideBlock6
+        nop
+        move    R4, R1
+        with    R4
+        sub     #7
+        beq     TextureDivideBlock7
+        nop
+        iwt     R13, #TextureDivideUnsigned
+        jmp     R13
+        nop
+TextureDivideBlock8:
+        move    R3, R0
+        with    R3
+        and     #7
+  .repeat 3
+        with    R0
+        lsr
+  .endrepeat
+        move    R2, R0
+        ret
+        nop
+TextureDivideBlock4:
+        move    R3, R0
+        with    R3
+        and     #3
+  .repeat 2
+        with    R0
+        lsr
+  .endrepeat
+        move    R2, R0
+        ret
+        nop
+TextureDivideBlock2:
+        move    R3, R0
+        with    R3
+        and     #1
+        with    R0
+        lsr
+        move    R2, R0
+        ret
+        nop
+TextureDivideBlock1:
+        move    R2, R0
+        move    R3, #0
+        ret
+        nop
+TextureDivideBlock3:
+        iwt     R6, #10923              ; ceil(32768 / 3)
+        bra     TextureDivideBlockReciprocal
+        nop
+TextureDivideBlock5:
+        iwt     R6, #6554               ; ceil(32768 / 5)
+        bra     TextureDivideBlockReciprocal
+        nop
+TextureDivideBlock6:
+        iwt     R6, #5462               ; ceil(32768 / 6)
+        bra     TextureDivideBlockReciprocal
+        nop
+TextureDivideBlock7:
+        iwt     R6, #4682               ; ceil(32768 / 7)
+TextureDivideBlockReciprocal:
+        ; The unsigned magnitude is at most $8000. Reduce that sole
+        ; sign-bit case by one divisor and restore one quotient afterward.
+        move    R12, #0
+        moves   R0, R0
+        bpl     TextureDivideBlockMagnitudeReady
+        nop
+        with    R0
+        sub     R1
+        move    R12, #1
+TextureDivideBlockMagnitudeReady:
+        move    R5, R0
+        with    R0
+        lmult
+        ; floor(product / 32768) is the high word doubled plus low bit 15.
+        with    R4
+        add     R4
+        with    R0
+        adc     R0
+        move    R2, R0
+        move    R6, R1
+        with    R0
+        lmult
+        move    R3, R5
+        with    R3
+        sub     R4
+        moves   R3, R3
+        bpl     TextureDivideBlockReciprocalReady
+        nop
+        dec     R2
+        with    R3
+        add     R1
+TextureDivideBlockReciprocalReady:
+        with    R2
+        add     R12
+        ret
+        nop
+
+; Lightmap preparation runs once per block. Keep its bounds-proof prefix in the
+; builder's former cold slot and rejoin the unchanged suffix above.
+LightmapPrepareBlock:
+        move    R0, #0
+        sm      (LIGHTMAP_BLOCK_FAST), R0
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bpl     :+
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+:
+        lm      R0, (TEXTURE_SPAN_S)
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
+        with    R0
+        sub     R1
+        move    R12, R0
+        lm      R0, (TEXTURE_BLOCK_END_S)
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
+        with    R0
+        sub     R1
+        move    R6, R0
+        lm      R1, (LIGHTMAP_WIDTH)
+        dec     R1
+        move    R0, R12
+        with    R0
+        cmp     R1
+        bcc     LightmapPrepareStartSInterior
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+LightmapPrepareStartSInterior:
+        move    R0, R6
+        with    R0
+        cmp     R1
+        bcc     LightmapPrepareEndSInterior
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+LightmapPrepareEndSInterior:
+        move    R8, R6
+        with    R8
+        sub     R12
+        lm      R0, (TEXTURE_SPAN_T)
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_T)
+        with    R0
+        sub     R1
+        move    R13, R0
+        lm      R0, (TEXTURE_BLOCK_END_T)
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_T)
+        with    R0
+        sub     R1
+        move    R7, R0
+        lm      R1, (LIGHTMAP_HEIGHT)
+        dec     R1
+        move    R0, R13
+        with    R0
+        cmp     R1
+        bcc     LightmapPrepareStartTInterior
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+LightmapPrepareStartTInterior:
+        GSU_ABSOLUTE_GOTO LightmapPrepareCachedContinue
+
+; Technique 2 streams Q4 S/T in R5/R6. Translate the face-selected sampler
+; once, then tail-call the unchanged convex renderer with its original return.
+TextureRenderConvexFaceAlbedo:
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        with    R0
+        cmp     R1
+        bne     TextureRenderConvexFaceAlbedoGeneric
+        nop
+        iwt     R0, #TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        bra     TextureRenderConvexFaceAlbedoSamplerReady
+        nop
+TextureRenderConvexFaceAlbedoGeneric:
+        iwt     R0, #TextureSampleAbsoluteRegisters
+TextureRenderConvexFaceAlbedoSamplerReady:
+        sm      (TEXTURE_SAMPLE_ROUTINE), R0
+        iwt     R13, #TextureRenderConvexFace
+        jmp     R13
+        nop
+
+; Resolve the overwhelmingly common sampler once per face. The fallback
+; retains non-power-of-two, 256-wide, and cross-bank cases.
+TextureSelectSampleRoutine:
+        iwt     R1, #TextureSampleAbsoluteRegisters
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        ; Technique 4's register-fed builder leaves these four contiguous
+        ; affine-state words free for its per-face block-route table.
+        iwt     R1, #TextureLightmapSpanLoop
+        sm      (TEXTURE_STEP_S), R1
+        sm      (TEXTURE_STEP_T), R1
+        sm      (TEXTURE_REM_S), R1
+        sm      (TEXTURE_REM_T), R1
+        sm      (TEXTURE_ERR_S), R1
+        sm      (TEXTURE_ERR_T), R1
+        move    R2, #BSP_WORLD_TEXTURE_FLAG_POWER_OF_TWO_AXES | BSP_WORLD_TEXTURE_FLAG_SINGLE_BANK
+        with    R0
+        cmp     R2
+        bne     TextureSelectSampleRoutineDone
+        nop
+        lm      R0, (TEXTURE_WIDTH)
+        lm      R1, (TEXTURE_HEIGHT)
+        with    R0
+        cmp     R1
+        bne     TextureSelectSampleRoutineDone
+        nop
+        iwt     R2, #256
+        with    R0
+        cmp     R2
+        beq     TextureSelectSampleRoutineDone
+        nop
+        iwt     R10, #TextureSelectPowerOfTwoStateReady
+        GSU_ABSOLUTE_GOTO TexturePreparePowerOfTwoSamplerState
+TextureSelectPowerOfTwoStateReady:
+        iwt     R1, #TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        iwt     R1, #TextureLightmapBilinearSpanLoop
+        sm      (TEXTURE_STEP_T), R1
+        iwt     R1, #TextureLightmapConstantSpanLoop
+        sm      (TEXTURE_REM_S), R1
+        iwt     R1, #TextureLightmapVerticalSpanLoop
+        sm      (TEXTURE_REM_T), R1
+        iwt     R1, #TextureLightmapHorizontalSpanLoop
+        sm      (TEXTURE_ERR_S), R1
+        iwt     R1, #TextureLightmapInteriorSpanLoop
+        sm      (TEXTURE_ERR_T), R1
+TextureSelectSampleRoutineDone:
+        ret
+        nop
+
+; Mask away Q4 fractions before the row contribution is shifted into place.
+; Widths 16/32/64/128 select zero through three doubles. R10 is the caller's
+; continuation so both direct and arbitrated material selectors can share it.
+TexturePreparePowerOfTwoSamplerState:
+        lm      R1, (TEXTURE_WIDTH_Q4)
+        with    R1
+        sub     #15
+        dec     R1
+        sm      (TEXTURE_SPAN_SHADE_Q8), R1
+        iwt     R1, #TextureSamplePowerOfTwoRowShift2
+        iwt     R2, #64
+        with    R0
+        cmp     R2
+        beq     TextureSelectSampleRowRoutineReady
+        nop
+        iwt     R1, #TextureSamplePowerOfTwoRowShift3
+        iwt     R2, #128
+        with    R0
+        cmp     R2
+        beq     TextureSelectSampleRowRoutineReady
+        nop
+        iwt     R1, #TextureSamplePowerOfTwoRowShift1
+        iwt     R2, #32
+        with    R0
+        cmp     R2
+        beq     TextureSelectSampleRowRoutineReady
+        nop
+        iwt     R1, #TextureSamplePowerOfTwoRowReady
+TextureSelectSampleRowRoutineReady:
+        sm      (TEXTURE_STEP_SHADE_Q8), R1
+        jmp     R10
+        nop
+
+; Preserve the independent flat/albedo renderer layout after relocating hot
+; technique-4 helpers.
+        .repeat 13
+        nop
+        .endrepeat
+
+; Technique-0/1 flat rendering is cold while the lightmapped path runs.
+RenderFaces:
+        sm      (RENDER_RETURN), R11
+        lm      R0, (GSU_TELEMETRY_PACKET_FACE_COUNT)
+        moves   R0, R0
+        bne     FacesPresent
+        nop
+        lm      R11, (RENDER_RETURN)
+        ret
+        nop
+FacesPresent:
+        iwt     R0, #FACES
+        sm      (FACE_POINTER), R0
+        lm      R0, (GSU_TELEMETRY_PACKET_FACE_COUNT)
+        sm      (FACES_LEFT), R0
+
+        iwt     R10, #COMMAND+5
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        sex
+        inc     R0                      ; Face byte 3=flat, byte 4=dither.
+        sm      (COLOR_SKIP), R0
+
+FaceLoop:
+FaceVisible:
+        lm      R10, (FACE_POINTER)
+        movew   R0, (R10)               ; First index, in uint16 elements.
+        move    R6, R0
+        with    R10
+        add     #2
+        move    R1, #0
+        moveb   R1, (R10)
+        sm      (CONVEX_FACE_VERTICES), R1
+
+        lm      R2, (COLOR_SKIP)
+        with    R10
+        add     R2
+        move    R0, #0
+        moveb   R0, (R10)
+        color
+
+        with    R6
+        add     R6
+        iwt     R10, #INDICES
+        with    R10
+        add     R6
+        sm      (CONVEX_INDEX_PTR), R10
+        jal     RenderConvexFace
+        nop
+FaceTrianglesDone:
+
+FaceAdvance:
+        lm      R0, (FACE_POINTER)
+        with    R0
+        add     #BSP_FACE_RECORD_BYTES
+        sm      (FACE_POINTER), R0
+        lm      R0, (FACES_LEFT)
+        dec     R0
+        sm      (FACES_LEFT), R0
+        beq     FacesDone
+        nop
+        GSU_ABSOLUTE_GOTO FaceLoop
+
+FacesDone:
+        lm      R11, (RENDER_RETURN)
+        ret
+        nop

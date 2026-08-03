@@ -1,0 +1,553 @@
+; Phase-separated exact projective endpoint staging for lightmapped faces.
+;
+; TexturePrepareFaceEndpointBatch consumes the current face's contiguous
+; 16-byte GSU_LIGHTMAP_ROW_STAGE records and publishes a sequential stream of
+; signed-Q4 {S,T} endpoint records. Each nonempty row contributes its first
+; covered pixel center, every following eight-pixel boundary, and the final
+; short-block endpoint. The reader can therefore replay the same block walk
+; without projective divides in the lightmap pixel phase.
+;
+; Input:
+;   RAMBR = $71
+;   TEXTURE_LIGHTMAP_FAST_ROUTINE = staged row count
+;   GSU_LIGHTMAP_ROW_STAGE_OFFSET = raw-X/S/T/depth row records
+; Output:
+;   GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET = stage base on complete fit, else 0
+;   GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET = first unused record byte
+; Clobbers R0-R14, flags, and ROMB. The caller's R11 is preserved in low RAM.
+
+.segment "GSU_AUX_CODE"
+
+TEXTURE_ENDPOINT_BATCH_MIN_ROWS = 6
+
+TexturePrepareFaceEndpointBatch:
+        sm      (GSU_TEXTURE_ENDPOINT_RETURN_OFFSET), R11
+        ; A partial stream must never become observable. Publish only after
+        ; every staged row has fit in the bounded arena.
+        move    R0, #0
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+        lm      R0, (TEXTURE_LIGHTMAP_FAST_ROUTINE)
+        move    R1, R0
+        with    R1
+        sub     #TEXTURE_ENDPOINT_BATCH_MIN_ROWS
+        bpl     TextureEndpointBatchEligible
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointBatchReturn
+TextureEndpointBatchEligible:
+        sm      (GSU_TEXTURE_ENDPOINT_ROWS_LEFT_OFFSET), R0
+        iwt     R0, #GSU_TEXTURE_ENDPOINT_STAGE_OFFSET
+        sm      (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET), R0
+        iwt     R0, #GSU_LIGHTMAP_ROW_STAGE_OFFSET
+        sm      (GSU_TEXTURE_ENDPOINT_ROW_PTR_OFFSET), R0
+
+        ; Prime the private projective sampler once per face. Executing this
+        ; cold controller outside its window does not change CBR or its lines.
+        jal     TextureEndpointBatchMath
+        nop
+
+TextureEndpointBatchNextRow:
+        lm      R0, (GSU_TEXTURE_ENDPOINT_ROWS_LEFT_OFFSET)
+        moves   R0, R0
+        bne     TextureEndpointBatchRowAvailable
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointBatchComplete
+TextureEndpointBatchRowAvailable:
+        dec     R0
+        sm      (GSU_TEXTURE_ENDPOINT_ROWS_LEFT_OFFSET), R0
+
+        ; Recreate the exact per-row state consumed by
+        ; TexturePerspectiveSampleSpan from one interleaved 16-byte record.
+        lm      R10, (GSU_TEXTURE_ENDPOINT_ROW_PTR_OFFSET)
+        movew   R1, (R10)
+        sm      (CONVEX_MIN_X), R1
+        inc     R10
+        inc     R10
+        movew   R3, (R10)
+        sm      (CONVEX_MAX_X), R3
+        inc     R10
+        inc     R10
+
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_S), R0
+        inc     R10
+        inc     R10
+        movew   R4, (R10)
+        with    R4
+        sub     R0
+        sm      (TEXTURE_DELTA_S), R4
+        inc     R10
+        inc     R10
+
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_T), R0
+        inc     R10
+        inc     R10
+        movew   R4, (R10)
+        with    R4
+        sub     R0
+        sm      (TEXTURE_DELTA_T), R4
+        inc     R10
+        inc     R10
+
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_DEPTH), R0
+        inc     R10
+        inc     R10
+        movew   R4, (R10)
+        with    R4
+        sub     R0
+        sm      (TEXTURE_DELTA_DEPTH), R4
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_ROW_PTR_OFFSET), R10
+
+        ; Match ReplayRows' covered-interval conversion byte for byte.
+        ; The raw endpoints loaded at the start of this record are still live,
+        ; so covered-interval conversion does not need to reload either word.
+        iwt     R0, #62
+        with    R1
+        add     R0
+        BSP_ARITH_SHIFT7 R1, R2
+        moves   R1, R1
+        bpl     TextureEndpointBatchFirstReady
+        nop
+        move    R1, #0
+TextureEndpointBatchFirstReady:
+        iwt     R0, #63
+        with    R3
+        sub     R0
+        BSP_ARITH_SHIFT7 R3, R4
+        move    R0, #127
+        move    R4, R0
+        with    R4
+        sub     R3
+        bpl     TextureEndpointBatchLastReady
+        nop
+        move    R3, R0
+TextureEndpointBatchLastReady:
+        move    R0, R3
+        with    R0
+        sub     R1
+        bpl     TextureEndpointBatchNonempty
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointBatchNextRow
+TextureEndpointBatchNonempty:
+        sm      (TEXTURE_SPAN_X), R1
+        sm      (TEXTURE_SPAN_END_X), R3
+
+        ; As in the live span path, one reciprocal lookup serves every screen
+        ; factor in this row. Depth-factor divides still perform their own
+        ; private exact lookup without entering the lightmap cache.
+        lm      R2, (CONVEX_MAX_X)
+        lm      R0, (CONVEX_MIN_X)
+        with    R2
+        sub     R0
+        moves   R2, R2
+        beq     TextureEndpointBatchSample
+        nop
+        jal     TextureEndpointPrepareDivideQ12
+
+TextureEndpointBatchSample:
+        ; Test capacity before doing an expensive exact projective sample.
+        lm      R10, (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET)
+        iwt     R1, #GSU_TEXTURE_ENDPOINT_STAGE_END
+        with    R10
+        cmp     R1
+        bcc     TextureEndpointBatchSampleFits
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointBatchOverflow
+TextureEndpointBatchSampleFits:
+        lm      R0, (TEXTURE_SPAN_X)
+        jal     TextureEndpointProjectiveSample
+        lm      R10, (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET)
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        movew   (R10), R6
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET), R10
+
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        bne     TextureEndpointBatchContinueSpan
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointBatchNextRow
+TextureEndpointBatchContinueSpan:
+        with    R0
+        add     #8
+        move    R2, R0
+        with    R2
+        sub     R1
+        bmi     TextureEndpointBatchNextXReady
+        nop
+        move    R0, R1
+TextureEndpointBatchNextXReady:
+        sm      (TEXTURE_SPAN_X), R0
+        GSU_ABSOLUTE_GOTO TextureEndpointBatchSample
+
+TextureEndpointBatchComplete:
+        iwt     R0, #GSU_TEXTURE_ENDPOINT_STAGE_OFFSET
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+TextureEndpointBatchReturn:
+        lm      R11, (GSU_TEXTURE_ENDPOINT_RETURN_OFFSET)
+        ret
+        nop
+TextureEndpointBatchOverflow:
+        move    R0, #0
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+        bra     TextureEndpointBatchReturn
+        nop
+
+; Drop-in sampler ABI for the two technique-4 endpoint calls. A successful
+; full-face batch returns the next buffered pair; overflow or any unstaged
+; caller tail-jumps to the established exact sampler with R11 untouched.
+TexturePerspectiveSampleSpanBuffered:
+        lm      R10, (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET)
+        moves   R10, R10
+        beq     TexturePerspectiveSampleSpanBufferedFallback
+        nop
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R10
+        ret
+        nop
+TexturePerspectiveSampleSpanBufferedFallback:
+        GSU_ABSOLUTE_GOTO TexturePerspectiveSampleSpan
+
+; The complete exact sample/divide dependency closure is one private cache
+; window. TextureEndpointBatchMath executes CACHE once; the cold controller
+; subsequently calls interior labels without evicting this window.
+; Preserve its pinned B370 start after removing two five-byte controller loads;
+; plain 16-byte alignment would select the preceding B360 cache line.
+  .repeat $0A
+        nop
+  .endrepeat
+GSU_CACHE_KERNEL_BEGIN TextureEndpointBatchMath
+        ret
+        nop
+
+; Prepare ceil(2^27 / R2) for repeated screen-factor divisions in one row.
+TextureEndpointPrepareDivideQ12:
+        iwt     R10, #TextureEndpointPrepareDivideReady
+        GSU_ABSOLUTE_GOTO TextureEndpointDivideLookup
+TextureEndpointPrepareDivideReady:
+        sm      (TEXTURE_RECIPROCAL_HIGH), R12
+        sm      (TEXTURE_RECIPROCAL_LOW), R13
+        ret
+        nop
+
+; Evaluate one logical pixel center exactly like TexturePerspectiveSampleSpan.
+; Return signed-Q4 S/T in R5/R6.
+TextureEndpointProjectiveSample:
+        BSP_SCALE_LOGICAL_TO_Q7 R0
+        iwt     R1, #64
+        with    R0
+        add     R1
+        lm      R1, (CONVEX_MIN_X)
+        with    R0
+        sub     R1
+        bpl     TextureEndpointSampleNumeratorPositive
+        nop
+        move    R0, #0
+TextureEndpointSampleNumeratorPositive:
+        lm      R2, (CONVEX_MAX_X)
+        with    R2
+        sub     R1
+        moves   R2, R2
+        bne     TextureEndpointSampleDenReady
+        nop
+        move    R3, #0
+        bra     TextureEndpointSampleFactorReady
+        nop
+TextureEndpointSampleDenReady:
+        move    R4, R0
+        with    R4
+        sub     R2
+        bmi     TextureEndpointSampleScreenDivide
+        nop
+        iwt     R3, #4096
+        bra     TextureEndpointSampleFactorReady
+        nop
+TextureEndpointSampleScreenDivide:
+        move    R8, R0
+        move    R9, R2
+        lm      R12, (TEXTURE_RECIPROCAL_HIGH)
+        lm      R13, (TEXTURE_RECIPROCAL_LOW)
+        iwt     R10, #TextureEndpointSampleFactorReady
+        GSU_ABSOLUTE_GOTO TextureEndpointDivideMultiply
+
+TextureEndpointSampleFactorReady:
+        ; Convert the screen factor to the exact perspective world factor.
+        lm      R5, (TEXTURE_BASE_DEPTH)
+        move    R6, R3
+  .repeat 3
+        with    R6
+        add     R6
+  .endrepeat
+        moves   R6, R6
+        bmi     TextureEndpointFactorUnityProducts
+        nop
+        BSP_SIGNED_MUL_SCALED8_SHIFT12 R5
+        move    R12, R0
+        lm      R7, (TEXTURE_DELTA_DEPTH)
+        BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
+        move    R1, R0
+        bra     TextureEndpointFactorProductsReady
+        nop
+TextureEndpointFactorUnityProducts:
+        move    R12, R5
+        lm      R7, (TEXTURE_DELTA_DEPTH)
+        move    R1, R7
+TextureEndpointFactorProductsReady:
+        move    R2, R5
+        move    R0, R7
+        with    R2
+        add     R0
+        with    R2
+        sub     R1
+        move    R0, R12
+        with    R0
+        cmp     R2
+        beq     TextureEndpointFactorUnity
+        nop
+        ; Preserve the outer batch return in R11. The divider's existing R10
+        ; continuation ABI returns straight to coordinate reconstruction.
+        move    R8, R0
+        move    R9, R2
+        iwt     R10, #TextureEndpointDivideCoordinatesLoaded
+        GSU_ABSOLUTE_GOTO TextureEndpointDivideLookup
+TextureEndpointFactorUnity:
+        iwt     R3, #4096
+
+TextureEndpointCoordinates:
+        lm      R5, (TEXTURE_BASE_S)
+        lm      R7, (TEXTURE_DELTA_S)
+        move    R6, R3
+  .repeat 3
+        with    R6
+        add     R6
+  .endrepeat
+        moves   R6, R6
+        bmi     TextureEndpointCoordinatesUnity
+        nop
+        BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
+        with    R5
+        add     R0
+        move    R8, R5
+        lm      R5, (TEXTURE_BASE_T)
+        lm      R7, (TEXTURE_DELTA_T)
+        BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
+        with    R5
+        add     R0
+        move    R6, R5
+        move    R5, R8
+        bra     TextureEndpointSampleReturn
+        nop
+TextureEndpointCoordinatesUnity:
+        lm      R5, (TEXTURE_BASE_S)
+        lm      R0, (TEXTURE_DELTA_S)
+        with    R5
+        add     R0
+        lm      R6, (TEXTURE_BASE_T)
+        lm      R0, (TEXTURE_DELTA_T)
+        with    R6
+        add     R0
+TextureEndpointSampleReturn:
+        ret
+        nop
+        nop
+
+; Exact Q12 division using the same ceil-reciprocal and one-high correction as
+; TextureDivideQ12, but with a private multiply tail resident in this window.
+TextureEndpointDivideLookup:
+        dec     R2
+        move    R0, #GSU_DIVIDE_Q12_RECIPROCAL_FIRST_ROM_BANK
+        move    R1, R2
+        iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ENTRIES_PER_BANK
+TextureEndpointDivideSelectBank:
+        with    R1
+        cmp     R4
+        bcc     TextureEndpointDivideBankReady
+        nop
+        with    R1
+        sub     R4
+        inc     R0
+        bra     TextureEndpointDivideSelectBank
+        nop
+TextureEndpointDivideBankReady:
+        romb
+        move    R2, R1
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS
+        with    R4
+        add     R2
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R12
+        BSP_ROM_LOAD_WORD R13
+        jmp     R10
+        nop
+
+TextureEndpointDivideCoordinatesLoaded:
+        iwt     R10, #TextureEndpointCoordinates
+TextureEndpointDivideMultiply:
+        move    R6, R12
+        move    R0, R8
+        with    R0
+        lmult
+        move    R3, R4
+        move    R6, R13
+        move    R0, R8
+        with    R0
+        lmult
+        with    R4
+        add     R4
+        with    R0
+        adc     R0
+        with    R3
+        add     R0
+
+        ; R4 is twice the low-15-bit product remainder. As in the shared
+        ; divide tail, t>=numerator proves the estimate exact; only ambiguous
+        ; inputs leave this cache window for the complete correction compare.
+        with    R4
+        lsr
+        with    R4
+        cmp     R8
+        bcs     TextureEndpointDivideReady
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointDivideCorrectionCold
+TextureEndpointDivideReady:
+        jmp     R10
+        nop
+  .repeat $2D
+        nop
+  .endrepeat
+GSU_CACHE_KERNEL_END TextureEndpointBatchMath
+
+TextureEndpointDivideCorrectionCold:
+        move    R6, R9
+        move    R0, R3
+        with    R0
+        lmult
+        move    R12, R4
+        move    R13, R0
+        iwt     R6, #4096
+        move    R0, R8
+        with    R0
+        lmult
+        with    R13
+        cmp     R0
+        bcc     TextureEndpointDivideCorrectionColdReady
+        nop
+        bne     TextureEndpointDivideCorrectionColdApply
+        nop
+        with    R12
+        cmp     R4
+        bcc     TextureEndpointDivideCorrectionColdReady
+        nop
+        beq     TextureEndpointDivideCorrectionColdReady
+        nop
+TextureEndpointDivideCorrectionColdApply:
+        dec     R3
+TextureEndpointDivideCorrectionColdReady:
+        jmp     R10
+        nop
+
+; Cold coordinate-block setup was displaced from the active lightmap cache by
+; the hot Q12 reciprocal mirror. These entries do not execute CACHE, so the
+; caller's lightmap window remains live when they jump back to the cached DDA.
+TextureBuildCoordinateBlock:
+        sm      (TEXTURE_COORD_RETURN), R11
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        lm      R7, (TEXTURE_STEP_S)
+        lm      R8, (TEXTURE_STEP_T)
+        lm      R9, (TEXTURE_REM_S)
+        lm      R13, (TEXTURE_REM_T)
+        move    R1, #0
+        move    R2, #0
+        lm      R3, (TEXTURE_SPAN_DEN)
+        move    R12, R3
+        lm      R4, (TEXTURE_SIGN_S)
+        lm      R11, (TEXTURE_SIGN_T)
+TextureBuildCoordinateStateReady:
+        moves   R4, R4
+        bpl     TextureBuildCoordinateSStepReady
+        nop
+        move    R0, #0
+        with    R0
+        sub     R7
+        move    R7, R0
+TextureBuildCoordinateSStepReady:
+        moves   R11, R11
+        bpl     TextureBuildCoordinateTStepReady
+        nop
+        move    R0, #0
+        with    R0
+        sub     R8
+        move    R8, R0
+TextureBuildCoordinateTStepReady:
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateLoop
+
+TextureBuildCoordinateBlockAlbedoRegisters:
+        iwt     R0, #TextureAlbedoCoordinateBlockReady
+TextureBuildCoordinateBlockRegisters:
+        sm      (TEXTURE_COORD_RETURN), R0
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        move    R1, #0
+        move    R2, #0
+        lm      R3, (TEXTURE_SPAN_DEN)
+        move    R12, R3
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateStateReady
+
+TextureBuildCoordinateBlockLightmapRegisters:
+        iwt     R0, #TextureLightmapCoordinateBlockReady
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
+
+; Complete exact correction for the cached Q12 divide. The cache-resident
+; remainder test dispatches here only when it cannot prove the reciprocal
+; estimate exact. Inputs and output match TextureDivideQ12LoadedCached:
+; R8=numerator, R9=denominator, R3=estimate; returns exact quotient in R3.
+TextureDivideQ12CorrectionCold:
+        move    R6, R9
+        move    R0, R3
+        with    R0
+        lmult
+        move    R12, R4
+        move    R13, R0
+        iwt     R6, #4096
+        move    R0, R8
+        with    R0
+        lmult
+        with    R13
+        cmp     R0
+        bcc     TextureDivideQ12CorrectionColdReady
+        nop
+        bne     TextureDivideQ12CorrectionColdApply
+        nop
+        with    R12
+        cmp     R4
+        bcc     TextureDivideQ12CorrectionColdReady
+        nop
+        beq     TextureDivideQ12CorrectionColdReady
+        nop
+TextureDivideQ12CorrectionColdApply:
+        dec     R3
+TextureDivideQ12CorrectionColdReady:
+        ret
+        nop
+
+.assert * - TexturePrepareFaceEndpointBatch <= GSU_AUX_CODE_CAPACITY, error, "Endpoint batch helper exceeds auxiliary GSU code"

@@ -1,0 +1,23 @@
+; Tall world faces bypass row staging. Keep their uncommon endpoint setup in
+; the phase-safe overlay tail so the staged replay remains straight-line.
+TexturePrepareDirectSpanEndpoints:
+        lm      R0, (TEXTURE_LEFT_S)
+        sm      (TEXTURE_BASE_S), R0
+        lm      R1, (TEXTURE_RIGHT_S)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_S), R1
+        lm      R0, (TEXTURE_LEFT_T)
+        sm      (TEXTURE_BASE_T), R0
+        lm      R1, (TEXTURE_RIGHT_T)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_T), R1
+        lm      R0, (TEXTURE_LEFT_SHADE)
+        sm      (TEXTURE_BASE_DEPTH), R0
+        lm      R1, (TEXTURE_RIGHT_SHADE)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_DEPTH), R1
+        ret
+        nop

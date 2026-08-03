@@ -1,0 +1,509 @@
+; Prepare one dynamic-brush arbitration row exactly once, then replay its
+; immutable span endpoints. This auxiliary helper is used only by technique 4;
+; other render modes and oversized arbitrary fly-camera rows retain the
+; original metadata scan and depth arbiter.
+
+.segment "GSU_AUX_CODE"
+
+BRUSH_ARB_STAGE_RETURN        = BRUSH_ARB_ROW_STAGE_MODE
+BRUSH_ARB_STAGE_CURSOR        = BRUSH_ARB_PREPASS_CURSOR
+BRUSH_ARB_STAGE_REMAINING     = BRUSH_ARB_PREPASS_REMAINING
+BRUSH_ARB_STAGE_WRITE_PTR     = BRUSH_ARB_POOL_CURSOR
+BRUSH_ARB_STAGE_CONTESTED     = BRUSH_ARB_LIGHTMAP_REF
+
+BRUSH_ARB_STAGE_META          = 0
+BRUSH_ARB_STAGE_PACKED_X      = 2
+BRUSH_ARB_STAGE_MIN_X         = 4
+BRUSH_ARB_STAGE_MAX_X         = 6
+BRUSH_ARB_STAGE_LEFT_S        = 8
+BRUSH_ARB_STAGE_RIGHT_S       = 10
+BRUSH_ARB_STAGE_LEFT_T        = 12
+BRUSH_ARB_STAGE_RIGHT_T       = 14
+BRUSH_ARB_STAGE_LEFT_DEPTH    = 16
+BRUSH_ARB_STAGE_RIGHT_DEPTH   = 18
+BRUSH_ARB_STAGE_VALID         = $8000
+
+.assert BRUSH_ARB_STAGE_RIGHT_DEPTH + 2 = GSU_BRUSH_ROW_STAGE_RECORD_BYTES, error, "Brush row stage layout changed"
+
+; Publish a lit, non-missing lightmap base adjusted by its signed minimum block
+; coordinates. The dominant sampler can then use absolute block S/T directly.
+; Cold material loaders call this once; it preserves no registers except R7.
+LightmapPublishAdjustedAddress:
+        lm      R0, (LIGHTMAP_MIN_BLOCK_T)
+        lm      R6, (LIGHTMAP_WIDTH)
+        with    R0
+        mult    R6
+        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
+        with    R0
+        add     R1
+        lm      R1, (LIGHTMAP_ROM_ADDRESS)
+        with    R1
+        sub     R0
+        sm      (LIGHTMAP_ADJUSTED_ADDRESS), R1
+        ret
+        nop
+
+; Textureless technique 5 retains the affine direct path and needs no
+; per-pixel ownership arbitration. It is cold for this lightmapped overlay.
+BrushArbiterDirectGroup:
+        lm      R0, (BRUSH_TOKEN_CURSOR)
+        inc     R0
+        sm      (BRUSH_TOKEN_CURSOR), R0
+BrushArbiterDirectLoop:
+        lm      R0, (BRUSH_TOKEN_CURSOR)
+        lm      R1, (BRUSH_TOKEN_COUNT)
+        with    R0
+        cmp     R1
+        beq     BrushArbiterDirectDone
+        nop
+        move    R1, R0
+        with    R1
+        add     R1
+        iwt     R10, #BRUSH_TOKENS
+        with    R10
+        add     R1
+        movew   R0, (R10)
+        moves   R0, R0
+        bpl     BrushArbiterDirectDone
+        nop
+        iwt     R1, #$03FF
+        with    R0
+        and     R1
+        sm      (BRUSH_CURRENT_LINK), R0
+        jal     BrushRenderFragment
+        nop
+        lm      R0, (BRUSH_TOKEN_CURSOR)
+        inc     R0
+        sm      (BRUSH_TOKEN_CURSOR), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterDirectLoop
+BrushArbiterDirectDone:
+        GSU_ABSOLUTE_GOTO BrushArbiterDone
+
+; Rare exact depth fallback for singleton spans and clipped edge clamps.
+BrushArbiterDepthLegacy:
+        lm      R0, (TEXTURE_SPAN_X)
+        BSP_SCALE_LOGICAL_TO_Q7 R0
+        iwt     R1, #64
+        with    R0
+        add     R1
+        lm      R1, (CONVEX_MIN_X)
+        with    R0
+        sub     R1
+        bpl     BrushArbiterDepthNumeratorPositive
+        nop
+        move    R0, #0
+BrushArbiterDepthNumeratorPositive:
+        lm      R2, (BRUSH_ARBITER_SCREEN_DEN)
+        moves   R2, R2
+        bne     BrushArbiterDepthDenominatorReady
+        nop
+        move    R3, #0
+        bra     BrushArbiterDepthScreenFactorReady
+        nop
+BrushArbiterDepthDenominatorReady:
+        move    R4, R0
+        with    R4
+        sub     R2
+        bmi     BrushArbiterDepthScreenDivide
+        nop
+        iwt     R3, #4096
+        bra     BrushArbiterDepthScreenFactorReady
+        nop
+BrushArbiterDepthScreenDivide:
+        jal     TextureDivideQ12Prepared
+BrushArbiterDepthScreenFactorReady:
+        jal     TexturePerspectiveFactorQ12
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanDepthReady
+
+; Return mode one for a contested row or two when every inclusive logical span
+; is disjoint. The stage covers the complete generated 72-fragment bound.
+BrushArbiterStageCurrentRow:
+        sm      (BRUSH_ARB_STAGE_RETURN), R11
+
+        iwt     R0, #GSU_BRUSH_ARBITER_METADATA_OFFSET
+        sm      (BRUSH_ARB_STAGE_CURSOR), R0
+        lm      R0, (BRUSH_ARB_METADATA_COUNT)
+        sm      (BRUSH_ARB_STAGE_REMAINING), R0
+        iwt     R0, #GSU_BRUSH_ROW_STAGE_OFFSET
+        sm      (BRUSH_ARB_STAGE_WRITE_PTR), R0
+        move    R0, #0
+        sm      (BRUSH_ARB_STAGE_COUNT), R0
+        sm      (BRUSH_ARB_STAGE_CONTESTED), R0
+
+BrushArbiterStageCandidateLoop:
+        lm      R0, (BRUSH_ARB_STAGE_REMAINING)
+        moves   R0, R0
+        bne     BrushArbiterStageCandidatePresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterStageComplete
+BrushArbiterStageCandidatePresent:
+        lm      R10, (BRUSH_ARB_STAGE_CURSOR)
+        move    R9, R10
+        with    R9
+        add     #BRUSH_ARB_META_Y_RANGE
+        movew   R0, (R9)
+        move    R1, R0
+        with    R1
+        lob
+        with    R0
+        hib
+        lm      R2, (BRUSH_ARB_ROW)
+        with    R2
+        cmp     R1
+        bcs     BrushArbiterStageCandidateAfterFirstY
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterStageCandidateAdvance
+BrushArbiterStageCandidateAfterFirstY:
+        with    R0
+        cmp     R2
+        bcs     BrushArbiterStageCandidateWithinY
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterStageCandidateAdvance
+BrushArbiterStageCandidateWithinY:
+
+        sm      (BRUSH_ARB_CANDIDATE_CURSOR), R10
+        jal     BrushArbiterPrepareCandidateSpan
+        nop
+        moves   R0, R0
+        bne     BrushArbiterStageSpanPresent
+        nop
+        ; Do not publish empty horizontal clips. Besides shrinking contested
+        ; sorts, this removes their otherwise-useless staged replay in every
+        ; technique-4 row.
+        GSU_ABSOLUTE_GOTO BrushArbiterStageCandidateAdvance
+
+BrushArbiterStageSpanPresent:
+        lm      R10, (BRUSH_ARB_STAGE_WRITE_PTR)
+        lm      R1, (BRUSH_ARB_CANDIDATE_CURSOR)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_SPAN_END_X)
+        with    R0
+        swap
+        lm      R1, (TEXTURE_SPAN_X)
+        with    R0
+        or      R1
+        iwt     R1, #BRUSH_ARB_STAGE_VALID
+        with    R0
+        or      R1
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (CONVEX_MIN_X)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (CONVEX_MAX_X)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_LEFT_S)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_RIGHT_S)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_LEFT_T)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_RIGHT_T)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_LEFT_SHADE)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_RIGHT_SHADE)
+        movew   (R10), R0
+
+        ; Once one overlap is known the row remains contested. Otherwise scan
+        ; the prior staged inclusive intervals; equality is an overlap.
+        lm      R0, (BRUSH_ARB_STAGE_CONTESTED)
+        moves   R0, R0
+        bne     BrushArbiterStageRecordReady
+        nop
+        lm      R12, (BRUSH_ARB_STAGE_COUNT)
+        moves   R12, R12
+        beq     BrushArbiterStageRecordReady
+        nop
+        iwt     R9, #GSU_BRUSH_ROW_STAGE_OFFSET
+BrushArbiterStageOverlapLoop:
+        inc     R9
+        inc     R9
+        movew   R0, (R9)
+        moves   R0, R0
+        bpl     BrushArbiterStageOverlapAdvance
+        nop
+        move    R3, R0
+        with    R3
+        lob
+        with    R0
+        hib
+        iwt     R1, #$007F
+        with    R0
+        and     R1
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R1
+        cmp     R3
+        bcc     BrushArbiterStageOverlapAdvance
+        nop
+        lm      R1, (TEXTURE_SPAN_X)
+        with    R0
+        cmp     R1
+        bcc     BrushArbiterStageOverlapAdvance
+        nop
+        move    R0, #1
+        sm      (BRUSH_ARB_STAGE_CONTESTED), R0
+        bra     BrushArbiterStageRecordReady
+        nop
+BrushArbiterStageOverlapAdvance:
+        with    R9
+        add     #8
+        with    R9
+        add     #8
+        with    R9
+        add     #2
+        dec     R12
+        bne     BrushArbiterStageOverlapLoop
+        nop
+
+BrushArbiterStageRecordReady:
+        lm      R0, (BRUSH_ARB_STAGE_WRITE_PTR)
+        with    R0
+        add     #10
+        with    R0
+        add     #10
+        sm      (BRUSH_ARB_STAGE_WRITE_PTR), R0
+        lm      R0, (BRUSH_ARB_STAGE_COUNT)
+        inc     R0
+        sm      (BRUSH_ARB_STAGE_COUNT), R0
+
+BrushArbiterStageCandidateAdvance:
+        lm      R0, (BRUSH_ARB_STAGE_CURSOR)
+        with    R0
+        add     #8
+        with    R0
+        add     #8
+        sm      (BRUSH_ARB_STAGE_CURSOR), R0
+        lm      R0, (BRUSH_ARB_STAGE_REMAINING)
+        dec     R0
+        sm      (BRUSH_ARB_STAGE_REMAINING), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterStageCandidateLoop
+
+BrushArbiterStageComplete:
+        iwt     R0, #GSU_BRUSH_ROW_STAGE_OFFSET
+        sm      (BRUSH_ARB_STAGE_CURSOR), R0
+        lm      R0, (BRUSH_ARB_STAGE_COUNT)
+        sm      (BRUSH_ARB_STAGE_REMAINING), R0
+        lm      R0, (BRUSH_ARB_STAGE_CONTESTED)
+        moves   R0, R0
+        bne     BrushArbiterStageContested
+        nop
+        move    R0, #2
+        bra     BrushArbiterStageReturn
+        nop
+BrushArbiterStageContested:
+        jal     BrushArbiterSortStagedRow
+        nop
+        move    R0, #1
+BrushArbiterStageReturn:
+        lm      R11, (BRUSH_ARB_STAGE_RETURN)
+        ret
+        nop
+
+; Publish one immutable prepared record into the standard span globals, then
+; join the retained material and composition path in the selected replay order.
+BrushArbiterLoadStagedCandidate:
+        lm      R0, (BRUSH_ARB_STAGE_REMAINING)
+        moves   R0, R0
+        bne     BrushArbiterStagedCandidatePresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterRowDone
+BrushArbiterStagedCandidatePresent:
+        lm      R10, (BRUSH_ARB_STAGE_CURSOR)
+        movew   R0, (R10)
+        sm      (BRUSH_ARB_CANDIDATE_CURSOR), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        moves   R0, R0
+        bpl     BrushArbiterAdvanceStagedCandidate
+        nop
+        move    R1, R0
+        with    R1
+        lob
+        sm      (TEXTURE_SPAN_X), R1
+        with    R0
+        hib
+        iwt     R1, #$007F
+        with    R0
+        and     R1
+        sm      (TEXTURE_SPAN_END_X), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (CONVEX_MIN_X), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (CONVEX_MAX_X), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_LEFT_S), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_RIGHT_S), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_LEFT_T), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_RIGHT_T), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_LEFT_SHADE), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_RIGHT_SHADE), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterCandidateSpanPresent
+
+BrushArbiterAdvanceStagedCandidate:
+        lm      R0, (BRUSH_ARB_STAGE_CURSOR)
+        with    R0
+        add     #10
+        with    R0
+        add     #10
+        sm      (BRUSH_ARB_STAGE_CURSOR), R0
+        lm      R0, (BRUSH_ARB_STAGE_REMAINING)
+        dec     R0
+        sm      (BRUSH_ARB_STAGE_REMAINING), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterLoadStagedCandidate
+
+; Stable near-to-far bubble sort for the rare contested technique-4 row.
+; The farther endpoint is a conservative cheap key; equal keys retain the
+; generator's exact authority order. The complete 20-byte prepared records are
+; swapped in place, leaving disjoint-row loading and iteration untouched.
+BrushArbiterSortStagedRow:
+        sm      (BRUSH_ARB_SORT_RETURN), R11
+        lm      R0, (BRUSH_ARB_STAGE_COUNT)
+        dec     R0
+        sm      (BRUSH_ARB_SORT_PASS), R0
+BrushArbiterSortStagedPass:
+        lm      R0, (BRUSH_ARB_SORT_PASS)
+        moves   R0, R0
+        bne     BrushArbiterSortStagedPassPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSortStagedDone
+BrushArbiterSortStagedPassPresent:
+        move    R0, #0
+        sm      (BRUSH_ARB_SORT_INDEX), R0
+BrushArbiterSortStagedInner:
+        lm      R0, (BRUSH_ARB_SORT_INDEX)
+        lm      R1, (BRUSH_ARB_SORT_PASS)
+        with    R0
+        cmp     R1
+        bne     BrushArbiterSortStagedPairPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushArbiterSortStagedNextPass
+BrushArbiterSortStagedPairPresent:
+        ; R10 = stage base + index * 20, R9 = following record.
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        move    R10, R1
+        with    R10
+        add     R10
+        with    R10
+        add     R10
+        with    R10
+        add     R1
+        iwt     R1, #GSU_BRUSH_ROW_STAGE_OFFSET
+        with    R10
+        add     R1
+        move    R9, R10
+        with    R9
+        add     #10
+        with    R9
+        add     #10
+
+        move    R6, R10
+        with    R6
+        add     #8
+        with    R6
+        add     #8
+        movew   R4, (R6)
+        inc     R6
+        inc     R6
+        movew   R5, (R6)
+        with    R4
+        cmp     R5
+        bcs     BrushArbiterSortStagedLeftKeyReady
+        nop
+        move    R4, R5
+BrushArbiterSortStagedLeftKeyReady:
+        move    R7, R9
+        with    R7
+        add     #8
+        with    R7
+        add     #8
+        movew   R5, (R7)
+        inc     R7
+        inc     R7
+        movew   R6, (R7)
+        with    R5
+        cmp     R6
+        bcs     BrushArbiterSortStagedRightKeyReady
+        nop
+        move    R5, R6
+BrushArbiterSortStagedRightKeyReady:
+        with    R4
+        cmp     R5
+        bcc     BrushArbiterSortStagedPairReady
+        nop
+        beq     BrushArbiterSortStagedPairReady
+        nop
+        move    R12, #10
+        iwt     R13, #BrushArbiterSortStagedSwapLoop
+BrushArbiterSortStagedSwapLoop:
+        movew   R4, (R10)
+        movew   R5, (R9)
+        movew   (R10), R5
+        movew   (R9), R4
+        inc     R10
+        inc     R10
+        inc     R9
+        inc     R9
+        loop
+        nop
+BrushArbiterSortStagedPairReady:
+        lm      R0, (BRUSH_ARB_SORT_INDEX)
+        inc     R0
+        sm      (BRUSH_ARB_SORT_INDEX), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterSortStagedInner
+BrushArbiterSortStagedNextPass:
+        lm      R0, (BRUSH_ARB_SORT_PASS)
+        dec     R0
+        sm      (BRUSH_ARB_SORT_PASS), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterSortStagedPass
+BrushArbiterSortStagedDone:
+        lm      R11, (BRUSH_ARB_SORT_RETURN)
+        ret
+        nop
+
+.assert * - TexturePrepareFaceEndpointBatch <= GSU_AUX_CODE_CAPACITY, error, "Auxiliary GSU helpers exceed their staged overlay"
