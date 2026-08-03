@@ -1,0 +1,67 @@
+        ; Prepared Q12 divisions enter inside this otherwise-unreachable cache
+        ; gap and fall directly into the resident reciprocal-multiply prefix.
+TextureDivideQ12Prepared:
+        move    R8, R0                  ; numerator
+        move    R9, R2                  ; denominator
+        lm      R12, (TEXTURE_RECIPROCAL_HIGH)
+        lm      R13, (TEXTURE_RECIPROCAL_LOW)
+TextureLightmapSpanWithinBlock:
+        ; This gap is unreachable after the indirect jump but resident in the
+        ; lightmap cache. Keep the repeated reciprocal-multiply prefix here.
+TextureDivideQ12LoadedCached:
+        ; The reciprocal estimate is exact or one high. Form its Q12 quotient
+        ; and full-width estimate product before the cold correction compare.
+        move    R6, R12
+        move    R0, R8
+        with    R0
+        lmult
+        move    R3, R4
+        move    R6, R13
+        move    R0, R8
+        with    R0
+        lmult
+        ; floor(product/32768) = high*2 + low bit 15.
+        with    R4
+        add     R4
+        with    R0
+        adc     R0
+        with    R3
+        add     R0
+        ; Let t be the low 15 bits of numerator*reciprocal. R4 already holds
+        ; 2*t after the quotient extraction above. With
+        ; delta=reciprocal*denominator-2^27 and 0<=delta<denominator, the
+        ; estimate can only be high when numerator*delta > t*denominator.
+        ; Therefore t>=numerator proves the estimate exact without either
+        ; correction product. Preserve the complete comparison in cold AUX
+        ; code for the remaining inputs.
+        ; Recover t from the doubled low product already left in R4.
+        with    R4
+        lsr
+        with    R4
+        cmp     R8
+        bcs     TextureDivideQ12Ready
+        nop
+        GSU_ABSOLUTE_GOTO TextureDivideQ12CorrectionCold
+TextureDivideQ12Ready:
+        ret
+        nop
+; Strict nonfinal projective blocks are always eight pixels wide. Reuse the
+; otherwise-unreachable cached-divide tail to prepare their endpoint without
+; reloading or comparing the block bounds in cold code. Final blocks retain
+; the cold sentinel path because their width may be shorter or exactly eight.
+TextureLightmapBlock8CachedSetup:
+        sm      (TEXTURE_SIGN_S), R4
+        move    R0, R4
+        jal     TexturePerspectiveSampleSpanBuffered
+        sm      (TEXTURE_BLOCK_END_S), R5
+        sm      (TEXTURE_BLOCK_END_T), R6
+        move    R10, R6
+        move    R0, #8
+        sm      (TEXTURE_SPAN_DEN), R0
+        ; TextureLightmapSpanDone's first LM is the jump delay slot and remains
+        ; its normal entry instruction when a span finishes directly.
+        GSU_ABSOLUTE_GOTO TextureLightmapBlock8Setup, shared_delay
+  .repeat 64 - (* - TextureDivideQ12LoadedCached)
+        nop
+  .endrepeat
+        .assert * - TextureDivideQ12LoadedCached = 64, error, "Cached Q12 divide and correction no longer fill their pinned gap"

@@ -1,0 +1,291 @@
+; Technique 6: projective distance anchors with a direct 8bpp palette index.
+; Every pixel receives a full-range interpolated index, while one exact
+; perspective solve per at-most-eight-pixel endpoint keeps the mode practical.
+; Texture, UV, lightmap, and colormap sampling are deliberately absent.
+
+TextureDrawSpanUntexturedDistance:
+        sm      (TEXTURE_SPAN_RETURN), R11
+        sm      (TEXTURE_SPAN_X), R1
+        sm      (TEXTURE_SPAN_END_X), R3
+        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R10
+        add     R2
+        move    R2, #0
+        moveb   R2, (R10)
+        sm      (TEXTURE_PLOT_Y), R2
+
+        lm      R0, (TEXTURE_LEFT_SHADE)
+        sm      (TEXTURE_BASE_DEPTH), R0
+        lm      R1, (TEXTURE_RIGHT_SHADE)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_DEPTH), R1
+
+        lm      R2, (CONVEX_MAX_X)
+        lm      R1, (CONVEX_MIN_X)
+        with    R2
+        sub     R1
+        moves   R2, R2
+        beq     TextureUntexturedDistanceReciprocalReady
+        nop
+        jal     TexturePrepareDivideQ12
+        nop
+TextureUntexturedDistanceReciprocalReady:
+        lm      R0, (TEXTURE_SPAN_X)
+        jal     UntexturedDistanceSampleIndex
+        nop
+        with    R0
+        swap
+        sm      (TEXTURE_SPAN_SHADE_Q8), R0
+
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        bne     TextureUntexturedDistanceBlockSetup
+        nop
+        move    R0, #0
+        sm      (TEXTURE_STEP_SHADE_Q8), R0
+        GSU_ABSOLUTE_GOTO TextureUntexturedDistanceSpanLoop
+
+TextureUntexturedDistanceBlockSetup:
+        lm      R0, (TEXTURE_SPAN_X)
+        move    R4, R0
+        with    R4
+        add     #8
+        lm      R1, (TEXTURE_SPAN_END_X)
+        move    R2, R4
+        with    R2
+        sub     R1
+        bmi     TextureUntexturedDistanceBlockEndReady
+        nop
+        move    R4, R1
+TextureUntexturedDistanceBlockEndReady:
+        sm      (TEXTURE_BLOCK_END_X), R4
+        move    R0, R4
+        jal     UntexturedDistanceSampleIndex
+        nop
+        sm      (TEXTURE_BLOCK_END_SHADE), R0
+
+        lm      R0, (TEXTURE_BLOCK_END_X)
+        lm      R1, (TEXTURE_SPAN_X)
+        with    R0
+        sub     R1
+        sm      (TEXTURE_SPAN_DEN), R0
+
+        lm      R0, (TEXTURE_BLOCK_END_SHADE)
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+        with    R1
+        hib
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     TextureUntexturedDistanceShadePositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+TextureUntexturedDistanceShadePositive:
+        sm      (TEXTURE_SIGN_SHADE), R4
+        with    R0
+        swap
+        lm      R1, (TEXTURE_SPAN_DEN)
+        move    R2, R1
+        with    R2
+        sub     #8
+        bne     TextureUntexturedDistanceShadeShortBlock
+        nop
+  .repeat 3
+        with    R0
+        lsr
+  .endrepeat
+        move    R2, R0
+        bra     TextureUntexturedDistanceShadeStepReady
+        nop
+TextureUntexturedDistanceShadeShortBlock:
+        jal     TextureDivideBlockUnsigned
+        nop
+TextureUntexturedDistanceShadeStepReady:
+        sm      (TEXTURE_STEP_SHADE_Q8), R2
+
+TextureUntexturedDistanceSpanLoop:
+        lm      R0, (TEXTURE_SPAN_SHADE_Q8)
+        with    R0
+        hib
+        color
+        lm      R1, (TEXTURE_SPAN_X)
+        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R10
+        add     R1
+        move    R1, #0
+        moveb   R1, (R10)
+        lm      R2, (TEXTURE_PLOT_Y)
+        plot
+
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        beq     TextureUntexturedDistanceDone
+        nop
+        inc     R0
+        sm      (TEXTURE_SPAN_X), R0
+
+        lm      R0, (TEXTURE_SPAN_SHADE_Q8)
+        lm      R1, (TEXTURE_STEP_SHADE_Q8)
+        lm      R2, (TEXTURE_SIGN_SHADE)
+        moves   R2, R2
+        bmi     TextureUntexturedDistanceShadeSubtract
+        nop
+        with    R0
+        add     R1
+        bra     TextureUntexturedDistanceShadeAdvanced
+        nop
+TextureUntexturedDistanceShadeSubtract:
+        with    R0
+        sub     R1
+TextureUntexturedDistanceShadeAdvanced:
+        sm      (TEXTURE_SPAN_SHADE_Q8), R0
+
+        lm      R1, (TEXTURE_BLOCK_END_X)
+        lm      R0, (TEXTURE_SPAN_X)
+        with    R0
+        cmp     R1
+        bne     TextureUntexturedDistanceSpanLoop
+        nop
+        lm      R0, (TEXTURE_BLOCK_END_SHADE)
+        with    R0
+        swap
+        sm      (TEXTURE_SPAN_SHADE_Q8), R0
+        lm      R1, (TEXTURE_SPAN_END_X)
+        lm      R0, (TEXTURE_SPAN_X)
+        with    R0
+        cmp     R1
+        beq     TextureUntexturedDistanceSpanLoop
+        nop
+        GSU_ABSOLUTE_GOTO TextureUntexturedDistanceBlockSetup
+
+TextureUntexturedDistanceDone:
+        lm      R11, (TEXTURE_SPAN_RETURN)
+        ret
+        nop
+
+; Return the 0..255 distance index for logical X in R0. The shared perspective
+; solver provides the same fixed-point endpoint contract as technique 3.
+UntexturedDistanceSampleIndex:
+        sm      (TEXTURE_PERSPECTIVE_RETURN), R11
+  .repeat 7
+        with    R0
+        add     R0
+  .endrepeat
+        iwt     R1, #64
+        with    R0
+        add     R1
+        lm      R1, (CONVEX_MIN_X)
+        with    R0
+        sub     R1
+        bpl     UntexturedDistanceSampleNumeratorPositive
+        nop
+        move    R0, #0
+UntexturedDistanceSampleNumeratorPositive:
+        lm      R2, (CONVEX_MAX_X)
+        with    R2
+        sub     R1
+        moves   R2, R2
+        bne     UntexturedDistanceSampleDenReady
+        nop
+        move    R3, #0
+        bra     UntexturedDistanceSampleFactorReady
+        nop
+UntexturedDistanceSampleDenReady:
+        move    R4, R0
+        with    R4
+        sub     R2
+        bmi     UntexturedDistanceSampleDivide
+        nop
+        iwt     R3, #4096
+        bra     UntexturedDistanceSampleFactorReady
+        nop
+UntexturedDistanceSampleDivide:
+        jal     TextureDivideQ12Prepared
+        nop
+UntexturedDistanceSampleFactorReady:
+        jal     TexturePerspectiveFactorQ12
+        nop
+        lm      R7, (TEXTURE_BASE_DEPTH)
+        lm      R1, (TEXTURE_DELTA_DEPTH)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R1, R3
+        with    R7
+        add     R0
+        move    R4, R7
+        jal     UntexturedDistanceIndexFromDepth
+        nop
+        lm      R11, (TEXTURE_PERSPECTIVE_RETURN)
+        ret
+        nop
+
+; Positive Q6 depth enters in R4; return its clamped half-unit LUT result in R0.
+UntexturedDistanceIndexFromDepth:
+  .repeat 5
+        with    R4
+        lsr
+  .endrepeat
+        iwt     R1, #255
+        with    R4
+        cmp     R1
+        bcc     UntexturedDistanceBucketReady
+        nop
+        move    R4, R1
+UntexturedDistanceBucketReady:
+        iwt     R10, #GSU_TEXTURE_DEPTH_SHADE_OFFSET
+        with    R10
+        add     R4
+        move    R0, #0
+        moveb   R0, (R10)
+        ret
+        nop
+
+; Same-leaf brush arbitration already owns exact Q6 depth for the winning
+; pixel. Use that value directly: it costs no extra divide and gives dynamic
+; surfaces exact per-pixel distance while still bypassing every texture read.
+BrushArbiterSpanUntexturedDistance:
+        lm      R4, (TEXTURE_SPAN_X)
+        with    R4
+        add     R4
+        iwt     R10, #GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET
+        with    R10
+        add     R4
+        movew   R4, (R10)
+        jal     UntexturedDistanceIndexFromDepth
+        nop
+        color
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPlot
+
+DEFINE_TEXTURE_SHADED_RASTER TextureRasterPolygonUntexturedDistance, 2
+
+GSU_BrushUntexturedDistanceCode:
+        move    R0, #4
+        sm      (TEXTURE_RENDER_MODE), R0
+        iwt     R1, #BrushArbiterSpanUntexturedDistance
+        GSU_ABSOLUTE_GOTO BrushRendererComposeReady
+
+GSU_UntexturedDistanceCode:
+        move    R0, #1
+        ramb
+        move    R0, #$11
+        cmode
+        move    R0, #4
+        sm      (TEXTURE_RENDER_MODE), R0
+        jal     LoadProjectedPacketState
+        nop
+        jal     TextureRenderFacesDistance
+        nop
+        GSU_FLUSH_PLOT 0, 0
+        iwt     R10, #TELEMETRY
+        iwt     R0, #$B529
+        movew   (R10), R0
+        stop
+        nop

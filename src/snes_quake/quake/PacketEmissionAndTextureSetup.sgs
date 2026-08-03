@@ -1,0 +1,1918 @@
+
+GSU_CACHE_KERNEL_BEGIN PacketAdmissionCopyLoop
+        jal     PacketLoadWorldIndex
+        nop
+        lm      R0, (PACKET_SOURCE_INDEX)
+        with    R0
+        add     R0
+        iwt     R4, #WORLD_VERTEX_REMAP
+        with    R4
+        add     R0
+        movew   R1, (R4)
+        iwt     R2, #PACKET_REMAP_UNSEEN
+        with    R1
+        cmp     R2
+        bne     PacketAdmissionProjectionReady
+        nop
+        ; Screen admission may short-circuit a polygon fan before visiting its
+        ; tail. Project such an accepted tail vertex here exactly once, then
+        ; reload the tagged remap published by the cache-store kernel.
+PacketAdmissionProjectTail:
+        jal     PacketProjectWorldVertex
+        nop
+        lm      R0, (PACKET_SOURCE_INDEX)
+        with    R0
+        add     R0
+        iwt     R4, #WORLD_VERTEX_REMAP
+        with    R4
+        add     R0
+        movew   R1, (R4)
+PacketAdmissionProjectionReady:
+        move    R3, R1
+        iwt     R2, #PACKET_REMAP_STATE_MASK
+        with    R3
+        and     R2
+        moves   R3, R3
+        bne     PacketAdmissionCopyNew
+        nop
+        sm      (PACKET_LOCAL_VERTEX), R1
+        GSU_ABSOLUTE_GOTO PacketAdmissionEmitIndex
+PacketAdmissionCopyNew:
+        sm      (PACKET_CACHE_ENTRY), R1
+        GSU_ABSOLUTE_GOTO PacketAdmissionCopyNewVertex
+GSU_CACHE_KERNEL_END PacketAdmissionCopyLoop
+
+; Convert one tagged projection-cache entry into an accepted packet vertex.
+; The compact Q2 world record is retained for the cold sub-world near clipper;
+; ordinary rendering consumes the already-computed projected/state arrays.
+GSU_CACHE_KERNEL_BEGIN PacketAdmissionCopyNewVertex
+        lm      R1, (PACKET_VERTEX_COUNT)
+        sm      (PACKET_LOCAL_VERTEX), R1
+        lm      R0, (PACKET_SOURCE_INDEX)
+        with    R0
+        add     R0
+        iwt     R4, #WORLD_VERTEX_REMAP
+        with    R4
+        add     R0
+        movew   (R4), R1
+
+        ; Copy cached x/y into the packet-local projection array.
+        lm      R3, (PACKET_CACHE_ENTRY)
+        iwt     R2, #PACKET_REMAP_SLOT_MASK
+        with    R3
+        and     R2
+        move    R0, R3
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        iwt     R10, #PROJECTION_CACHE
+        with    R10
+        add     R0
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        movew   R7, (R10)
+        lm      R0, (PACKET_LOCAL_VERTEX)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        iwt     R10, #PROJECTED
+        with    R10
+        add     R0
+        movew   (R10), R6
+        inc     R10
+        inc     R10
+        movew   (R10), R7
+
+        ; Store 0=far/unprojectable, 1=projectable, 2=behind-near. Renderer
+        ; validity accepts only state 1; state 2 selects precise near clipping.
+        lm      R3, (PACKET_CACHE_ENTRY)
+        iwt     R2, #PACKET_REMAP_STATE_MASK
+        with    R3
+        and     R2
+        iwt     R2, #PACKET_REMAP_PROJECTABLE
+        with    R3
+        cmp     R2
+        beq     PacketAdmissionStateValid
+        nop
+        iwt     R2, #PACKET_REMAP_BEHIND_NEAR
+        with    R3
+        cmp     R2
+        beq     PacketAdmissionStateBehind
+        nop
+        move    R0, #PACKET_PROJECTION_FAR
+        bra     PacketAdmissionStateReady
+        nop
+PacketAdmissionStateValid:
+        move    R0, #PACKET_PROJECTION_VALID
+        bra     PacketAdmissionStateReady
+        nop
+PacketAdmissionStateBehind:
+        move    R0, #PACKET_PROJECTION_BEHIND
+PacketAdmissionStateReady:
+        lm      R1, (PACKET_LOCAL_VERTEX)
+        iwt     R10, #VALID
+        with    R10
+        add     R1
+        moveb   (R10), R0
+
+        ; Copy the first occurrence's compact <bbbB> Q2 source record.
+        lm      R0, (PACKET_SOURCE_INDEX)
+        move    R2, R0
+        with    R2
+        add     R2                       ; 2v
+        with    R2
+        add     R2                       ; 4v
+        iwt     R4, #$8000
+        with    R4
+        add     R2
+        move    R0, #WORLD_VERTICES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        lm      R10, (PACKET_VERTEX_POINTER)
+        BSP_ROM_LOAD_BYTE R0
+        moveb   (R10), R0
+        inc     R10
+        BSP_ROM_LOAD_BYTE R0
+        moveb   (R10), R0
+        inc     R10
+        BSP_ROM_LOAD_BYTE R0
+        moveb   (R10), R0
+        inc     R10
+        BSP_ROM_LOAD_BYTE R0
+        moveb   (R10), R0
+        inc     R10
+        sm      (PACKET_VERTEX_POINTER), R10
+        lm      R1, (PACKET_VERTEX_COUNT)
+        inc     R1
+        sm      (PACKET_VERTEX_COUNT), R1
+        GSU_ABSOLUTE_GOTO PacketAdmissionEmitIndex
+GSU_CACHE_KERNEL_END PacketAdmissionCopyNewVertex
+
+GSU_CACHE_KERNEL_BEGIN PacketAdmissionEmitIndex
+        lm      R1, (PACKET_LOCAL_VERTEX)
+        lm      R10, (PACKET_INDEX_POINTER)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        sm      (PACKET_INDEX_POINTER), R10
+        lm      R0, (PACKET_INDEX_COUNT)
+        inc     R0
+        sm      (PACKET_INDEX_COUNT), R0
+
+        lm      R0, (PACKET_INDEX_CURSOR)
+        inc     R0
+        sm      (PACKET_INDEX_CURSOR), R0
+        lm      R0, (PACKET_FAN_ORDINAL)
+        inc     R0
+        sm      (PACKET_FAN_ORDINAL), R0
+        lm      R1, (PACKET_FACE_VERTICES)
+        with    R0
+        cmp     R1
+        beq     PacketAdmissionCopyDone
+        nop
+        GSU_ABSOLUTE_GOTO PacketAdmissionCopyLoop
+PacketAdmissionCopyDone:
+        GSU_ABSOLUTE_GOTO PacketAdmissionFinish
+GSU_CACHE_KERNEL_END PacketAdmissionEmitIndex
+
+GSU_CACHE_KERNEL_BEGIN PacketAdmissionFinish
+        ; Set the accepted world-face bit without modifying the retained PVS.
+        lm      R0, (PACKET_FACE_ID)
+        move    R1, R0
+        with    R1
+        and     #7
+        with    R0
+        lsr
+        with    R0
+        lsr
+        with    R0
+        lsr
+        iwt     R10, #SELECTED_FACE_BITS
+        with    R10
+        add     R0
+        move    R2, #1
+PacketAdmissionMaskLoop:
+        moves   R1, R1
+        beq     PacketAdmissionMaskReady
+        nop
+        with    R2
+        add     R2
+        dec     R1
+        bra     PacketAdmissionMaskLoop
+        nop
+PacketAdmissionMaskReady:
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        or      R2
+        moveb   (R10), R0
+        GSU_ABSOLUTE_GOTO PacketMarkPainterAncestorsBody
+GSU_CACHE_KERNEL_END PacketAdmissionFinish
+
+; Mark the accepted face's owning node and its ancestors. The generated parent
+; table uses $ffff only for the root and unreachable submodel nodes; stopping at
+; an already-marked ancestor makes total work proportional to the induced tree.
+GSU_CACHE_KERNEL_BEGIN PacketMarkPainterAncestors
+PacketMarkPainterAncestorsBody:
+        lm      R0, (PACKET_FACE_ID)
+        with    R0
+        add     R0
+        iwt     R4, #$8000
+        with    R4
+        add     R0
+        move    R0, #WORLD_FACE_OWNERS_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R3
+
+PacketMarkPainterNode:
+        move    R0, R3
+        move    R1, R0
+        with    R1
+        and     #7
+        with    R0
+        lsr
+        with    R0
+        lsr
+        with    R0
+        lsr
+        iwt     R10, #PAINTER_NODE_BITS
+        with    R10
+        add     R0
+        move    R0, #0
+        moveb   R0, (R10)
+        move    R4, R0
+        move    R2, #1
+PacketMarkPainterMaskLoop:
+        moves   R1, R1
+        beq     PacketMarkPainterMaskReady
+        nop
+        with    R2
+        add     R2
+        dec     R1
+        bra     PacketMarkPainterMaskLoop
+        nop
+PacketMarkPainterMaskReady:
+        with    R0
+        and     R2
+        bne     PacketMarkPainterDone
+        nop
+        with    R4
+        or      R2
+        moveb   (R10), R4
+        moves   R3, R3
+        beq     PacketMarkPainterDone    ; World root is node zero.
+        nop
+
+        move    R0, R3
+        with    R0
+        add     R0
+        iwt     R4, #$8000
+        with    R4
+        add     R0
+        move    R0, #WORLD_NODE_PARENTS_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R3
+        iwt     R0, #$FFFF
+        with    R3
+        cmp     R0
+        beq     PacketMarkPainterParentError
+        nop
+        bra     PacketMarkPainterNode
+        nop
+
+PacketMarkPainterParentError:
+        move    R0, #5
+        sm      (GSU_TELEMETRY_ERROR), R0
+PacketMarkPainterDone:
+        lm      R0, (PACKET_FACE_COUNT)
+        inc     R0
+        sm      (PACKET_FACE_COUNT), R0
+        GSU_ABSOLUTE_GOTO PacketScanNextBit
+GSU_CACHE_KERNEL_END PacketMarkPainterAncestors
+
+; Admission no longer needs the world-vertex remap.  Reuse its first 10 KiB
+; as an exact world-face -> packet-first-index map so painter emission stays
+; linear even for the 299-face far packet.
+GSU_CACHE_KERNEL_BEGIN PacketBuildFaceLookup
+        iwt     R10, #PACKET_SIDECARS
+        lm      R12, (PACKET_FACE_COUNT)
+        moves   R12, R12
+        bne     PacketBuildFaceLookupLoop
+        nop
+        GSU_ABSOLUTE_GOTO PacketPainterBegin
+PacketBuildFaceLookupLoop:
+        movew   R0, (R10)               ; World face ID.
+        inc     R10
+        inc     R10
+        movew   R1, (R10)               ; Packet-local first index.
+        inc     R10
+        inc     R10
+        with    R0
+        add     R0
+        iwt     R4, #WORLD_VERTEX_REMAP
+        with    R4
+        add     R0
+        movew   (R4), R1
+        dec     R12
+        bne     PacketBuildFaceLookupLoop
+        nop
+        GSU_ABSOLUTE_GOTO PacketPainterBegin
+GSU_CACHE_KERNEL_END PacketBuildFaceLookup
+
+; Load the packed 10-byte world node named by PACKET_PAINTER_NODE.
+GSU_CACHE_KERNEL_BEGIN PacketLoadPainterNode
+PacketLoadPainterNodeBody:
+        lm      R0, (PACKET_PAINTER_NODE)
+        move    R1, R0
+        with    R1
+        add     R1                       ; 2n
+        move    R2, R1
+        with    R1
+        add     R1                       ; 4n
+        with    R1
+        add     R1                       ; 8n
+        with    R1
+        add     R2                       ; 10n
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_NODES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (PACKET_NODE_PLANE), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (PACKET_NODE_FRONT), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (PACKET_NODE_BACK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (PACKET_PAINTER_FACE), R0
+        BSP_ROM_LOAD_WORD R1
+        with    R1
+        add     R0
+        sm      (PACKET_PAINTER_FACE_END), R1
+        ret
+        nop
+GSU_CACHE_KERNEL_END PacketLoadPainterNode
+
+GSU_CACHE_KERNEL_BEGIN PacketPainterBegin
+PacketPainterBeginBody:
+        iwt     R0, #FACES
+        sm      (PACKET_FACE_OUTPUT), R0
+        iwt     R0, #FACE_PLANES
+        sm      (PACKET_PLANE_OUTPUT), R0
+        iwt     R0, #PACKET_SOURCE_FACES
+        sm      (PACKET_SOURCE_FACE_OUTPUT), R0
+        iwt     R10, #PACKET_PAINTER_STACK
+        move    R0, #BSP_WORLD_ROOT_NODE
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        sm      (PACKET_PAINTER_SP), R10
+        move    R0, #0
+        sm      (PACKET_EMITTED_COUNT), R0
+        GSU_ABSOLUTE_GOTO PacketPainterNextFrameBody
+GSU_CACHE_KERNEL_END PacketPainterBegin
+
+GSU_CACHE_KERNEL_BEGIN PacketPainterNextFrame
+PacketPainterNextFrameBody:
+        lm      R10, (PACKET_PAINTER_SP)
+        iwt     R0, #PACKET_PAINTER_STACK
+        move    R1, R10
+        with    R1
+        cmp     R0
+        beq     PacketPainterDone
+        nop
+        dec     R10
+        dec     R10
+        movew   R0, (R10)
+        sm      (PACKET_PAINTER_SP), R10
+        moves   R0, R0
+        bmi     PacketPainterNextFrameBody
+        nop                              ; Negative child encodes a leaf.
+        iwt     R2, #$4000
+        move    R1, R0
+        with    R1
+        and     R2
+        bne     PacketPainterEmitPhase
+        nop
+        sm      (PACKET_PAINTER_NODE), R0
+
+        ; Reject inactive child subtrees before loading their node or plane.
+        move    R3, R0
+        move    R1, R0
+        with    R1
+        and     #7
+        with    R0
+        lsr
+        with    R0
+        lsr
+        with    R0
+        lsr
+        iwt     R10, #PAINTER_NODE_BITS
+        with    R10
+        add     R0
+        move    R0, #0
+        moveb   R0, (R10)
+        move    R2, #1
+PacketPainterNodeMaskLoop:
+        moves   R1, R1
+        beq     PacketPainterNodeMaskReady
+        nop
+        with    R2
+        add     R2
+        dec     R1
+        bra     PacketPainterNodeMaskLoop
+        nop
+PacketPainterNodeMaskReady:
+        with    R0
+        and     R2
+        beq     PacketPainterNextFrameBody
+        nop
+        move    R0, R3
+        sm      (PACKET_PAINTER_NODE), R0
+        GSU_ABSOLUTE_GOTO PacketPainterVisitNodeBody
+PacketPainterEmitPhase:
+        iwt     R2, #$3FFF
+        with    R0
+        and     R2
+        sm      (PACKET_PAINTER_NODE), R0
+        ; The visit phase placed this node's face range immediately below its
+        ; emit token, avoiding a second 10-byte world-node ROM load.
+        dec     R10
+        dec     R10
+        movew   R1, (R10)
+        sm      (PACKET_PAINTER_FACE_END), R1
+        dec     R10
+        dec     R10
+        movew   R1, (R10)
+        sm      (PACKET_PAINTER_FACE), R1
+        sm      (PACKET_PAINTER_SP), R10
+        GSU_ABSOLUTE_GOTO PacketPainterEmitNodeBody
+PacketPainterDone:
+        GSU_ABSOLUTE_GOTO PacketFinalizeBody
+GSU_CACHE_KERNEL_END PacketPainterNextFrame
+
+; Push near, face start/end, emit-phase, far. LIFO processing therefore matches
+; the oracle's recursive far/node/near traversal while carrying the node face
+; range into the emit phase without another ROM read.
+GSU_CACHE_KERNEL_BEGIN PacketPainterVisitNode
+PacketPainterVisitNodeBody:
+        jal     PacketLoadPainterNodeBody
+        nop
+        lm      R0, (PACKET_NODE_PLANE)
+        move    R1, R0
+        with    R1
+        add     R1                       ; 2p
+        with    R1
+        add     R1                       ; 4p
+        with    R1
+        add     R0                       ; 5p
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_PLANES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_SIGNED_BYTE R7
+        BSP_ROM_LOAD_SIGNED_BYTE R8
+        BSP_ROM_LOAD_SIGNED_BYTE R9
+        BSP_ROM_LOAD_WORD R10
+        lm      R0, (PACKET_CAMERA_X)
+        move    R6, R0
+        with    R6
+        mult    R7
+        lm      R0, (PACKET_CAMERA_Y)
+        move    R1, R0
+        with    R1
+        mult    R8
+        with    R6
+        add     R1
+        lm      R0, (PACKET_CAMERA_Z)
+        move    R1, R0
+        with    R1
+        mult    R9
+        with    R6
+        add     R1
+        with    R6
+        sub     R10
+        bmi     PacketPainterCameraBack
+        nop
+        lm      R7, (PACKET_NODE_FRONT)  ; near
+        lm      R8, (PACKET_NODE_BACK)   ; far
+        bra     PacketPainterChildrenReady
+        nop
+PacketPainterCameraBack:
+        lm      R7, (PACKET_NODE_BACK)   ; near
+        lm      R8, (PACKET_NODE_FRONT)  ; far
+PacketPainterChildrenReady:
+        lm      R10, (PACKET_PAINTER_SP)
+        movew   (R10), R7                ; near: processed last
+        inc     R10
+        inc     R10
+        lm      R0, (PACKET_PAINTER_FACE)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (PACKET_PAINTER_FACE_END)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (PACKET_PAINTER_NODE)
+        iwt     R1, #$4000
+        with    R0
+        or      R1
+        movew   (R10), R0                ; emit this node after far subtree
+        inc     R10
+        inc     R10
+        movew   (R10), R8                ; far: processed next
+        inc     R10
+        inc     R10
+        sm      (PACKET_PAINTER_SP), R10
+        iwt     R0, #PACKET_PAINTER_STACK_END+1
+        move    R1, R10
+        with    R1
+        cmp     R0
+        bcs     PacketPainterStackError
+        nop
+        GSU_ABSOLUTE_GOTO PacketPainterNextFrameBody
+PacketPainterStackError:
+        move    R0, #1
+        sm      (GSU_TELEMETRY_ERROR), R0
+        GSU_ABSOLUTE_GOTO PacketFinalizeBody
+GSU_CACHE_KERNEL_END PacketPainterVisitNode
+
+GSU_CACHE_KERNEL_BEGIN PacketPainterEmitNode
+PacketPainterEmitNodeBody:
+        lm      R0, (PACKET_PAINTER_FACE)
+        lm      R1, (PACKET_PAINTER_FACE_END)
+        with    R0
+        cmp     R1
+        beq     PacketPainterNodeDone
+        nop
+PacketPainterFaceLoop:
+        ; Test this source face in the accepted-face bitset.
+        lm      R3, (PACKET_PAINTER_FACE)
+        move    R0, R3
+        move    R1, R0
+        with    R1
+        and     #7
+        with    R0
+        lsr
+        with    R0
+        lsr
+        with    R0
+        lsr
+        iwt     R10, #SELECTED_FACE_BITS
+        with    R10
+        add     R0
+        move    R0, #0
+        moveb   R0, (R10)
+        move    R2, #1
+PacketPainterTestMask:
+        moves   R1, R1
+        beq     PacketPainterTestReady
+        nop
+        with    R2
+        add     R2
+        dec     R1
+        bra     PacketPainterTestMask
+        nop
+PacketPainterTestReady:
+        with    R0
+        and     R2
+        beq     PacketPainterNextFace
+        nop
+        move    R0, R3
+        with    R0
+        add     R0
+        iwt     R10, #WORLD_VERTEX_REMAP
+        with    R10
+        add     R0
+        movew   R5, (R10)               ; Packet-local first index.
+        sm      (PACKET_SOURCE_INDEX), R3
+        sm      (PACKET_FACE_FIRST), R5
+        GSU_ABSOLUTE_GOTO PacketPainterCopyFaceBody
+PacketPainterNextFace:
+        lm      R0, (PACKET_PAINTER_FACE)
+        inc     R0
+        sm      (PACKET_PAINTER_FACE), R0
+        lm      R1, (PACKET_PAINTER_FACE_END)
+        with    R0
+        cmp     R1
+        bne     PacketPainterFaceLoop
+        nop
+PacketPainterNodeDone:
+        GSU_ABSOLUTE_GOTO PacketPainterNextFrameBody
+GSU_CACHE_KERNEL_END PacketPainterEmitNode
+
+GSU_CACHE_KERNEL_BEGIN PacketPainterCopyFace
+PacketPainterCopyFaceBody:
+        lm      R3, (PACKET_SOURCE_INDEX)
+        lm      R5, (PACKET_FACE_FIRST)
+        lm      R10, (PACKET_FACE_OUTPUT)
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        ; Source face bytes 2..5 follow its unused world first-index word.
+        move    R1, R3
+        with    R1
+        add     R1
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2
+        with    R1
+        add     #2
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_FACES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        moveb   (R10), R0
+        inc     R10
+        BSP_ROM_LOAD_BYTE R0
+        BSP_ROM_LOAD_BYTE R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (PACKET_FACE_FLAGS), R0
+        sm      (PACKET_FACE_OUTPUT), R10
+
+PacketShadeFaceBody:
+        ; Load signed map-centered centroid xyz and packed family/base light.
+        lm      R3, (PACKET_SOURCE_INDEX)
+        move    R1, R3
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_SHADING_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_SIGNED_BYTE R5
+        BSP_ROM_LOAD_SIGNED_BYTE R6
+        BSP_ROM_LOAD_SIGNED_BYTE R7
+        BSP_ROM_LOAD_BYTE R11
+
+        BSP_ABS_CAMERA_DISTANCE R5, PACKET_CAMERA_X
+        BSP_ABS_CAMERA_DISTANCE R6, PACKET_CAMERA_Y
+        BSP_ABS_CAMERA_DISTANCE R7, PACKET_CAMERA_Z
+
+        ; Sum, maximum, and minimum recover the middle axis without sorting.
+        move    R9, R5
+        with    R9
+        add     R6
+        with    R9
+        add     R7
+        move    R8, R5
+        move    R0, R6
+        with    R0
+        sub     R8
+        bmi     PacketShadeMaxYReady
+        nop
+        move    R8, R6
+PacketShadeMaxYReady:
+        move    R0, R7
+        with    R0
+        sub     R8
+        bmi     PacketShadeMaxReady
+        nop
+        move    R8, R7
+PacketShadeMaxReady:
+        move    R4, R5
+        move    R0, R6
+        with    R0
+        sub     R4
+        bpl     PacketShadeMinYReady
+        nop
+        move    R4, R6
+PacketShadeMinYReady:
+        move    R0, R7
+        with    R0
+        sub     R4
+        bpl     PacketShadeMinReady
+        nop
+        move    R4, R7
+PacketShadeMinReady:
+        ; max + middle/2 + min/4, then clamp to the 128-byte bucket LUT.
+        with    R9
+        sub     R8
+        with    R9
+        sub     R4
+        with    R9
+        lsr
+        with    R4
+        lsr
+        with    R4
+        lsr
+        with    R8
+        add     R9
+        with    R8
+        add     R4
+        iwt     R0, #127
+        move    R1, R8
+        with    R1
+        cmp     R0
+        bmi     PacketShadeDistanceReady
+        nop
+        move    R8, R0
+PacketShadeDistanceReady:
+        iwt     R4, #$8000+BSP_WORLD_SHADING_DISTANCE_LUT_OFFSET
+        with    R4
+        add     R8
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R9
+
+        ; Lookup index = (family*9 + base light)*8 + distance bucket.
+        ; Each two-byte result is the packet's existing flat/checker pair.
+        move    R1, R11
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        move    R2, R9
+        with    R2
+        add     R2
+        with    R1
+        add     R2
+        iwt     R4, #$8000+BSP_WORLD_SHADING_TABLE_OFFSET
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        lm      R10, (PACKET_FACE_OUTPUT)
+        BSP_ROM_LOAD_BYTE R0
+        moveb   (R10), R0
+        inc     R10
+        BSP_ROM_LOAD_BYTE R0
+        moveb   (R10), R0
+        inc     R10
+        lm      R0, (PACKET_FACE_FLAGS)
+        moveb   (R10), R0
+        inc     R10
+        sm      (PACKET_FACE_OUTPUT), R10
+
+PacketPainterCopyPlaneBody:
+        lm      R3, (PACKET_SOURCE_INDEX)
+        ; Copy its aligned five-byte oriented plane.
+        move    R1, R3
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R3
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_FACE_PLANES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        lm      R10, (PACKET_PLANE_OUTPUT)
+        .repeat 5
+                BSP_ROM_LOAD_BYTE R0
+                moveb   (R10), R0
+                inc     R10
+        .endrepeat
+        sm      (PACKET_PLANE_OUTPUT), R10
+        lm      R3, (PACKET_SOURCE_INDEX)
+        lm      R10, (PACKET_SOURCE_FACE_OUTPUT)
+        movew   (R10), R3
+        inc     R10
+        inc     R10
+        sm      (PACKET_SOURCE_FACE_OUTPUT), R10
+        lm      R0, (PACKET_EMITTED_COUNT)
+        inc     R0
+        sm      (PACKET_EMITTED_COUNT), R0
+        GSU_ABSOLUTE_GOTO PacketPainterNextFace
+GSU_CACHE_KERNEL_END PacketPainterCopyFace
+
+GSU_CACHE_KERNEL_BEGIN PacketFinalize
+PacketFinalizeBody:
+        lm      R0, (PACKET_EMITTED_COUNT)
+        lm      R1, (PACKET_FACE_COUNT)
+        with    R0
+        cmp     R1
+        beq     PacketFinalizeCounts
+        nop
+        move    R0, #3
+        sm      (GSU_TELEMETRY_ERROR), R0
+PacketFinalizeCounts:
+        lm      R0, (PACKET_VERTEX_COUNT)
+        sm      (GSU_TELEMETRY_PACKET_VERTEX_COUNT), R0
+        lm      R0, (PACKET_INDEX_COUNT)
+        sm      (GSU_TELEMETRY_PACKET_INDEX_COUNT), R0
+        lm      R0, (PACKET_EMITTED_COUNT)
+        sm      (GSU_TELEMETRY_PACKET_FACE_COUNT), R0
+        sm      (GSU_TELEMETRY_PACKET_PLANE_COUNT), R0
+        lm      R0, (PACKET_REJECT_FACE)
+        sm      (GSU_TELEMETRY_REJECT_FACE), R0
+        lm      R0, (PACKET_REJECT_VERTEX)
+        sm      (GSU_TELEMETRY_REJECT_VERTEX), R0
+        lm      R0, (PACKET_REJECT_INDEX)
+        sm      (GSU_TELEMETRY_REJECT_INDEX), R0
+
+        iwt     R1, #PACKET_GUARD_VALUE
+        lm      R0, (PACKET_REMAP_GUARD)
+        with    R0
+        cmp     R1
+        bne     PacketGuardBad
+        nop
+        lm      R0, (PACKET_SELECTED_GUARD)
+        with    R0
+        cmp     R1
+        bne     PacketGuardBad
+        nop
+        lm      R0, (PACKET_SIDECAR_GUARD)
+        with    R0
+        cmp     R1
+        bne     PacketGuardBad
+        nop
+        lm      R0, (PACKET_VERTEX_GUARD)
+        with    R0
+        cmp     R1
+        bne     PacketGuardBad
+        nop
+        lm      R0, (PACKET_INDEX_GUARD)
+        with    R0
+        cmp     R1
+        bne     PacketGuardBad
+        nop
+        lm      R0, (PACKET_PLANE_GUARD)
+        with    R0
+        cmp     R1
+        bne     PacketGuardBad
+        nop
+        lm      R0, (PACKET_PAINTER_NODE_GUARD)
+        with    R0
+        cmp     R1
+        bne     PacketGuardBad
+        nop
+        lm      R0, (PACKET_PROJECTION_GUARD)
+        with    R0
+        cmp     R1
+        bne     PacketGuardBad
+        nop
+        sm      (GSU_TELEMETRY_GUARD_STATUS), R1
+        bra     PacketGuardDone
+        nop
+PacketGuardBad:
+        move    R0, #0
+        sm      (GSU_TELEMETRY_GUARD_STATUS), R0
+        lm      R0, (GSU_TELEMETRY_ERROR)
+        moves   R0, R0
+        bne     PacketGuardDone
+        nop
+        move    R0, #4
+        sm      (GSU_TELEMETRY_ERROR), R0
+PacketGuardDone:
+        lm      R0, (GSU_TELEMETRY_PACKET_REVISION)
+        inc     R0
+        sm      (GSU_TELEMETRY_PACKET_REVISION), R0
+        iwt     R0, #$B529               ; Commit marker is always last.
+        sm      (GSU_TELEMETRY_MAGIC), R0
+        stop
+        nop
+GSU_CACHE_KERNEL_END PacketFinalize
+
+GSU_CACHE_KERNEL_BEGIN GSU_Code
+        ; Closed BSP views overwrite every logical sample. Production keeps the
+        ; prior framebuffer intact until geometry replaces it; only the
+        ; test-only coverage entry seeds poison patterns.
+        move    R0, #1
+        ramb
+        iwt     R10, #COMMAND+5
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        sex
+        beq     FlatColorMode
+        nop
+        move    R0, #$12               ; OBJ layout plus 4bpp checker dithering.
+        cmode
+        bra     ColorModeReady
+        nop
+FlatColorMode:
+        move    R0, #$10               ; OBJ layout, one 4bpp index per face.
+        cmode
+ColorModeReady:
+
+        jal     LoadProjectedPacketState
+        nop
+        jal     RasterHotKernel
+        nop
+        jal     RenderFaces
+        nop
+        GSU_FLUSH_PLOT 0, 0
+        move    R0, #0
+        ramb
+        jal     ExpandFrame
+        nop
+
+        move    R0, #1
+        ramb
+        iwt     R10, #TELEMETRY
+        iwt     R0, #$B529
+        movew   (R10), R0
+        stop
+        nop
+GSU_CACHE_KERNEL_END GSU_Code
+
+;-------------------------------------------------------------------------------
+; Standalone perspective-correct albedo renderer. It shares the proven Q12
+; edge/block coordinate contract with technique 4, but keeps an independent
+; pixel loop with no lightmap, shade, dither, or palette remap work.
+GSU_CACHE_KERNEL_BEGIN GSU_TextureCode
+        move    R0, #1
+        ramb
+        move    R0, #$11                  ; 8bpp with palette index zero opaque
+        cmode
+        move    R0, #2
+        sm      (TEXTURE_RENDER_MODE), R0
+        jal     LoadProjectedPacketState
+        nop
+        jal     TextureRenderFaces
+        nop
+        GSU_FLUSH_PLOT 0, 0
+        iwt     R10, #TELEMETRY
+        iwt     R0, #$B529
+        movew   (R10), R0
+        stop
+        nop
+GSU_CACHE_KERNEL_END GSU_TextureCode
+
+; Standalone exact-index depth experiment. Geometry and texel sampling remain
+; independent of the unshaded kernel; the final index passes through Quake's
+; colormap using a shade interpolated from camera-space depth across each span.
+GSU_CACHE_KERNEL_BEGIN GSU_TextureShadeCode
+        move    R0, #1
+        ramb
+        move    R0, #$11
+        cmode
+        move    R0, #0
+        sm      (TEXTURE_RENDER_MODE), R0
+        jal     LoadProjectedPacketState
+        nop
+        jal     TextureRenderFacesShaded
+        nop
+        GSU_FLUSH_PLOT 0, 0
+        iwt     R10, #TELEMETRY
+        iwt     R0, #$B529
+        movew   (R10), R0
+        stop
+        nop
+GSU_CACHE_KERNEL_END GSU_TextureShadeCode
+
+; Static BSP29 lightmap experiment. Q12 perspective edges and eight-pixel span
+; blocks produce absolute signed-Q4 coordinates; a face-local 16-unit grid
+; selects Quake colormap rows. Styles were combined offline at neutral scale.
+GSU_CACHE_KERNEL_BEGIN GSU_TextureLightmapCode
+        move    R0, #1
+        ramb
+        move    R0, #$11                  ; 8bpp with palette index zero opaque
+        cmode
+        move    R0, #1
+        sm      (TEXTURE_RENDER_MODE), R0
+        jal     LoadProjectedPacketState
+        jal     TextureRenderFaces
+        GSU_FLUSH_PLOT 0, 0
+        iwt     R10, #TELEMETRY
+        iwt     R0, #$B529
+        movew   (R10), R0
+        stop
+        nop
+GSU_CACHE_KERNEL_END GSU_TextureLightmapCode
+
+TextureRenderFaces:
+        sm      (TEXTURE_RETURN), R11
+        lm      R0, (GSU_TELEMETRY_PACKET_FACE_COUNT)
+        moves   R0, R0
+        bne     TextureFacesPresent
+        nop
+        GSU_ABSOLUTE_GOTO TextureFacesDone
+TextureFacesPresent:
+        jal     BuildPacketViewCache
+        nop
+        iwt     R0, #FACES
+        sm      (FACE_POINTER), R0
+        iwt     R0, #PACKET_SOURCE_FACES
+        sm      (TEXTURE_SOURCE_FACE_PTR), R0
+        lm      R0, (GSU_TELEMETRY_PACKET_FACE_COUNT)
+        sm      (FACES_LEFT), R0
+
+TextureFaceLoop:
+        lm      R10, (FACE_POINTER)
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        move    R1, #0
+        moveb   R1, (R10)
+        sm      (CONVEX_FACE_VERTICES), R1
+        with    R6
+        add     R6
+        iwt     R10, #INDICES
+        with    R10
+        add     R6
+        sm      (CONVEX_INDEX_PTR), R10
+
+        lm      R10, (TEXTURE_SOURCE_FACE_PTR)
+        movew   R3, (R10)
+        inc     R10
+        inc     R10
+        sm      (TEXTURE_SOURCE_FACE_PTR), R10
+        sm      (PACKET_SOURCE_INDEX), R3
+
+        ; Recover the source face's first world-index element.
+        move    R1, R3
+        with    R1
+        add     R1
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_FACES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_WORLD_INDEX), R0
+
+        ; One byte per source world face selects a packed exact miptex.
+        lm      R3, (PACKET_SOURCE_INDEX)
+        iwt     R4, #BSP_WORLD_FACE_TEXTURE_ID_GSU_ROM_ADDRESS
+        with    R4
+        add     R3
+        move    R0, #WORLD_TEXTURE_AUX_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ID), R0
+        iwt     R1, #$00FF
+        with    R0
+        cmp     R1
+        bne     TextureFaceTextureReady
+        nop
+        GSU_ABSOLUTE_GOTO TextureFaceAdvance
+TextureFaceTextureReady:
+
+        ; Directory record: ROM bank, address, width, height, flags.
+        lm      R1, (TEXTURE_ID)
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R4, #BSP_WORLD_TEXTURE_DIRECTORY_GSU_ROM_ADDRESS
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ROM_BANK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_ROM_ADDRESS), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_WIDTH), R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (TEXTURE_WIDTH_Q4), R0
+        dec     R0
+        sm      (TEXTURE_WRAP_MASK_S), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_HEIGHT), R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (TEXTURE_HEIGHT_Q4), R0
+        dec     R0
+        sm      (TEXTURE_WRAP_MASK_T), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_WRAP_FLAGS), R0
+        jal     TextureSelectSampleRoutine
+
+        ; Mode 1 is the independently optimized lightmapped renderer. Mode 2
+        ; uses the same projective geometry contract but a separate albedo
+        ; raster/pixel loop, so neither hot path pays for the other's work.
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        bne     TextureFaceProjectiveAlbedo
+        nop
+        jal     TextureLoadFaceLightmap
+        jal     TextureRenderConvexFaceShaded
+        bra     TextureFaceAdvance
+        nop
+TextureFaceProjectiveAlbedo:
+        jal     TextureRenderConvexFaceAlbedo
+        nop
+TextureFaceAdvance:
+        lm      R0, (FACE_POINTER)
+        with    R0
+        add     #BSP_FACE_RECORD_BYTES
+        sm      (FACE_POINTER), R0
+        lm      R0, (FACES_LEFT)
+        dec     R0
+        sm      (FACES_LEFT), R0
+        beq     TextureFacesDone
+        nop
+        GSU_ABSOLUTE_GOTO TextureFaceLoop
+TextureFacesDone:
+        lm      R11, (TEXTURE_RETURN)
+        ret
+        nop
+
+; Generate independent face walkers without adding a mode branch to their
+; per-face setup. The retained affine walker expands exactly as before, while
+; textured Distance opts into projective wrap/sampler state.
+.macro DEFINE_TEXTURE_SHADE_FACE_WALKER entry, face_renderer, projective_sampler
+        .local FacesPresent, FaceLoop, FaceAdvance, FacesDone
+entry:
+        sm      (TEXTURE_RETURN), R11
+        lm      R0, (GSU_TELEMETRY_PACKET_FACE_COUNT)
+        moves   R0, R0
+        bne     FacesPresent
+        nop
+        GSU_ABSOLUTE_GOTO FacesDone
+FacesPresent:
+        jal     BuildPacketViewCache
+        nop
+        iwt     R0, #FACES
+        sm      (FACE_POINTER), R0
+        iwt     R0, #PACKET_SOURCE_FACES
+        sm      (TEXTURE_SOURCE_FACE_PTR), R0
+        lm      R0, (GSU_TELEMETRY_PACKET_FACE_COUNT)
+        sm      (FACES_LEFT), R0
+
+FaceLoop:
+        lm      R10, (FACE_POINTER)
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        move    R1, #0
+        moveb   R1, (R10)
+        sm      (CONVEX_FACE_VERTICES), R1
+        with    R6
+        add     R6
+        iwt     R10, #INDICES
+        with    R10
+        add     R6
+        sm      (CONVEX_INDEX_PTR), R10
+
+        lm      R10, (TEXTURE_SOURCE_FACE_PTR)
+        movew   R3, (R10)
+        inc     R10
+        inc     R10
+        sm      (TEXTURE_SOURCE_FACE_PTR), R10
+        sm      (PACKET_SOURCE_INDEX), R3
+
+        move    R1, R3
+        with    R1
+        add     R1
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_FACES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_WORLD_INDEX), R0
+
+        lm      R3, (PACKET_SOURCE_INDEX)
+        iwt     R4, #BSP_WORLD_FACE_TEXTURE_ID_GSU_ROM_ADDRESS
+        with    R4
+        add     R3
+        move    R0, #WORLD_TEXTURE_AUX_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ID), R0
+        iwt     R1, #$00FF
+        with    R0
+        cmp     R1
+        beq     FaceAdvance
+        nop
+
+        lm      R1, (TEXTURE_ID)
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R4, #BSP_WORLD_TEXTURE_DIRECTORY_GSU_ROM_ADDRESS
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ROM_BANK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_ROM_ADDRESS), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_WIDTH), R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (TEXTURE_WIDTH_Q4), R0
+  .if projective_sampler
+        dec     R0
+        sm      (TEXTURE_WRAP_MASK_S), R0
+  .endif
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_HEIGHT), R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (TEXTURE_HEIGHT_Q4), R0
+  .if projective_sampler
+        dec     R0
+        sm      (TEXTURE_WRAP_MASK_T), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_WRAP_FLAGS), R0
+        jal     TextureSelectSampleRoutine
+  .endif
+
+        jal     face_renderer
+        nop
+FaceAdvance:
+        lm      R0, (FACE_POINTER)
+        with    R0
+        add     #BSP_FACE_RECORD_BYTES
+        sm      (FACE_POINTER), R0
+        lm      R0, (FACES_LEFT)
+        dec     R0
+        sm      (FACES_LEFT), R0
+        beq     FacesDone
+        nop
+        GSU_ABSOLUTE_GOTO FaceLoop
+FacesDone:
+        lm      R11, (TEXTURE_RETURN)
+        ret
+        nop
+.endmacro
+
+; Retained affine technique 5 keeps its original face instruction stream.
+DEFINE_TEXTURE_SHADE_FACE_WALKER TextureRenderFacesShaded, TextureRenderConvexFaceShaded, 0
+
+; Load the seven-byte source-face lightmap directory record. A bank byte of
+; $ff denotes an intentionally unlightmapped surface. Vanilla Quake starts
+; an ordinary surface at ambient light; the default ambient of zero selects
+; the darkest colormap row. The otherwise-unused address word stores that
+; encoded row, while sky/turbulent surfaces retain row-zero special rendering.
+TextureLoadFaceLightmap:
+        sm      (LIGHTMAP_LOAD_RETURN), R11
+        lm      R3, (PACKET_SOURCE_INDEX)
+        move    R1, R3
+        with    R1
+        add     R1                       ; 2f
+        with    R1
+        add     R1                       ; 4f
+        with    R1
+        add     R1                       ; 8f
+        with    R1
+        sub     R3                       ; 7f
+        iwt     R4, #BSP_WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        ; Signed loading maps the $ff "no lightmap" sentinel to -1, allowing
+        ; the per-pixel sampler to test its sign without materializing $00ff.
+        BSP_ROM_LOAD_SIGNED_BYTE R0
+        sm      (LIGHTMAP_ROM_BANK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (LIGHTMAP_ROM_ADDRESS), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (LIGHTMAP_WIDTH), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (LIGHTMAP_HEIGHT), R0
+        BSP_ROM_LOAD_SIGNED_BYTE R0
+        sm      (LIGHTMAP_MIN_BLOCK_S), R0
+        BSP_ROM_LOAD_SIGNED_BYTE R0
+        sm      (LIGHTMAP_MIN_BLOCK_T), R0
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bmi     TextureLoadFaceLightmapDone
+        nop
+        romb
+        lm      R4, (LIGHTMAP_ROM_ADDRESS)
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        lm      R0, (LIGHTMAP_WIDTH)
+        lm      R6, (LIGHTMAP_HEIGHT)
+        with    R0
+        umult   R6
+        move    R12, R0
+        iwt     R10, #GSU_LIGHTMAP_CACHE_OFFSET
+        sm      (LIGHTMAP_ROM_ADDRESS), R10
+        iwt     R5, #$00C0
+        iwt     R13, #TextureLoadFaceLightmapCacheLoop
+TextureLoadFaceLightmapCacheLoop:
+        BSP_ROM_LOAD_BYTE R0
+        with    R0
+        add     R5
+        moveb   (R10), R0
+        inc     R10
+        loop
+        nop
+        ; Recover the world loader link before its state word becomes the
+        ; adjusted address used by every positive-bank interior sample.
+        lm      R7, (LIGHTMAP_LOAD_RETURN)
+        jal     LightmapPublishAdjustedAddress
+        nop
+        with    R7
+        to      R11
+        ret
+        nop
+TextureLoadFaceLightmapDone:
+        lm      R11, (LIGHTMAP_LOAD_RETURN)
+        ret
+        nop
+
+; E1M3 face-coordinate runs never cross an 8K-record ROM bank. Establish the
+; sequential stream once per face, then consume its signed Q4 s,t words.
+TextureBeginCoordinateStream:
+        lm      R0, (TEXTURE_WORLD_INDEX)
+        move    R1, R0
+  .repeat 13
+        with    R1
+        lsr
+  .endrepeat
+        move    R3, #WORLD_TEXCOORD_FIRST_ROM_BANK
+        with    R1
+        add     R3
+        move    R0, R1
+        romb
+        lm      R1, (TEXTURE_WORLD_INDEX)
+        iwt     R3, #$1FFF
+        with    R1
+        and     R3
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        ret
+        nop
+
+TextureLoadCoordinate:
+        BSP_ROM_LOAD_WORD R5
+        sm      (TEXTURE_CUR_S), R5
+        BSP_ROM_LOAD_WORD R5
+        sm      (TEXTURE_CUR_T), R5
+        ret
+        nop
+
+TextureRenderConvexFace:
+        sm      (TEXTURE_FACE_RETURN), R11
+        jal     TextureBeginCoordinateStream
+        nop
+        iwt     R0, #TEXTURE_VIEW_A
+        sm      (CONVEX_OUTPUT_CURSOR), R0
+        move    R0, #0
+        sm      (CONVEX_OUTPUT_COUNT), R0
+        lm      R0, (CONVEX_FACE_VERTICES)
+        sm      (CONVEX_EDGE_COUNT), R0
+TextureTransformLoop:
+        lm      R10, (CONVEX_INDEX_PTR)
+        movew   R0, (R10)
+        inc     R10
+        inc     R10
+        sm      (CONVEX_INDEX_PTR), R10
+        sm      (CLIP_VERTEX_INDEX), R0
+        jal     TextureLoadCoordinate
+        jal     LoadPacketViewVertex
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        bne     TextureTransformLoop
+        nop
+
+        iwt     R0, #TEXTURE_VIEW_A
+        sm      (CONVEX_INPUT_PTR), R0
+        iwt     R0, #TEXTURE_VIEW_B
+        sm      (CONVEX_OUTPUT_PTR), R0
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        sm      (CONVEX_COUNT), R0
+        move    R0, #0
+        sm      (CONVEX_PLANE), R0
+TexturePlaneLoop:
+        jal     TextureClipPlane
+        nop
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        move    R1, #3
+        with    R0
+        cmp     R1
+        bcs     TexturePlaneHasPolygon
+        nop
+        bra     TextureFaceDone
+        nop
+TexturePlaneHasPolygon:
+        sm      (CONVEX_COUNT), R0
+        lm      R1, (CONVEX_INPUT_PTR)
+        lm      R2, (CONVEX_OUTPUT_PTR)
+        sm      (CONVEX_INPUT_PTR), R2
+        sm      (CONVEX_OUTPUT_PTR), R1
+        lm      R0, (CONVEX_PLANE)
+        inc     R0
+        sm      (CONVEX_PLANE), R0
+        move    R1, #4
+        with    R0
+        cmp     R1
+        bne     TexturePlaneLoop
+        nop
+        jal     TextureProjectPolygonShaded
+        nop
+        moves   R0, R0
+        beq     TextureFaceDone
+        nop
+        jal     TextureRasterPolygon
+        nop
+TextureFaceDone:
+        lm      R11, (TEXTURE_FACE_RETURN)
+        ret
+        nop
+
+; Keep the unshaded face path instruction-for-instruction independent. This
+; sibling shares only cold coordinate/transform/clip helpers, then enters the
+; depth-carrying projector and rasterizer.
+.macro DEFINE_TEXTURE_SHADED_FACE entry, raster, alternate_raster
+        .local TransformLoop, TransformDone
+        .local PlaneLoop, PlaneHasPolygon, PlaneNext, Project, AlternateRaster
+        .local FaceDone
+entry:
+        sm      (TEXTURE_FACE_RETURN), R11
+        jal     TextureBeginCoordinateStream
+        nop
+        iwt     R0, #TEXTURE_VIEW_A
+        sm      (CONVEX_OUTPUT_CURSOR), R0
+        move    R0, #0
+        sm      (CONVEX_OUTPUT_COUNT), R0
+        sm      (TEXTURE_CLIP_OUTCODE), R0
+        lm      R0, (CONVEX_FACE_VERTICES)
+        sm      (CONVEX_EDGE_COUNT), R0
+TransformLoop:
+        lm      R10, (CONVEX_INDEX_PTR)
+        movew   R0, (R10)
+        inc     R10
+        inc     R10
+        sm      (CONVEX_INDEX_PTR), R10
+        sm      (CLIP_VERTEX_INDEX), R0
+        jal     TextureLoadCoordinate
+        jal     LoadPacketViewVertex
+        lm      R1, (TEXTURE_CLIP_OUTCODE)
+        with    R1
+        or      R2
+        sm      (TEXTURE_CLIP_OUTCODE), R1
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        beq     TransformDone
+        nop
+        GSU_ABSOLUTE_GOTO TransformLoop
+TransformDone:
+
+        iwt     R0, #TEXTURE_VIEW_A
+        sm      (CONVEX_INPUT_PTR), R0
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        sm      (CONVEX_COUNT), R0
+        lm      R0, (TEXTURE_CLIP_OUTCODE)
+        moves   R0, R0
+        beq     Project
+        nop
+        iwt     R0, #TEXTURE_VIEW_B
+        sm      (CONVEX_OUTPUT_PTR), R0
+        move    R0, #0
+        sm      (CONVEX_PLANE), R0
+PlaneLoop:
+        lm      R0, (TEXTURE_CLIP_OUTCODE)
+        with    R0
+        lsr
+        sm      (TEXTURE_CLIP_OUTCODE), R0
+        bcc     PlaneNext
+        nop
+        jal     TextureClipPlane
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        move    R1, #3
+        with    R0
+        cmp     R1
+        bcs     PlaneHasPolygon
+        nop
+        bra     FaceDone
+        nop
+PlaneHasPolygon:
+        sm      (CONVEX_COUNT), R0
+        lm      R1, (CONVEX_INPUT_PTR)
+        lm      R2, (CONVEX_OUTPUT_PTR)
+        sm      (CONVEX_INPUT_PTR), R2
+        sm      (CONVEX_OUTPUT_PTR), R1
+PlaneNext:
+        lm      R0, (CONVEX_PLANE)
+        inc     R0
+        sm      (CONVEX_PLANE), R0
+        move    R1, #4
+        with    R0
+        cmp     R1
+        bne     PlaneLoop
+        nop
+Project:
+        jal     TextureProjectPolygonShaded
+        moves   R0, R0
+        beq     FaceDone
+        nop
+  .ifnblank alternate_raster
+        lm      R0, (TEXTURE_RENDER_MODE)
+        move    R1, #4
+        with    R0
+        cmp     R1
+        beq     AlternateRaster
+        nop
+  .endif
+        jal     raster
+  .ifnblank alternate_raster
+        bra     FaceDone
+        nop
+AlternateRaster:
+        jal     alternate_raster
+  .endif
+FaceDone:
+        lm      R11, (TEXTURE_FACE_RETURN)
+        ret
+        nop
+.endmacro
+
+DEFINE_TEXTURE_SHADED_FACE TextureRenderConvexFaceShaded, TextureRasterPolygonShaded
+
+TextureClipPlane:
+        sm      (TEXTURE_CLIP_RETURN), R11
+        move    R0, #0
+        sm      (CONVEX_OUTPUT_COUNT), R0
+        lm      R0, (CONVEX_OUTPUT_PTR)
+        sm      (CONVEX_OUTPUT_CURSOR), R0
+
+        lm      R0, (CONVEX_COUNT)
+        dec     R0
+        move    R1, R0
+        with    R1
+        add     R1                       ; 2n
+        move    R2, R1
+        with    R1
+        add     R1                       ; 4n
+        with    R1
+        add     R1                       ; 8n
+        with    R1
+        add     R2                       ; 10n
+        lm      R10, (CONVEX_INPUT_PTR)
+        with    R10
+        add     R1
+        TEXTURE_LOAD_VIEW R10, CONVEX_PREV_RIGHT, CONVEX_PREV_UP, CONVEX_PREV_DEPTH, TEXTURE_PREV_S, TEXTURE_PREV_T
+        lm      R1, (CONVEX_PREV_RIGHT)
+        lm      R2, (CONVEX_PREV_UP)
+        lm      R3, (CONVEX_PREV_DEPTH)
+        jal     ConvexComputeDistance
+        sm      (CONVEX_PREV_MAG), R0
+        sm      (CONVEX_PREV_INSIDE), R1
+
+        lm      R0, (CONVEX_INPUT_PTR)
+        sm      (CONVEX_CURRENT_PTR), R0
+        lm      R0, (CONVEX_COUNT)
+        sm      (CONVEX_EDGE_COUNT), R0
+TextureClipEdgeLoop:
+        lm      R10, (CONVEX_CURRENT_PTR)
+        TEXTURE_LOAD_VIEW R10, CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, TEXTURE_CUR_S, TEXTURE_CUR_T
+        inc     R10
+        inc     R10
+        sm      (CONVEX_CURRENT_PTR), R10
+        lm      R1, (CONVEX_CUR_RIGHT)
+        lm      R2, (CONVEX_CUR_UP)
+        lm      R3, (CONVEX_CUR_DEPTH)
+        jal     ConvexComputeDistance
+        sm      (CONVEX_CUR_MAG), R0
+        sm      (CONVEX_CUR_INSIDE), R1
+
+        lm      R0, (CONVEX_PREV_INSIDE)
+        lm      R1, (CONVEX_CUR_INSIDE)
+        with    R0
+        xor     R1
+        bne     TextureClipTransition
+        nop
+        GSU_ABSOLUTE_GOTO TextureClipNoTransition
+TextureClipTransition:
+        moves   R1, R1
+        beq     TextureClipPreviousInside
+        nop
+        BSP_CLIP_COPY_VIEW CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, CONVEX_IN_RIGHT, CONVEX_IN_UP, CONVEX_IN_DEPTH
+        BSP_CLIP_COPY_VIEW CONVEX_PREV_RIGHT, CONVEX_PREV_UP, CONVEX_PREV_DEPTH, CONVEX_OUT_RIGHT, CONVEX_OUT_UP, CONVEX_OUT_DEPTH
+        lm      R0, (TEXTURE_CUR_S)
+        sm      (TEXTURE_IN_S), R0
+        lm      R0, (TEXTURE_CUR_T)
+        sm      (TEXTURE_IN_T), R0
+        lm      R0, (TEXTURE_PREV_S)
+        sm      (TEXTURE_OUT_S), R0
+        lm      R0, (TEXTURE_PREV_T)
+        sm      (TEXTURE_OUT_T), R0
+        lm      R0, (CONVEX_CUR_MAG)
+        sm      (CONVEX_INSIDE_MAG), R0
+        lm      R0, (CONVEX_PREV_MAG)
+        sm      (CONVEX_OUTSIDE_MAG), R0
+        bra     TextureClipInterpolate
+        nop
+TextureClipPreviousInside:
+        BSP_CLIP_COPY_VIEW CONVEX_PREV_RIGHT, CONVEX_PREV_UP, CONVEX_PREV_DEPTH, CONVEX_IN_RIGHT, CONVEX_IN_UP, CONVEX_IN_DEPTH
+        BSP_CLIP_COPY_VIEW CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, CONVEX_OUT_RIGHT, CONVEX_OUT_UP, CONVEX_OUT_DEPTH
+        lm      R0, (TEXTURE_PREV_S)
+        sm      (TEXTURE_IN_S), R0
+        lm      R0, (TEXTURE_PREV_T)
+        sm      (TEXTURE_IN_T), R0
+        lm      R0, (TEXTURE_CUR_S)
+        sm      (TEXTURE_OUT_S), R0
+        lm      R0, (TEXTURE_CUR_T)
+        sm      (TEXTURE_OUT_T), R0
+        lm      R0, (CONVEX_PREV_MAG)
+        sm      (CONVEX_INSIDE_MAG), R0
+        lm      R0, (CONVEX_CUR_MAG)
+        sm      (CONVEX_OUTSIDE_MAG), R0
+TextureClipInterpolate:
+        jal     TextureInterpolateEdge
+        TEXTURE_EMIT_VIEW CONVEX_INTER_RIGHT, CONVEX_INTER_UP, CONVEX_INTER_DEPTH, TEXTURE_INTER_S, TEXTURE_INTER_T
+TextureClipNoTransition:
+        lm      R0, (CONVEX_CUR_INSIDE)
+        moves   R0, R0
+        beq     TextureClipAdvance
+        nop
+        TEXTURE_EMIT_VIEW CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, TEXTURE_CUR_S, TEXTURE_CUR_T
+TextureClipAdvance:
+        BSP_CLIP_COPY_VIEW CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, CONVEX_PREV_RIGHT, CONVEX_PREV_UP, CONVEX_PREV_DEPTH
+        lm      R0, (TEXTURE_CUR_S)
+        sm      (TEXTURE_PREV_S), R0
+        lm      R0, (TEXTURE_CUR_T)
+        sm      (TEXTURE_PREV_T), R0
+        lm      R0, (CONVEX_CUR_MAG)
+        sm      (CONVEX_PREV_MAG), R0
+        lm      R0, (CONVEX_CUR_INSIDE)
+        sm      (CONVEX_PREV_INSIDE), R0
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        beq     TextureClipDone
+        nop
+        GSU_ABSOLUTE_GOTO TextureClipEdgeLoop
+TextureClipDone:
+        lm      R11, (TEXTURE_CLIP_RETURN)
+        ret
+        nop
+
+TextureInterpolateEdge:
+        sm      (TEXTURE_INTERPOLATE_RETURN), R11
+        jal     ConvexInterpolateEdge
+        lm      R0, (CONVEX_INSIDE_MAG)
+        lm      R1, (CONVEX_OUTSIDE_MAG)
+        move    R2, R0
+        with    R2
+        sub     R1
+        bpl     TextureInterpolateOutsideBase
+        nop
+        lm      R5, (TEXTURE_IN_S)
+        lm      R7, (TEXTURE_OUT_S)
+        with    R7
+        sub     R5
+        bra     TextureInterpolateS
+        nop
+TextureInterpolateOutsideBase:
+        lm      R5, (TEXTURE_OUT_S)
+        lm      R7, (TEXTURE_IN_S)
+        with    R7
+        sub     R5
+TextureInterpolateS:
+        lm      R8, (CONVEX_FACTOR)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R2, R7, R8
+        with    R5
+        add     R2
+        sm      (TEXTURE_INTER_S), R5
+
+        lm      R0, (CONVEX_INSIDE_MAG)
+        lm      R1, (CONVEX_OUTSIDE_MAG)
+        move    R2, R0
+        with    R2
+        sub     R1
+        bpl     TextureInterpolateTOutsideBase
+        nop
+        lm      R5, (TEXTURE_IN_T)
+        lm      R7, (TEXTURE_OUT_T)
+        with    R7
+        sub     R5
+        bra     TextureInterpolateT
+        nop
+TextureInterpolateTOutsideBase:
+        lm      R5, (TEXTURE_OUT_T)
+        lm      R7, (TEXTURE_IN_T)
+        with    R7
+        sub     R5
+TextureInterpolateT:
+        lm      R8, (CONVEX_FACTOR)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R2, R7, R8
+        with    R5
+        add     R2
+        sm      (TEXTURE_INTER_T), R5
+        lm      R11, (TEXTURE_INTERPOLATE_RETURN)
+        ret
+        nop
+
+TextureProjectPolygonShaded:
+        sm      (TEXTURE_PROJECT_RETURN), R11
+        iwt     R0, #24576
+        sm      (CONVEX_MIN_Y), R0
+        iwt     R0, #-8192
+        sm      (CONVEX_MAX_Y), R0
+        lm      R0, (CONVEX_INPUT_PTR)
+        sm      (CONVEX_CURRENT_PTR), R0
+        iwt     R0, #TEXTURE_SCREEN
+        sm      (CONVEX_SCREEN_PTR), R0
+        lm      R0, (CONVEX_COUNT)
+        sm      (CONVEX_SCREEN_COUNT), R0
+        sm      (CONVEX_EDGE_COUNT), R0
+TextureShadeProjectLoop:
+        lm      R10, (CONVEX_CURRENT_PTR)
+        TEXTURE_LOAD_VIEW R10, CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, TEXTURE_CUR_S, TEXTURE_CUR_T
+        inc     R10
+        inc     R10
+        sm      (CONVEX_CURRENT_PTR), R10
+
+        ; Both screen components share this vertex's exact depth reciprocal.
+        lm      R2, (CONVEX_CUR_DEPTH)
+        jal     TexturePrepareDivideQ12
+        nop
+        lm      R1, (CONVEX_CUR_RIGHT)
+        lm      R2, (CONVEX_CUR_DEPTH)
+        jal     ConvexProjectComponent
+        iwt     R1, #8192
+        with    R0
+        add     R1
+        lm      R10, (CONVEX_SCREEN_PTR)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+
+        lm      R1, (CONVEX_CUR_UP)
+        lm      R2, (CONVEX_CUR_DEPTH)
+        jal     ConvexProjectComponent
+        iwt     R1, #7168
+        with    R1
+        sub     R0
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_CUR_S)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_CUR_T)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (CONVEX_CUR_DEPTH)
+        movew   (R10), R0
+
+        lm      R2, (CONVEX_MIN_Y)
+        move    R3, R1
+        with    R3
+        sub     R2
+        bpl     TextureShadeProjectMinReady
+        nop
+        sm      (CONVEX_MIN_Y), R1
+        move    R0, R10
+        with    R0
+        sub     #8
+        sm      (CONVEX_TOP_PTR), R0
+TextureShadeProjectMinReady:
+        lm      R2, (CONVEX_MAX_Y)
+        move    R3, R2
+        with    R3
+        sub     R1
+        bpl     TextureShadeProjectMaxReady
+        nop
+        sm      (CONVEX_MAX_Y), R1
+TextureShadeProjectMaxReady:
+        inc     R10
+        inc     R10
+        sm      (CONVEX_SCREEN_PTR), R10
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        beq     TextureShadeProjectVerticesDone
+        nop
+        GSU_ABSOLUTE_GOTO TextureShadeProjectLoop
+TextureShadeProjectVerticesDone:
+        lm      R0, (CONVEX_SCREEN_PTR)
+        sm      (CONVEX_SCREEN_END_PTR), R0
+        lm      R0, (CONVEX_TOP_PTR)
+        sm      (CONVEX_FORWARD_PTR), R0
+        sm      (CONVEX_REVERSE_PTR), R0
+
+        lm      R0, (CONVEX_MIN_Y)
+        iwt     R1, #63
+        with    R0
+        add     R1
+  .repeat 7
+        with    R0
+        asr
+  .endrepeat
+        moves   R0, R0
+        bpl     TextureShadeRasterFirstYPositive
+        nop
+        move    R0, #0
+TextureShadeRasterFirstYPositive:
+        move    R1, #111
+        with    R1
+        sub     R0
+        bpl     TextureShadeRasterFirstYReady
+        nop
+        bra     TextureShadeProjectRejected
+        nop
+TextureShadeRasterFirstYReady:
+        sm      (CONVEX_RASTER_Y), R0
+
+        lm      R0, (CONVEX_MAX_Y)
+        iwt     R1, #65
+        with    R0
+        sub     R1
+  .repeat 7
+        with    R0
+        asr
+  .endrepeat
+        moves   R0, R0
+        bpl     TextureShadeRasterLastYPositive
+        nop
+        bra     TextureShadeProjectRejected
+        nop
+TextureShadeRasterLastYPositive:
+        move    R1, #111
+        move    R2, R1
+        with    R2
+        sub     R0
+        bpl     TextureShadeRasterLastYReady
+        nop
+        move    R0, R1
+TextureShadeRasterLastYReady:
+        lm      R1, (CONVEX_RASTER_Y)
+        move    R2, R0
+        with    R2
+        sub     R1
+        bpl     TextureShadeRasterRowsReady
+        nop
+        bra     TextureShadeProjectRejected
+        nop
+TextureShadeRasterRowsReady:
+        sm      (CONVEX_TOP_PTR), R0
+        move    R0, #1
+        bra     TextureShadeProjectReturn
+        nop
+TextureShadeProjectRejected:
+        move    R0, #0
+TextureShadeProjectReturn:
+        lm      R11, (TEXTURE_PROJECT_RETURN)
+        ret
+        nop

@@ -1,0 +1,14 @@
+# Generated Quake assets and build products.
+/src/snes_quake/Data/
+/src/snes_quake/.build/
+/src/snes_quake/.build_libsfx/
+/src/snes_quake/quake.sfc
+/src/snes_quake/quake.cpu.sym
+/src/snes_quake/quake.dmap
+/src/snes_quake/quake.dnfo
+/quake106/*
+!/quake106/quake106.zip
+!/quake106/SLICNSE.TXT
+!/quake106/README.TXT
+__pycache__/
+*.py[cod]

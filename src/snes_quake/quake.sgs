@@ -1,0 +1,51 @@
+; SuperFX flat-span renderer for the E1M3 BSP scene.
+
+.include "libSFX.i"
+.include "../shared/GSU_Cache.i"
+.include "../shared/GSU_Primitives.i"
+.include "MemoryMap.i"
+
+; Prefer the GSU's shorter equivalent encoding whenever a direct word access
+; resolves to an even low-RAM address. Forward or high addresses retain LM/SM.
+.macro QuakeLoadWord reg, address
+  .if .const(.loword(address))
+    .if (.loword(address) <= $01FE) && ((.loword(address) & 1) = 0)
+        mlms    reg, address
+        .exitmacro
+    .endif
+  .endif
+        mlm     reg, address
+.endmacro
+
+.macro QuakeStoreWord address, reg
+  .if .const(.loword(address))
+    .if (.loword(address) <= $01FE) && ((.loword(address) & 1) = 0)
+        msms    address, reg
+        .exitmacro
+    .endif
+  .endif
+        msm     address, reg
+.endmacro
+
+.undefine lm
+.undefine sm
+.define lm QuakeLoadWord
+.define sm QuakeStoreWord
+
+
+.include "quake/PacketSelection.sgs"
+.include "quake/PacketEmissionAndTextureSetup.sgs"
+.include "quake/TextureRasterAndSampling.sgs"
+; Keep the shared lightmapped helpers adjacent to their callers. The standalone
+; albedo span follows them so its independent code cannot perturb that layout.
+.include "quake/FlatRasterAndKernels.sgs"
+.include "quake/ProjectiveAlbedoSpan.sgs"
+.include "quake/ProjectiveDistanceSpan.sgs"
+ClassifyClipOutcode:
+        BSP_CLASSIFY_CLIP_OUTCODE
+        ret
+        nop
+.include "quake/DynamicBrushRenderer.sgs"
+.include "quake/TextureEndpointBatch.sgs"
+.include "quake/DynamicBrushRowStage.sgs"
+.include "quake/DynamicBrushSpanLightmapProof.sgs"

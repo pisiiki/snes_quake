@@ -1,0 +1,1120 @@
+; Tagged world/fragment token dispatch. World material setup duplicates the
+; standalone walk deliberately, leaving the state-zero hot kernels untouched.
+
+BRUSH_RASTER_STATE             = BRUSH_STATE + $0040
+BRUSH_RASTER_RETURN            = BRUSH_RASTER_STATE + $00
+BRUSH_TOKEN_RETURN             = BRUSH_RASTER_STATE + $02
+BRUSH_TEXTURE_LOAD_RETURN      = BRUSH_RASTER_STATE + $04
+BRUSH_TOKEN_CURSOR             = BRUSH_RASTER_STATE + $06
+BRUSH_CURRENT_TOKEN            = BRUSH_RASTER_STATE + $08
+BRUSH_CURRENT_LINK             = BRUSH_RASTER_STATE + $0A
+BRUSH_CURRENT_FRAGMENT_ID      = BRUSH_RASTER_STATE + $0C
+BRUSH_CURRENT_PACKED_FACE      = BRUSH_RASTER_STATE + $0E
+BRUSH_CURRENT_SOURCE_FACE      = BRUSH_RASTER_STATE + $10
+BRUSH_CURRENT_LOCAL_FACE       = BRUSH_RASTER_STATE + $12
+BRUSH_FRAGMENT_FIRST_VERTEX_LO = BRUSH_RASTER_STATE + $14
+BRUSH_FRAGMENT_FIRST_VERTEX_HI = BRUSH_RASTER_STATE + $16
+BRUSH_FRAGMENT_VERTEX_COUNT    = BRUSH_RASTER_STATE + $18
+BRUSH_WORLD_ACTIVE_TEXTURE     = BRUSH_RASTER_STATE + $1A
+BRUSH_VERTEX_X_Q2              = BRUSH_RASTER_STATE + $1E
+BRUSH_VERTEX_Y_Q2              = BRUSH_RASTER_STATE + $20
+BRUSH_VERTEX_Z_Q2              = BRUSH_RASTER_STATE + $22
+BRUSH_FACE_S_AXIS              = BRUSH_RASTER_STATE + $24
+BRUSH_FACE_T_AXIS              = BRUSH_RASTER_STATE + $26
+BRUSH_FACE_S_OFFSET            = BRUSH_RASTER_STATE + $28
+BRUSH_FACE_T_OFFSET            = BRUSH_RASTER_STATE + $2A
+BRUSH_FRAGMENT_RETURN          = BRUSH_RASTER_STATE + $2C
+BRUSH_VERTEX_RETURN            = BRUSH_RASTER_STATE + $2E
+BRUSH_POLYGON_RETURN           = BRUSH_RASTER_STATE + $30
+BRUSH_COORD_RETURN             = BRUSH_RASTER_STATE + $32
+BRUSH_TEXTURE_OVERRIDE_CURSOR  = BRUSH_RASTER_STATE + $3C
+BRUSH_CURRENT_LEAF_KEY         = BRUSH_RASTER_STATE + $3E
+BRUSH_FACE_CULL_RETURN         = BRUSH_STATE + $84
+BRUSH_WORLD_FACE_POINTER       = BRUSH_STATE + $86
+BRUSH_FRAGMENT_LOAD_RETURN     = BRUSH_STATE + $88
+BRUSH_CLIP_RETURN              = BRUSH_COORD_RETURN
+
+.assert BRUSH_RASTER_STATE + $40 <= BRUSH_SLOT_TABLE, error, "Brush raster state overlaps slot table"
+
+BrushRenderMixedTokens:
+        sm      (BRUSH_RASTER_RETURN), R11
+        move    R0, #0
+        sm      (BRUSH_TOKEN_CURSOR), R0
+        iwt     R0, #FACES
+        sm      (BRUSH_WORLD_FACE_POINTER), R0
+        iwt     R0, #$FFFF
+        sm      (BRUSH_WORLD_ACTIVE_TEXTURE), R0
+BrushMixedTokenLoop:
+        lm      R0, (BRUSH_TOKEN_CURSOR)
+        lm      R1, (BRUSH_TOKEN_COUNT)
+        with    R0
+        cmp     R1
+        bne     BrushMixedTokenPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushRenderMixedDone
+BrushMixedTokenPresent:
+        move    R1, R0
+        with    R1
+        add     R1
+        iwt     R10, #BRUSH_TOKENS
+        with    R10
+        add     R1
+        movew   R0, (R10)
+        sm      (BRUSH_CURRENT_TOKEN), R0
+        moves   R0, R0
+        bmi     BrushMixedFragment
+        nop
+        move    R2, R0
+        iwt     R1, #BRUSH_TOKEN_LEAF_TAG
+        with    R2
+        and     R1
+        bne     BrushMixedLeafMarker
+        nop
+        jal     BrushRenderWorldFace
+        nop
+        bra     BrushMixedTokenAdvance
+        nop
+BrushMixedLeafMarker:
+        iwt     R1, #BRUSH_TRAVERSAL_NODE_MASK
+        with    R0
+        and     R1
+        sm      (BRUSH_CURRENT_LEAF_KEY), R0
+        jal     BrushRenderLeafGroup
+        nop
+        iwt     R0, #$FFFF
+        sm      (BRUSH_WORLD_ACTIVE_TEXTURE), R0
+        GSU_ABSOLUTE_GOTO BrushMixedTokenLoop
+BrushMixedFragment:
+        iwt     R1, #$03FF
+        with    R0
+        and     R1
+        sm      (BRUSH_CURRENT_LINK), R0
+        jal     BrushRenderFragment
+        nop
+        iwt     R0, #$FFFF
+        sm      (BRUSH_WORLD_ACTIVE_TEXTURE), R0
+BrushMixedTokenAdvance:
+        lm      R0, (BRUSH_TOKEN_CURSOR)
+        inc     R0
+        sm      (BRUSH_TOKEN_CURSOR), R0
+        GSU_ABSOLUTE_GOTO BrushMixedTokenLoop
+BrushRenderMixedDone:
+        lm      R11, (BRUSH_RASTER_RETURN)
+        ret
+        nop
+
+BrushRenderFragment:
+        sm      (BRUSH_FRAGMENT_RETURN), R11
+        jal     BrushLoadCurrentFragment
+        nop
+        jal     BrushFaceFrontFacing
+        nop
+        moves   R0, R0
+        beq     BrushRenderFragmentDone
+        nop
+        jal     BrushLoadFaceMaterial
+        nop
+        jal     BrushResolveTextureOverride
+        nop
+        jal     BrushLoadPackedTexture
+        nop
+        jal     TextureSelectSampleRoutine
+        nop
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        bne     BrushFragmentTextureReady
+        nop
+        jal     BrushLoadFaceLightmap
+        nop
+BrushFragmentTextureReady:
+        jal     BrushBuildFragmentView
+        nop
+        jal     BrushRasterPreparedPolygon
+        nop
+BrushRenderFragmentDone:
+        lm      R11, (BRUSH_FRAGMENT_RETURN)
+        ret
+        nop
+
+; Resolve the link, runtime slot identity, and banked fragment descriptor.
+; Both the direct renderer and the row-local depth arbiter share this cold
+; setup, while all established world and standalone texture kernels remain
+; byte-identical.
+BrushLoadCurrentFragment:
+        sm      (BRUSH_FRAGMENT_LOAD_RETURN), R11
+        lm      R0, (BRUSH_CURRENT_LINK)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        iwt     R10, #BRUSH_LINKS
+        with    R10
+        add     R0
+        movew   R1, (R10)
+        sm      (BRUSH_CURRENT_FRAGMENT_ID), R1
+        inc     R10
+        inc     R10
+        movew   R2, (R10)
+  .repeat 10
+        with    R2
+        lsr
+  .endrepeat
+        sm      (BRUSH_CURRENT_SLOT), R2
+        move    R3, R2
+  .repeat 1
+        with    R3
+        add     R3
+  .endrepeat
+  .repeat 3
+        with    R2
+        add     R2
+  .endrepeat
+        with    R2
+        add     R3                       ; 10s.
+        iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ENTITY
+        with    R10
+        add     R2
+        movew   R0, (R10)
+        sm      (BRUSH_CURRENT_ENTITY), R0
+        inc     R10
+        inc     R10
+        move    R0, #0
+        moveb   R0, (R10)
+        sm      (BRUSH_CURRENT_INLINE_MODEL), R0
+
+        ; Descriptor records are eight-byte aligned and cannot cross banks.
+        lm      R0, (BRUSH_CURRENT_FRAGMENT_ID)
+        move    R1, R0
+  .repeat 12
+        with    R1
+        lsr
+  .endrepeat
+        iwt     R2, #BSP_BRUSH_FRAGMENT_DESCRIPTORS_FIRST_BANK
+        with    R2
+        add     R1
+        move    R3, R0
+        iwt     R1, #$0FFF
+        with    R3
+        and     R1
+  .repeat 3
+        with    R3
+        add     R3
+  .endrepeat
+        iwt     R4, #$8000
+        with    R4
+        add     R3
+        move    R0, R2
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_PACKED_FACE), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_FRAGMENT_FIRST_VERTEX_LO), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_FRAGMENT_FIRST_VERTEX_HI), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_FRAGMENT_VERTEX_COUNT), R0
+        BSP_ROM_LOAD_BYTE R0             ; Solid fragments never reach links.
+        lm      R11, (BRUSH_FRAGMENT_LOAD_RETURN)
+        ret
+        nop
+
+; Return one when the camera is on the visible side of the source face plane.
+; QBSA stores Q6 planes in baseline Q2 world space. Variant origin is exact
+; Q3 Quake translation; round it to the Q2 geometry domain before testing.
+BrushFaceFrontFacing:
+        sm      (BRUSH_FACE_CULL_RETURN), R11
+        lm      R0, (BRUSH_CURRENT_PACKED_FACE)
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1                       ; 4f.
+        with    R1
+        add     R0                       ; 5f.
+        iwt     R4, #BSP_BRUSH_PLANES_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_PLANES_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_SIGNED_BYTE R7
+        BSP_ROM_LOAD_SIGNED_BYTE R8
+        BSP_ROM_LOAD_SIGNED_BYTE R9
+        BSP_ROM_LOAD_WORD R10
+
+        lm      R2, (BRUSH_CURRENT_SLOT)
+        move    R3, R2
+  .repeat 1
+        with    R3
+        add     R3
+  .endrepeat
+  .repeat 3
+        with    R2
+        add     R2
+  .endrepeat
+        with    R2
+        add     R3                       ; 10s.
+        iwt     R3, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_X_Q3
+        with    R3
+        add     R2
+        move    R5, #16
+
+        lm      R0, (BRUSH_CAMERA_Q2_X)
+        movew   R1, (R3)
+        with    R1
+        add     R5
+  .repeat 5
+        with    R1
+        asr
+  .endrepeat
+        with    R0
+        sub     R1
+        move    R6, R7
+        with    R0
+        lmult
+        move    R12, R4                 ; Signed 32-bit accumulator low.
+        move    R11, R0                 ; Signed 32-bit accumulator high.
+
+        inc     R3
+        inc     R3
+        lm      R0, (BRUSH_CAMERA_Q2_Y)
+        movew   R1, (R3)
+        with    R1
+        add     R5
+  .repeat 5
+        with    R1
+        asr
+  .endrepeat
+        with    R0
+        sub     R1
+        move    R6, R8
+        with    R0
+        lmult
+        with    R12
+        add     R4
+        with    R11
+        adc     R0
+
+        inc     R3
+        inc     R3
+        lm      R0, (BRUSH_CAMERA_Q2_Z)
+        movew   R1, (R3)
+        with    R1
+        add     R5
+  .repeat 5
+        with    R1
+        asr
+  .endrepeat
+        with    R0
+        sub     R1
+        move    R6, R9
+        with    R0
+        lmult
+        with    R12
+        add     R4
+        with    R11
+        adc     R0
+
+        ; Subtract the signed Q6 plane distance without truncating the dot
+        ; product.  Add the two-word negation so carry propagates directly
+        ; from the low word into the signed high word.
+        move    R1, #0
+        with    R1
+        sub     R10
+        move    R2, #0
+        moves   R10, R10
+        bmi     BrushFaceDistanceHighReady
+        nop
+        beq     BrushFaceDistanceHighReady
+        nop
+        iwt     R2, #$FFFF
+BrushFaceDistanceHighReady:
+        with    R12
+        add     R1
+        with    R11
+        adc     R2
+        moves   R11, R11
+        bpl     BrushFaceBackFacing
+        nop
+        move    R0, #1
+        bra     BrushFaceCullDone
+        nop
+BrushFaceBackFacing:
+        move    R0, #0
+BrushFaceCullDone:
+        lm      R11, (BRUSH_FACE_CULL_RETURN)
+        ret
+        nop
+
+BrushRenderWorldFace:
+        sm      (BRUSH_TOKEN_RETURN), R11
+        lm      R3, (BRUSH_CURRENT_TOKEN)
+        sm      (PACKET_SOURCE_INDEX), R3
+        ; The mixed world subsequence is byte-for-byte the selector's painter
+        ; order. Consume its already-emitted face records exactly as the
+        ; standalone walker does, while leaf/fragment tags leave this cursor
+        ; untouched.
+        lm      R10, (BRUSH_WORLD_FACE_POINTER)
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        move    R1, #0
+        moveb   R1, (R10)
+        sm      (CONVEX_FACE_VERTICES), R1
+        with    R6
+        add     R6
+        iwt     R10, #INDICES
+        with    R10
+        add     R6
+        sm      (CONVEX_INDEX_PTR), R10
+        lm      R0, (BRUSH_WORLD_FACE_POINTER)
+        with    R0
+        add     #BSP_FACE_RECORD_BYTES
+        sm      (BRUSH_WORLD_FACE_POINTER), R0
+
+        ; Source face record supplies the absolute world texture-coordinate
+        ; cursor; packet face records deliberately retain only raster fields.
+        move    R1, R3
+        with    R1
+        add     R1
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2                       ; 6f.
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_FACES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_WORLD_INDEX), R0
+
+        ; Global packed texture identity for this source world face.
+        iwt     R4, #BSP_WORLD_FACE_TEXTURE_ID_GSU_ROM_ADDRESS
+        with    R4
+        add     R3
+        move    R0, #WORLD_TEXTURE_AUX_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ID), R0
+        iwt     R1, #$00FF
+        with    R0
+        cmp     R1
+        beq     BrushRenderWorldFaceDone
+        nop
+        lm      R1, (BRUSH_WORLD_ACTIVE_TEXTURE)
+        with    R0
+        cmp     R1
+        beq     BrushWorldTextureReady
+        nop
+        sm      (BRUSH_WORLD_ACTIVE_TEXTURE), R0
+        jal     BrushLoadPackedTexture
+        nop
+        jal     TextureSelectSampleRoutine
+        nop
+BrushWorldTextureReady:
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        bne     BrushWorldNotLightmapped
+        nop
+        jal     TextureLoadFaceLightmap
+        jal     TextureRenderConvexFaceShaded
+        GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
+BrushWorldNotLightmapped:
+        dec     R0
+        beq     BrushWorldAlbedo
+        nop
+        ; After the two decrements, mode 3 is positive while retained affine
+        ; mode 0 is negative. Protected modes 1/2 have already branched away.
+        moves   R0, R0
+        bmi     BrushWorldAffineShaded
+        nop
+        jal     TextureRenderConvexFaceDistance
+        nop
+        GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
+BrushWorldAffineShaded:
+        jal     TextureRenderConvexFaceShaded
+        nop
+        GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
+BrushWorldAlbedo:
+        jal     TextureRenderConvexFaceAlbedo
+        nop
+BrushRenderWorldFaceDone:
+        lm      R11, (BRUSH_TOKEN_RETURN)
+        ret
+        nop
+
+; TEXTURE_ID is in the global packed namespace. IDs below the established
+; world count use the world directory; extras index QBSA TEXDIR.
+BrushLoadPackedTexture:
+        lm      R1, (TEXTURE_ID)
+BrushLoadPackedTextureFromR1:
+        sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
+        iwt     R0, #BSP_WORLD_TEXTURE_COUNT
+        move    R2, R1
+        with    R2
+        sub     R0
+        bpl     BrushLoadExtraTexture
+        nop
+        move    R3, #WORLD_TEXTURE_AUX_ROM_BANK
+        iwt     R4, #BSP_WORLD_TEXTURE_DIRECTORY_GSU_ROM_ADDRESS
+        bra     BrushLoadTextureDirectoryReady
+        nop
+BrushLoadExtraTexture:
+        move    R1, R2
+        move    R3, #BSP_BRUSH_TEXDIR_BANK
+        iwt     R4, #BSP_BRUSH_TEXDIR_ADDRESS
+BrushLoadTextureDirectoryReady:
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1                       ; 8-byte record.
+        with    R4
+        add     R1
+        move    R0, R3
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ROM_BANK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_ROM_ADDRESS), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_WIDTH), R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (TEXTURE_WIDTH_Q4), R0
+        dec     R0
+        sm      (TEXTURE_WRAP_MASK_S), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_HEIGHT), R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (TEXTURE_HEIGHT_Q4), R0
+        dec     R0
+        sm      (TEXTURE_WRAP_MASK_T), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_WRAP_FLAGS), R0
+        lm      R11, (BRUSH_TEXTURE_LOAD_RETURN)
+        ret
+        nop
+
+; Keep the same technique-4 block-route table as the ordinary face path. The
+; arbiter's register-fed coordinate builder leaves these words intact, which
+; lets uncontested brush spans tail into the shared direct lightmap kernel.
+BrushSelectTextureSampleRoutine:
+        lm      R2, (TEXTURE_RENDER_MODE)
+        move    R1, #4
+        with    R2
+        cmp     R1
+        bne     BrushSelectTextureSampleRoutineTextured
+        nop
+        iwt     R1, #BrushArbiterSpanUntexturedDistance
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        ret
+        nop
+BrushSelectTextureSampleRoutineTextured:
+        ; The ordinary selector has the same flag ABI and publishes the direct
+        ; lightmap routes. Tail-call it so both renderers share one contract.
+        GSU_ABSOLUTE_GOTO TextureSelectSampleRoutine
+
+BrushLoadFaceMaterial:
+        sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
+        lm      R0, (BRUSH_CURRENT_PACKED_FACE)
+  .repeat 4
+        with    R0
+        add     R0
+  .endrepeat
+        iwt     R4, #BSP_BRUSH_FRAGMENT_FACES_ADDRESS
+        with    R4
+        add     R0
+        move    R0, #BSP_BRUSH_FRAGMENT_FIRST_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_SOURCE_FACE), R0
+        BSP_ROM_LOAD_WORD R0             ; Source texinfo.
+        BSP_ROM_LOAD_WORD R0             ; Repeated packed face.
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ID), R0
+        BSP_ROM_LOAD_SIGNED_BYTE R0
+        sm      (BRUSH_FACE_S_AXIS), R0
+        BSP_ROM_LOAD_SIGNED_BYTE R0
+        sm      (BRUSH_FACE_T_AXIS), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_FACE_S_OFFSET), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_FACE_T_OFFSET), R0
+        BSP_ROM_LOAD_BYTE R0             ; Inline model.
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_CURRENT_LOCAL_FACE), R0
+        BSP_ROM_LOAD_BYTE R0             ; Plane side.
+        lm      R11, (BRUSH_TEXTURE_LOAD_RETURN)
+        ret
+        nop
+
+; At most eight visual-state overrides exist, so exact slot/local-face lookup
+; is cheaper than maintaining another per-frame table.
+BrushResolveTextureOverride:
+        sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
+        move    R0, #0
+        sm      (BRUSH_TEXTURE_OVERRIDE_CURSOR), R0
+BrushTextureOverrideLoop:
+        lm      R0, (BRUSH_TEXTURE_OVERRIDE_CURSOR)
+        lm      R1, (BRUSH_TEXTURE_OVERRIDE_COUNT)
+        with    R0
+        cmp     R1
+        bne     BrushTextureOverridePresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushResolveTextureOverrideDone
+BrushTextureOverridePresent:
+        lm      R1, (BRUSH_FIRST_TEXTURE)
+        with    R1
+        add     R0
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2                       ; 3n.
+        iwt     R4, #BSP_BRUSH_VTEX_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_VTEX_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        lm      R1, (BRUSH_CURRENT_SLOT)
+        with    R0
+        cmp     R1
+        bne     BrushTextureOverrideAdvance
+        nop
+        BSP_ROM_LOAD_BYTE R0
+        lm      R1, (BRUSH_CURRENT_LOCAL_FACE)
+        with    R0
+        cmp     R1
+        bne     BrushTextureOverrideAdvance
+        nop
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ID), R0
+        GSU_ABSOLUTE_GOTO BrushResolveTextureOverrideDone
+BrushTextureOverrideAdvance:
+        lm      R0, (BRUSH_TEXTURE_OVERRIDE_CURSOR)
+        inc     R0
+        sm      (BRUSH_TEXTURE_OVERRIDE_CURSOR), R0
+        GSU_ABSOLUTE_GOTO BrushTextureOverrideLoop
+BrushResolveTextureOverrideDone:
+        lm      R11, (BRUSH_TEXTURE_LOAD_RETURN)
+        ret
+        nop
+
+BrushLoadFaceLightmap:
+        sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
+        move    R9, #0
+        bra     BrushLoadFaceLightmapDirectory
+        nop
+BrushLoadFaceLightmapToPool:
+        sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
+        lm      R9, (BRUSH_ARB_POOL_CURSOR)
+        with    R9
+        add     #4
+BrushLoadFaceLightmapDirectory:
+        lm      R3, (BRUSH_CURRENT_PACKED_FACE)
+        move    R1, R3
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        sub     R3                       ; 7f.
+        iwt     R4, #BSP_BRUSH_LIGHTDIR_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_LIGHTDIR_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_SIGNED_BYTE R0
+        sm      (LIGHTMAP_ROM_BANK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (LIGHTMAP_ROM_ADDRESS), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (LIGHTMAP_WIDTH), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (LIGHTMAP_HEIGHT), R0
+        BSP_ROM_LOAD_SIGNED_BYTE R0
+        sm      (LIGHTMAP_MIN_BLOCK_S), R0
+        BSP_ROM_LOAD_SIGNED_BYTE R0
+        sm      (LIGHTMAP_MIN_BLOCK_T), R0
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bmi     BrushLoadFaceLightmapDone
+        nop
+        romb
+        lm      R4, (LIGHTMAP_ROM_ADDRESS)
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        lm      R0, (LIGHTMAP_WIDTH)
+        lm      R6, (LIGHTMAP_HEIGHT)
+        with    R0
+        umult   R6
+        move    R12, R0
+        ; Material prepass callers supply the sample address immediately after
+        ; their pending four-byte pool header. If the complete grid fits, load
+        ; ROM straight there; arbitrary fly-camera overflow keeps the existing
+        ; fixed-cache fallback and will publish an unpacked material reference.
+        moves   R9, R9
+        beq     BrushLoadLightmapFixedDestination
+        nop
+        move    R2, R9
+        move    R10, R9
+        with    R2
+        add     R12
+        iwt     R1, #BRUSH_ARB_POOL_LIMIT
+        with    R2
+        cmp     R1
+        bcc     BrushLoadLightmapDestinationReady
+        nop
+        beq     BrushLoadLightmapDestinationReady
+        nop
+BrushLoadLightmapFixedDestination:
+        iwt     R10, #GSU_LIGHTMAP_CACHE_OFFSET
+BrushLoadLightmapDestinationReady:
+        sm      (LIGHTMAP_ROM_ADDRESS), R10
+        iwt     R5, #$00C0
+        iwt     R13, #BrushLoadLightmapLoop
+BrushLoadLightmapLoop:
+        BSP_ROM_LOAD_BYTE R0
+        with    R0
+        add     R5
+        moveb   (R10), R0
+        inc     R10
+        loop
+        nop
+        jal     LightmapPublishAdjustedAddress
+        nop
+BrushLoadFaceLightmapDone:
+        lm      R11, (BRUSH_TEXTURE_LOAD_RETURN)
+        ret
+        nop
+
+; Stream one polygon's contiguous QBSF occurrence records directly from ROM.
+; R13 retains the current ROM bank and R9 the output cursor across the transform,
+; classifier, and coordinate helpers. Records are four-byte aligned, so the six
+; known 32 KiB crossings occur exactly between vertices.
+BrushBuildFragmentView:
+        sm      (BRUSH_VERTEX_RETURN), R11
+        ; Resolve the first occurrence's bank/address once. Subsequent records
+        ; advance R14 sequentially until its exact zero wrap selects a new bank.
+        lm      R3, (BRUSH_FRAGMENT_FIRST_VERTEX_LO)
+        move    R1, R3
+  .repeat 13
+        with    R1
+        lsr
+  .endrepeat
+        lm      R0, (BRUSH_FRAGMENT_FIRST_VERTEX_HI)
+        with    R0
+        and     #1
+  .repeat 3
+        with    R0
+        add     R0
+  .endrepeat
+        with    R1
+        add     R0
+        iwt     R2, #BSP_BRUSH_FRAGMENT_VERTICES_FIRST_BANK
+        with    R1
+        add     R2
+        move    R13, R1
+        move    R0, R13
+        romb
+
+        iwt     R5, #$1FFF
+        with    R3
+        and     R5
+        with    R3
+        add     R3
+        with    R3
+        add     R3
+        iwt     R4, #$8000
+        with    R4
+        add     R3
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+
+        iwt     R9, #TEXTURE_VIEW_A
+        move    R0, #0
+        sm      (TEXTURE_CLIP_OUTCODE), R0
+        move    R0, #15
+        sm      (TEXTURE_CLIP_AND_OUTCODE), R0
+        lm      R0, (BRUSH_FRAGMENT_VERTEX_COUNT)
+        sm      (CONVEX_OUTPUT_COUNT), R0
+        sm      (CONVEX_EDGE_COUNT), R0
+BrushFragmentVertexLoop:
+        BSP_ROM_LOAD_WORD R4
+        BSP_ROM_LOAD_WORD R7
+        ; BSP_ROM_LOAD_WORD ends with INC R14, leaving Z set only at $0000.
+        move    R1, R4
+        bne     BrushFragmentVertexAddressReady
+        nop
+        inc     R13
+        move    R0, R13
+        romb
+        iwt     R0, #$8000
+        GSU_SET_ROM_BUFFER_ADDRESS R0
+BrushFragmentVertexAddressReady:
+        ; Decode signed-byte bases plus two residual bits per axis exactly once.
+        with    R1
+        sex
+        move    R2, R4
+        with    R2
+        hib
+        with    R2
+        sex
+        move    R3, R7
+        with    R3
+        sex
+        with    R7
+        hib
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        move    R0, R7
+        with    R0
+        and     #3
+        with    R1
+        add     R0
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        move    R0, R7
+  .repeat 2
+        with    R0
+        lsr
+  .endrepeat
+        with    R0
+        and     #3
+        with    R2
+        add     R0
+        with    R3
+        add     R3
+        with    R3
+        add     R3
+        move    R0, R7
+  .repeat 4
+        with    R0
+        lsr
+  .endrepeat
+        with    R0
+        and     #3
+        with    R3
+        add     R0
+        sm      (BRUSH_VERTEX_X_Q2), R1
+        sm      (BRUSH_VERTEX_Y_Q2), R2
+        sm      (BRUSH_VERTEX_Z_Q2), R3
+
+        jal     ClipTransformQ2Registers
+        nop
+        jal     ClassifyClipOutcode
+        nop
+        move    R2, R0
+        lm      R1, (TEXTURE_CLIP_OUTCODE)
+        with    R1
+        or      R2
+        sm      (TEXTURE_CLIP_OUTCODE), R1
+        lm      R1, (TEXTURE_CLIP_AND_OUTCODE)
+        with    R1
+        and     R2
+        sm      (TEXTURE_CLIP_AND_OUTCODE), R1
+        jal     BrushComputeFragmentCoordinates
+        nop
+
+        lm      R0, (CLIP_RIGHT)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        lm      R0, (CLIP_UP)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        lm      R0, (CLIP_DEPTH)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        lm      R0, (TEXTURE_CUR_S)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        lm      R0, (TEXTURE_CUR_T)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        beq     BrushFragmentVertexDone
+        nop
+        GSU_ABSOLUTE_GOTO BrushFragmentVertexLoop
+
+BrushFragmentVertexDone:
+        sm      (CONVEX_OUTPUT_CURSOR), R9
+        lm      R11, (BRUSH_VERTEX_RETURN)
+        ret
+        nop
+
+BrushComputeFragmentCoordinates:
+        sm      (BRUSH_COORD_RETURN), R11
+        lm      R7, (BRUSH_FACE_S_AXIS)
+        lm      R8, (BRUSH_FACE_S_OFFSET)
+        jal     BrushComputeAxisCoordinate
+        nop
+        sm      (TEXTURE_CUR_S), R0
+        lm      R7, (BRUSH_FACE_T_AXIS)
+        lm      R8, (BRUSH_FACE_T_OFFSET)
+        jal     BrushComputeAxisCoordinate
+        nop
+        sm      (TEXTURE_CUR_T), R0
+        lm      R11, (BRUSH_COORD_RETURN)
+        ret
+        nop
+
+; R7 is signed ±(axis+1), R8 is the source texture offset in Quake units.
+; Return signed Q4 in R0. The exact Q3 variant origin is subtracted before
+; applying the affine axis, preventing moving-door texture swim.
+BrushComputeAxisCoordinate:
+        sm      (BRUSH_POLYGON_RETURN), R11
+        move    R6, R7
+        moves   R6, R6
+        bpl     BrushCoordinateAxisPositive
+        nop
+        move    R0, #0
+        with    R0
+        sub     R6
+        move    R6, R0
+BrushCoordinateAxisPositive:
+        dec     R6
+        bne     BrushCoordinateNotX
+        nop
+        lm      R0, (BRUSH_VERTEX_X_Q2)
+        iwt     R1, #BSP_WORLD_ORIGIN_X * 16
+        lm      R2, (BRUSH_CURRENT_SLOT)
+        GSU_ABSOLUTE_GOTO BrushCoordinateSlotPointer
+BrushCoordinateNotX:
+        dec     R6
+        bne     BrushCoordinateZ
+        nop
+        lm      R0, (BRUSH_VERTEX_Y_Q2)
+        iwt     R1, #BSP_WORLD_ORIGIN_Y * 16
+        lm      R2, (BRUSH_CURRENT_SLOT)
+        GSU_ABSOLUTE_GOTO BrushCoordinateSlotPointerY
+BrushCoordinateZ:
+        lm      R0, (BRUSH_VERTEX_Z_Q2)
+        iwt     R1, #BSP_WORLD_ORIGIN_Z * 16
+        lm      R2, (BRUSH_CURRENT_SLOT)
+        GSU_ABSOLUTE_GOTO BrushCoordinateSlotPointerZ
+
+BrushCoordinateSlotPointer:
+        move    R3, R2
+  .repeat 1
+        with    R3
+        add     R3
+  .endrepeat
+  .repeat 3
+        with    R2
+        add     R2
+  .endrepeat
+        with    R2
+        add     R3                       ; 10s.
+        iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_X_Q3
+        with    R10
+        add     R2
+        GSU_ABSOLUTE_GOTO BrushCoordinateOriginReady
+BrushCoordinateSlotPointerY:
+        move    R3, R2
+  .repeat 1
+        with    R3
+        add     R3
+  .endrepeat
+  .repeat 3
+        with    R2
+        add     R2
+  .endrepeat
+        with    R2
+        add     R3                       ; 10s.
+        iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_Y_Q3
+        with    R10
+        add     R2
+        GSU_ABSOLUTE_GOTO BrushCoordinateOriginReady
+BrushCoordinateSlotPointerZ:
+        move    R3, R2
+  .repeat 1
+        with    R3
+        add     R3
+  .endrepeat
+  .repeat 3
+        with    R2
+        add     R2
+  .endrepeat
+        with    R2
+        add     R3                       ; 10s.
+        iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_Z_Q3
+        with    R10
+        add     R2
+BrushCoordinateOriginReady:
+  .repeat 6
+        with    R0
+        add     R0                       ; Q2 packed coordinate -> Q4 Quake.
+  .endrepeat
+        with    R0
+        add     R1
+        movew   R2, (R10)
+        with    R2
+        add     R2                       ; Q3 Quake -> Q4 Quake.
+        with    R0
+        sub     R2
+        moves   R7, R7
+        bpl     BrushCoordinateSignReady
+        nop
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+BrushCoordinateSignReady:
+  .repeat 4
+        with    R8
+        add     R8
+  .endrepeat
+        with    R0
+        add     R8
+        lm      R11, (BRUSH_POLYGON_RETURN)
+        ret
+        nop
+
+; Both direct fragments and same-leaf candidates consume the same prepared
+; view polygon. Clip only planes named by the OR of its exact vertex outcodes;
+; intersections created by another half-space remain inside every skipped
+; linear half-space.
+BrushClipPreparedPolygon:
+        sm      (BRUSH_CLIP_RETURN), R11
+        lm      R0, (TEXTURE_CLIP_AND_OUTCODE)
+        moves   R0, R0
+        bne     BrushClipPreparedRejected
+        nop
+        iwt     R0, #TEXTURE_VIEW_A
+        sm      (CONVEX_INPUT_PTR), R0
+        iwt     R0, #TEXTURE_VIEW_B
+        sm      (CONVEX_OUTPUT_PTR), R0
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        sm      (CONVEX_COUNT), R0
+        lm      R0, (TEXTURE_CLIP_OUTCODE)
+        moves   R0, R0
+        beq     BrushClipPreparedDone
+        nop
+        move    R0, #0
+        sm      (CONVEX_PLANE), R0
+BrushClipPreparedPlaneLoop:
+        lm      R0, (TEXTURE_CLIP_OUTCODE)
+        with    R0
+        lsr
+        sm      (TEXTURE_CLIP_OUTCODE), R0
+        bcc     BrushClipPreparedPlaneNext
+        nop
+        jal     TextureClipPlane
+        nop
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        move    R1, #3
+        with    R0
+        cmp     R1
+        bcs     BrushClipPreparedPlanePresent
+        nop
+        move    R0, #0
+        bra     BrushClipPreparedReturn
+        nop
+BrushClipPreparedPlanePresent:
+        sm      (CONVEX_COUNT), R0
+        lm      R1, (CONVEX_INPUT_PTR)
+        lm      R2, (CONVEX_OUTPUT_PTR)
+        sm      (CONVEX_INPUT_PTR), R2
+        sm      (CONVEX_OUTPUT_PTR), R1
+BrushClipPreparedPlaneNext:
+        lm      R0, (CONVEX_PLANE)
+        inc     R0
+        sm      (CONVEX_PLANE), R0
+        lm      R0, (TEXTURE_CLIP_OUTCODE)
+        moves   R0, R0
+        bne     BrushClipPreparedPlaneLoop
+        nop
+BrushClipPreparedDone:
+        lm      R0, (CONVEX_COUNT)
+        bra     BrushClipPreparedReturn
+        nop
+BrushClipPreparedRejected:
+        move    R0, #0
+BrushClipPreparedReturn:
+        lm      R11, (BRUSH_CLIP_RETURN)
+        ret
+        nop
+
+BrushRasterPreparedPolygon:
+        sm      (BRUSH_POLYGON_RETURN), R11
+        jal     BrushClipPreparedPolygon
+        nop
+        moves   R0, R0
+        beq     BrushRasterPreparedDone
+        nop
+        jal     TextureProjectPolygonShaded
+        nop
+        moves   R0, R0
+        beq     BrushRasterPreparedDone
+        nop
+        lm      R0, (TEXTURE_RENDER_MODE)
+        move    R1, #2
+        with    R0
+        cmp     R1
+        beq     BrushRasterPreparedAlbedo
+        nop
+        move    R1, #4
+        with    R0
+        cmp     R1
+        beq     BrushRasterPreparedUntexturedDistance
+        nop
+        move    R1, #3
+        with    R0
+        cmp     R1
+        beq     BrushRasterPreparedDistance
+        nop
+        jal     TextureRasterPolygonShaded
+        nop
+        GSU_ABSOLUTE_GOTO BrushRasterPreparedDone
+BrushRasterPreparedDistance:
+        jal     TextureRasterPolygonDistance
+        nop
+        GSU_ABSOLUTE_GOTO BrushRasterPreparedDone
+BrushRasterPreparedUntexturedDistance:
+        jal     TextureRasterPolygonUntexturedDistance
+        nop
+        GSU_ABSOLUTE_GOTO BrushRasterPreparedDone
+BrushRasterPreparedAlbedo:
+        jal     TextureRasterPolygon
+        nop
+BrushRasterPreparedDone:
+        lm      R11, (BRUSH_POLYGON_RETURN)
+        ret
+        nop

@@ -1,0 +1,478 @@
+; Dedicated perspective-correct edge interpolation for technique 2. The
+; lightmapped/depth-shaded sibling retains its own mode handling; this path
+; always carries raw Q6 depth into the projective span contract.
+TextureIntersectActiveEdgeProjective:
+        sm      (TEXTURE_EDGE_RETURN), R11
+        movew   R4, (R10)
+        inc     R10
+        inc     R10
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_S), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_T), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_DEPTH), R0
+
+        movew   R6, (R9)
+        inc     R9
+        inc     R9
+        movew   R7, (R9)
+        inc     R9
+        inc     R9
+        movew   R0, (R9)
+        lm      R1, (TEXTURE_BASE_S)
+        with    R0
+        sub     R1
+        sm      (TEXTURE_DELTA_S), R0
+        inc     R9
+        inc     R9
+        movew   R0, (R9)
+        lm      R1, (TEXTURE_BASE_T)
+        with    R0
+        sub     R1
+        sm      (TEXTURE_DELTA_T), R0
+        inc     R9
+        inc     R9
+        movew   R0, (R9)
+        lm      R1, (TEXTURE_BASE_DEPTH)
+        with    R0
+        sub     R1
+        sm      (TEXTURE_DELTA_DEPTH), R0
+
+        lm      R0, (CONVEX_SAMPLE_Y)
+        move    R1, R0
+        with    R1
+        sub     R5
+        move    R0, R7
+        with    R0
+        sub     R5
+        move    R2, R0
+        sm      (CONVEX_BASE_RIGHT), R4
+        move    R0, R6
+        with    R0
+        sub     R4
+        sm      (CONVEX_DELTA_RIGHT), R0
+
+        move    R0, R1
+        move    R3, #0
+        move    R12, #10
+        iwt     R13, #TextureAlbedoEdgeDivideLoop
+TextureAlbedoEdgeDivideLoop:
+        with    R0
+        add     R0
+        with    R3
+        add     R3
+        move    R4, R0
+        with    R4
+        sub     R2
+        bcc     TextureAlbedoEdgeDivideNext
+        nop
+        move    R0, R4
+        inc     R3
+TextureAlbedoEdgeDivideNext:
+        loop
+        nop
+
+        ; Convert the Q10 screen factor to Q12, then to the world-edge factor.
+        with    R3
+        add     R3
+        with    R3
+        add     R3
+        sm      (CONVEX_FACTOR), R3
+        jal     TexturePerspectiveFactorQ12
+        nop
+
+        lm      R5, (TEXTURE_BASE_S)
+        lm      R7, (TEXTURE_DELTA_S)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        sm      (TEXTURE_EDGE_S), R5
+        lm      R5, (TEXTURE_BASE_T)
+        lm      R7, (TEXTURE_DELTA_T)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        sm      (TEXTURE_EDGE_T), R5
+        lm      R5, (TEXTURE_BASE_DEPTH)
+        lm      R7, (TEXTURE_DELTA_DEPTH)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        sm      (TEXTURE_EDGE_SHADE), R5
+
+        lm      R5, (CONVEX_BASE_RIGHT)
+        lm      R7, (CONVEX_DELTA_RIGHT)
+        lm      R3, (CONVEX_FACTOR)
+        BSP_SIGNED_MUL_SHIFT12 R0, R7, R3
+        with    R5
+        add     R0
+        move    R0, R5
+        lm      R11, (TEXTURE_EDGE_RETURN)
+        ret
+        nop
+
+; Dedicated perspective-correct albedo span for technique 2. Coordinate
+; endpoints and eight-pixel DDA blocks match technique 4 exactly, while this
+; hot loop performs only texture sampling and opaque 8bpp PLOT writes.
+TextureDrawSpan:
+        sm      (TEXTURE_SPAN_RETURN), R11
+        sm      (TEXTURE_SPAN_X), R1
+        sm      (TEXTURE_SPAN_END_X), R3
+
+        ; Map the invariant logical row to its 2x presentation coordinate once.
+        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R10
+        add     R2
+        move    R2, #0
+        moveb   R2, (R10)
+        sm      (TEXTURE_PLOT_Y), R2
+
+        ; Preserve clipped edge endpoints as the exact block sampler's base.
+        lm      R0, (TEXTURE_LEFT_S)
+        sm      (TEXTURE_BASE_S), R0
+        lm      R1, (TEXTURE_RIGHT_S)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_S), R1
+        lm      R0, (TEXTURE_LEFT_T)
+        sm      (TEXTURE_BASE_T), R0
+        lm      R1, (TEXTURE_RIGHT_T)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_T), R1
+        lm      R0, (TEXTURE_LEFT_SHADE)
+        sm      (TEXTURE_BASE_DEPTH), R0
+        lm      R1, (TEXTURE_RIGHT_SHADE)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_DEPTH), R1
+
+        ; Cache the projected-edge denominator reciprocal for this full span.
+        lm      R2, (CONVEX_MAX_X)
+        lm      R1, (CONVEX_MIN_X)
+        with    R2
+        sub     R1
+        moves   R2, R2
+        beq     TextureAlbedoReciprocalReady
+        nop
+        jal     TexturePrepareDivideQ12
+        nop
+TextureAlbedoReciprocalReady:
+        lm      R0, (TEXTURE_SPAN_X)
+        jal     TexturePerspectiveSampleSpan
+        nop
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        bne     TextureAlbedoBlockSetup
+        nop
+        GSU_ABSOLUTE_GOTO TextureAlbedoSpanLoopPrepare
+
+TextureAlbedoBlockSetup:
+        lm      R0, (TEXTURE_SPAN_X)
+        move    R4, R0
+        with    R4
+        add     #8
+        lm      R1, (TEXTURE_SPAN_END_X)
+        move    R2, R4
+        with    R2
+        sub     R1
+        bmi     TextureAlbedoBlockEndReady
+        nop
+        move    R4, R1
+TextureAlbedoBlockEndReady:
+        sm      (TEXTURE_BLOCK_END_X), R4
+        move    R0, R4
+        jal     TexturePerspectiveSampleSpan
+        nop
+        move    R10, R6
+
+        lm      R0, (TEXTURE_BLOCK_END_X)
+        lm      R1, (TEXTURE_SPAN_X)
+        with    R0
+        sub     R1
+        sm      (TEXTURE_SPAN_DEN), R0
+
+        move    R0, R5
+        lm      R1, (TEXTURE_SPAN_S)
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     TextureAlbedoBlockSPositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+TextureAlbedoBlockSPositive:
+        move    R8, R4
+        lm      R1, (TEXTURE_SPAN_DEN)
+        jal     TextureDivideBlockUnsigned
+        nop
+        move    R7, R2
+        move    R9, R3
+
+        move    R0, R10
+        lm      R1, (TEXTURE_SPAN_T)
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     TextureAlbedoBlockTPositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+TextureAlbedoBlockTPositive:
+        move    R10, R8
+        move    R8, R4
+        lm      R1, (TEXTURE_SPAN_DEN)
+        jal     TextureDivideBlockUnsigned
+        nop
+        ; R7/R9/R10 survive the second divider with S step/remainder/sign.
+        ; Map its T results and both signs directly into the prepared builder.
+        move    R11, R8
+        move    R8, R2
+        move    R13, R3
+        move    R4, R10
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockAlbedoRegisters
+TextureAlbedoCoordinateBlockReady:
+        ; Exact endpoint division selects a reciprocal ROM bank.
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+
+TextureAlbedoSpanLoopPrepare:
+        ; Both selected samplers preserve R3/R8-R10/R12-R13. Keep the pixel
+        ; cursor, limits, plot coordinates, coordinate pointer, and dispatch
+        ; target resident for the complete projective block.
+        lm      R8, (TEXTURE_SPAN_X)
+        lm      R9, (TEXTURE_SPAN_END_X)
+        lm      R12, (TEXTURE_PLOT_Y)
+        lm      R13, (TEXTURE_SAMPLE_ROUTINE)
+        lm      R10, (TEXTURE_COORD_PTR)
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        iwt     R3, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R3
+        add     R8
+TextureAlbedoSpanLoop:
+        ; The sampler route is selected once per face. Keep lightmap and
+        ; colormap work completely absent from this pixel loop.
+        link    #2
+        jmp     R13
+        nop
+        color
+        move    R1, #0
+        moveb   R1, (R3)
+        inc     R3
+        move    R2, R12
+        plot
+
+        with    R8
+        cmp     R9
+        bne     TextureAlbedoSpanContinue
+        nop
+        GSU_ABSOLUTE_GOTO TextureAlbedoSpanDone
+TextureAlbedoSpanContinue:
+        inc     R8
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+
+        ; A final endpoint is sampled from the current block. Otherwise each
+        ; shared block boundary becomes the exact start of the next block.
+        with    R8
+        cmp     R9
+        beq     TextureAlbedoSpanLoop
+        nop
+        lm      R1, (TEXTURE_BLOCK_END_X)
+        with    R8
+        cmp     R1
+        bne     TextureAlbedoSpanLoop
+        nop
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+        sm      (TEXTURE_SPAN_X), R8
+        GSU_ABSOLUTE_GOTO TextureAlbedoBlockSetup
+TextureAlbedoSpanDone:
+        lm      R11, (TEXTURE_SPAN_RETURN)
+        ret
+
+; R13 names one side-specific {denominator, reciprocal-high, reciprocal-low}
+; record. Reuse the exact reciprocal while an active edge spans scanlines.
+TextureDivideQ12EdgeCached:
+        move    R8, R0
+        move    R9, R2
+        move    R7, R13
+        movew   R1, (R7)
+        with    R9
+        cmp     R1
+        bne     TextureDivideQ12EdgeCacheMiss
+        nop
+        inc     R7
+        inc     R7
+        movew   R12, (R7)
+        inc     R7
+        inc     R7
+        movew   R13, (R7)
+        iwt     R10, #TextureDivideQ12LoadedCached
+        jmp     R10
+        nop
+TextureDivideQ12EdgeCacheMiss:
+        iwt     R10, #TextureDivideQ12EdgeCacheFill
+        GSU_ABSOLUTE_GOTO TextureDivideQ12Lookup
+TextureDivideQ12EdgeCacheFill:
+        movew   (R7), R9
+        inc     R7
+        inc     R7
+        movew   (R7), R12
+        inc     R7
+        inc     R7
+        movew   (R7), R13
+        iwt     R10, #TextureDivideQ12LoadedCached
+        jmp     R10
+        nop
+
+; Cached cells with identical columns or rows need one exact interpolation.
+TextureLightmapVerticalSpanLoop:
+        move    R9, R6
+        jal     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        move    R12, R0
+        move    R5, R9
+        lm      R6, (LIGHTMAP_BLOCK_LL)
+        bra     TextureLightmapOneAxisSample
+        nop
+TextureLightmapHorizontalSpanLoop:
+        move    R8, R5
+        jal     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        move    R12, R0
+        move    R5, R8
+        lm      R6, (LIGHTMAP_BLOCK_UR)
+TextureLightmapOneAxisSample:
+        iwt     R1, #$00F0
+        with    R5
+        and     R1
+        iwt     R2, #128
+        lm      R4, (LIGHTMAP_BLOCK_UL)
+        GSU_ABSOLUTE_GOTO LightmapSampleHorizontalInterpolated
+
+; Classify four already-cached samples without moving the hot preparation
+; suffix. Modes 3/4 select vertical/horizontal one-axis interpolation.
+LightmapClassifyCachedCell:
+        move    R2, #1
+        lm      R0, (LIGHTMAP_BLOCK_UL)
+        lm      R1, (LIGHTMAP_BLOCK_UR)
+        with    R0
+        cmp     R1
+        bne     LightmapClassifyDone
+        nop
+        lm      R1, (LIGHTMAP_BLOCK_LL)
+        lm      R3, (LIGHTMAP_BLOCK_LR)
+        with    R1
+        cmp     R3
+        bne     LightmapClassifyDone
+        nop
+        with    R0
+        cmp     R1
+        bne     LightmapClassifyVertical
+        nop
+        move    R2, #2
+        ; Cached samples are already natural colormap page bytes.
+        sm      (LIGHTMAP_BLOCK_LR), R0
+        bra     LightmapClassifyDone
+        nop
+LightmapClassifyVertical:
+        move    R2, #3
+        bra     LightmapClassifyDone
+        nop
+LightmapClassifyHorizontal:
+        lm      R1, (LIGHTMAP_BLOCK_LL)
+        with    R0
+        cmp     R1
+        bne     LightmapClassifyDone
+        nop
+        lm      R0, (LIGHTMAP_BLOCK_UR)
+        lm      R1, (LIGHTMAP_BLOCK_LR)
+        with    R0
+        cmp     R1
+        bne     LightmapClassifyDone
+        nop
+LightmapClassifyDone:
+        sm      (LIGHTMAP_BLOCK_FAST), R2
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+        nop
+
+; The dominant projective block is exactly eight pixels wide. Build its two
+; signed quotient/remainder pairs directly, avoiding two trips through the
+; general width selector while retaining the coordinate builder's exact ABI.
+TextureLightmapBlock8Setup:
+        move    R0, R5
+        lm      R1, (TEXTURE_SPAN_S)
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     TextureLightmapBlock8SPositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+TextureLightmapBlock8SPositive:
+        move    R8, R4
+        move    R9, R0
+        with    R9
+        and     #7
+  .repeat 3
+        with    R0
+        lsr
+  .endrepeat
+        move    R7, R0
+
+        move    R0, R10
+        lm      R1, (TEXTURE_SPAN_T)
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     TextureLightmapBlock8TPositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+TextureLightmapBlock8TPositive:
+        move    R10, R8
+        move    R11, R4
+        move    R13, R0
+        with    R13
+        and     #7
+  .repeat 3
+        with    R0
+        lsr
+  .endrepeat
+        move    R8, R0
+        move    R4, R10
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockLightmapRegisters

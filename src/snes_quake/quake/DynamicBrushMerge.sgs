@@ -1,0 +1,1177 @@
+; Camera-independent brush snapshot expansion and far/node/near token merge.
+; All storage is phase-separated from the completed static-world packet.
+
+BRUSH_STATE                   = GSU_FACE_PLANES_OFFSET
+BRUSH_BUILD_RETURN            = BRUSH_STATE + $00
+BRUSH_LOAD_RETURN             = BRUSH_STATE + $02
+BRUSH_LINK_RETURN             = BRUSH_STATE + $04
+BRUSH_MERGE_RETURN            = BRUSH_STATE + $06
+BRUSH_VISUAL_STATE            = BRUSH_STATE + $08
+BRUSH_FIRST_TRANSFORM         = BRUSH_STATE + $0A
+BRUSH_FIRST_TEXTURE           = BRUSH_STATE + $0C
+BRUSH_TRANSFORM_COUNT         = BRUSH_STATE + $0E
+BRUSH_TEXTURE_OVERRIDE_COUNT  = BRUSH_STATE + $10
+BRUSH_TRANSFORM_CURSOR        = BRUSH_STATE + $12
+BRUSH_CURRENT_SLOT            = BRUSH_STATE + $14
+BRUSH_CURRENT_LOCAL_VARIANT   = BRUSH_STATE + $16
+BRUSH_CURRENT_GLOBAL_VARIANT  = BRUSH_STATE + $18
+BRUSH_CURRENT_GEOMETRY_VARIANT = BRUSH_STATE + $1A
+BRUSH_CURRENT_FIRST_BUCKET    = BRUSH_STATE + $1C
+BRUSH_CURRENT_BUCKET_COUNT    = BRUSH_STATE + $1E
+BRUSH_CURRENT_BUCKET_CURSOR   = BRUSH_STATE + $20
+BRUSH_CURRENT_FRAGMENT        = BRUSH_STATE + $22
+BRUSH_CURRENT_FRAGMENT_COUNT  = BRUSH_STATE + $24
+BRUSH_CURRENT_LEAF            = BRUSH_STATE + $26
+BRUSH_LINK_COUNT              = BRUSH_STATE + $28
+BRUSH_TOKEN_COUNT             = BRUSH_STATE + $2A
+BRUSH_OVERFLOW                = BRUSH_STATE + $2C
+BRUSH_TRAVERSAL_SP            = BRUSH_STATE + $2E
+BRUSH_CURRENT_NODE            = BRUSH_STATE + $30
+BRUSH_NODE_PLANE              = BRUSH_STATE + $32
+BRUSH_NODE_FRONT              = BRUSH_STATE + $34
+BRUSH_NODE_BACK               = BRUSH_STATE + $36
+BRUSH_NODE_FIRST_FACE         = BRUSH_STATE + $38
+BRUSH_NODE_FACE_END           = BRUSH_STATE + $3A
+BRUSH_CURRENT_ENTITY          = BRUSH_STATE + $3C
+BRUSH_CURRENT_INLINE_MODEL    = BRUSH_STATE + $3E
+BRUSH_MARK_RETURN             = BRUSH_STATE + $40
+BRUSH_BIT_RETURN              = BRUSH_STATE + $42
+BRUSH_BOUNDS_RETURN           = BRUSH_STATE + $44
+BRUSH_BOUNDS_CENTER_X_Q2      = BRUSH_STATE + $46
+BRUSH_BOUNDS_CENTER_Y_Q2      = BRUSH_STATE + $48
+BRUSH_BOUNDS_CENTER_Z_Q2      = BRUSH_STATE + $4A
+BRUSH_BOUNDS_EXTENT_X_Q2      = BRUSH_STATE + $4C
+BRUSH_BOUNDS_EXTENT_Y_Q2      = BRUSH_STATE + $4E
+BRUSH_BOUNDS_EXTENT_Z_Q2      = BRUSH_STATE + $50
+BRUSH_BOUNDS_FORWARD_Q6       = BRUSH_STATE + $52
+BRUSH_BOUNDS_RIGHT_Q6         = BRUSH_STATE + $54
+BRUSH_BOUNDS_UP_Q6            = BRUSH_STATE + $56
+BRUSH_BOUNDS_DEPTH_Q6         = BRUSH_STATE + $58
+BRUSH_BOUNDS_LR_SUPPORT_Q6    = BRUSH_STATE + $5A
+BRUSH_BOUNDS_UD_SUPPORT_Q6    = BRUSH_STATE + $5C
+BRUSH_BOUNDS_YAW_COS          = BRUSH_STATE + $5E
+BRUSH_BOUNDS_YAW_SIN          = BRUSH_STATE + $60
+BRUSH_BOUNDS_PITCH_COS        = BRUSH_STATE + $62
+BRUSH_BOUNDS_PITCH_SIN        = BRUSH_STATE + $64
+BRUSH_BOUNDS_ORIGIN_X_Q3      = BRUSH_STATE + $66
+BRUSH_BOUNDS_ORIGIN_Y_Q3      = BRUSH_STATE + $68
+BRUSH_BOUNDS_ORIGIN_Z_Q3      = BRUSH_STATE + $6A
+BRUSH_GEOMETRY_RETURN         = BRUSH_STATE + $80
+BRUSH_STATIC_RETURN           = BRUSH_STATE + $82
+
+; Indexed directly by QBSE entity slot. Only slots reached through current
+; command links are read, so every retained field is published before use.
+BRUSH_SLOT_TABLE              = BRUSH_STATE + $0100
+BRUSH_SLOT_RECORD_BYTES       = 10
+BRUSH_SLOT_COUNT              = BSP_BRUSH_ENTITY_SLOT_COUNT + BSP_BRUSH_VSTATIC_COUNT
+BRUSH_SLOT_ORIGIN_X_Q3        = 0
+BRUSH_SLOT_ORIGIN_Y_Q3        = 2
+BRUSH_SLOT_ORIGIN_Z_Q3        = 4
+BRUSH_SLOT_ENTITY             = 6
+BRUSH_SLOT_INLINE_MODEL       = 8
+
+BRUSH_LEAF_HEADS              = GSU_BRUSH_LEAF_HEADS_OFFSET
+BRUSH_LINKS                   = GSU_BRUSH_LINKS_OFFSET
+BRUSH_TOKENS                  = GSU_BRUSH_MIXED_TOKENS_OFFSET
+BRUSH_TRAVERSAL_STACK         = PACKET_PAINTER_STACK
+BRUSH_TRAVERSAL_STACK_END     = PACKET_PAINTER_STACK_END
+BRUSH_TOKEN_FRAGMENT_TAG      = $8000
+BRUSH_TOKEN_LEAF_TAG          = $4000
+BRUSH_TRAVERSAL_EMIT_TAG      = $4000
+BRUSH_TRAVERSAL_NODE_MASK     = $3FFF
+
+BRUSH_OVERFLOW_LINKS          = $0001
+BRUSH_OVERFLOW_TOKENS         = $0002
+BRUSH_OVERFLOW_STACK          = $0004
+BRUSH_OVERFLOW_STATE          = $0008
+
+.assert BRUSH_SLOT_TABLE + BRUSH_SLOT_COUNT * BRUSH_SLOT_RECORD_BYTES <= GSU_FACE_PLANES_OFFSET + GSU_FACE_PLANES_CAPACITY, error, "Brush state escapes face-plane phase"
+.assert BRUSH_SLOT_COUNT <= 64, error, "Brush slots exceed packed six-bit indices"
+.assert BRUSH_TRAVERSAL_STACK_END <= GSU_RASTER_SCRATCH_OFFSET + GSU_RASTER_SCRATCH_BYTES, error, "Brush traversal stack escapes raster scratch"
+.assert BSP_BRUSH_FRAGMENT_BUCKET_RECORD_BYTES = 8, error, "Brush bucket parent-node ABI changed"
+.assert BSP_BRUSH_FRAGMENT_VARIANT_RECORD_BYTES = 24, error, "Brush variant bounds ABI changed"
+.assert BRUSH_BOUNDS_ORIGIN_Z_Q3 + 2 <= BRUSH_SLOT_TABLE, error, "Brush bounds state overlaps slot table"
+
+BrushBuildMixedTokens:
+        sm      (BRUSH_BUILD_RETURN), R11
+        move    R0, #0
+        sm      (BRUSH_LINK_COUNT), R0
+        sm      (BRUSH_TOKEN_COUNT), R0
+        sm      (BRUSH_OVERFLOW), R0
+
+        ; Raw QBSF leaf IDs index a direct u16 head array.
+        iwt     R10, #BRUSH_LEAF_HEADS
+        iwt     R12, #BSP_BRUSH_LEAF_HEAD_COUNT
+        iwt     R13, #BrushClearLeafHeads
+BrushClearLeafHeads:
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        loop
+        nop
+
+        jal     BrushLoadVisualState
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushBuildPublish
+        nop
+        jal     BrushBuildActiveLinks
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushBuildPublish
+        nop
+        iwt     R10, #COMMAND+12
+        move    R0, #0
+        moveb   R0, (R10)
+        moves   R0, R0
+        beq     BrushBuildReplayReady
+        nop
+        jal     BrushBuildStaticLinks
+        nop
+BrushBuildReplayReady:
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushBuildPublish
+        nop
+        jal     BrushMergePainterTokens
+        nop
+BrushBuildPublish:
+        lm      R0, (BRUSH_TRANSFORM_COUNT)
+        sm      (GSU_TELEMETRY_BRUSH_TRANSFORM_COUNT), R0
+        lm      R0, (BRUSH_LINK_COUNT)
+        sm      (GSU_TELEMETRY_BRUSH_LINK_COUNT), R0
+        lm      R0, (BRUSH_TOKEN_COUNT)
+        sm      (GSU_TELEMETRY_BRUSH_MIXED_TOKEN_COUNT), R0
+        lm      R0, (BRUSH_OVERFLOW)
+        sm      (GSU_TELEMETRY_BRUSH_OVERFLOW), R0
+        lm      R11, (BRUSH_BUILD_RETURN)
+        ret
+        nop
+
+BrushLoadVisualState:
+        sm      (BRUSH_LOAD_RETURN), R11
+        lm      R0, (GSU_TELEMETRY_BRUSH_VISUAL_STATE)
+        sm      (BRUSH_VISUAL_STATE), R0
+        moves   R0, R0
+        bne     BrushVisualStatePresent
+        nop
+        iwt     R0, #BRUSH_OVERFLOW_STATE
+        sm      (BRUSH_OVERFLOW), R0
+        GSU_ABSOLUTE_GOTO BrushLoadVisualStateDone
+BrushVisualStatePresent:
+        dec     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        iwt     R4, #BSP_BRUSH_VSTATES_ADDRESS
+        with    R4
+        add     R0
+        move    R0, #BSP_BRUSH_VSTATES_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_FIRST_TRANSFORM), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_FIRST_TEXTURE), R0
+        BSP_ROM_LOAD_WORD R0            ; Reserved by QBSA v1.
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_TRANSFORM_COUNT), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_TEXTURE_OVERRIDE_COUNT), R0
+BrushLoadVisualStateDone:
+        lm      R11, (BRUSH_LOAD_RETURN)
+        ret
+        nop
+
+BrushBuildActiveLinks:
+        sm      (BRUSH_LINK_RETURN), R11
+        move    R0, #0
+        sm      (BRUSH_TRANSFORM_CURSOR), R0
+BrushTransformLoop:
+        lm      R0, (BRUSH_TRANSFORM_CURSOR)
+        lm      R1, (BRUSH_TRANSFORM_COUNT)
+        with    R0
+        cmp     R1
+        bne     BrushTransformPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushBuildActiveLinksDone
+BrushTransformPresent:
+
+        lm      R1, (BRUSH_FIRST_TRANSFORM)
+        with    R1
+        add     R0
+        with    R1
+        add     R1
+        iwt     R4, #BSP_BRUSH_VTRANS_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_VTRANS_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_CURRENT_SLOT), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_CURRENT_LOCAL_VARIANT), R0
+
+        ; QBSE entity descriptors begin after the 32-byte header:
+        ; entity/model/axis/count bytes, firstVariant u16, then origin Q3.
+        lm      R0, (BRUSH_CURRENT_SLOT)
+        move    R1, R0
+        with    R1
+        add     R1                       ; 2s
+        move    R2, R1
+        with    R1
+        add     R1                       ; 4s
+        with    R1
+        add     R1                       ; 8s
+        with    R1
+        add     R2                       ; 10s
+        with    R1
+        add     R2                       ; 12s
+        iwt     R0, #32
+        with    R1
+        add     R0
+        iwt     R4, #BSP_BRUSH_REPLAY_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_REPLAY_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_CURRENT_ENTITY), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_CURRENT_INLINE_MODEL), R0
+        BSP_ROM_LOAD_BYTE R0             ; Translation axis.
+        BSP_ROM_LOAD_BYTE R0             ; Variant count.
+        BSP_ROM_LOAD_WORD R1
+        lm      R0, (BRUSH_CURRENT_LOCAL_VARIANT)
+        with    R1
+        add     R0
+        sm      (BRUSH_CURRENT_GLOBAL_VARIANT), R1
+
+        with    R1
+        add     R1
+        iwt     R4, #BSP_BRUSH_VFRAG_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_VFRAG_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_GEOMETRY_VARIANT), R0
+
+        jal     BrushBuildGeometryLinks
+        nop
+        GSU_ABSOLUTE_GOTO BrushTransformAdvance
+
+BrushBuildGeometryLinks:
+        sm      (BRUSH_GEOMETRY_RETURN), R11
+        ; QBSF variant: model/flags, origin Q3 xyz, bucket range, then a
+        ; conservative Q2 center/extent enclosing every non-solid fragment.
+        lm      R0, (BRUSH_CURRENT_GEOMETRY_VARIANT)
+        move    R1, R0
+        with    R1
+        add     R1                       ; 2v
+        move    R2, R1
+        with    R1
+        add     R1                       ; 4v
+        with    R1
+        add     R1                       ; 8v
+        with    R1
+        add     R2                       ; 10v
+        with    R1
+        add     R2                       ; 12v
+        with    R1
+        add     R1                       ; 24v
+        iwt     R4, #BSP_BRUSH_FRAGMENT_VARIANTS_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_FRAGMENT_FIRST_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0             ; Inline model.
+        sm      (BRUSH_CURRENT_INLINE_MODEL), R0
+        BSP_ROM_LOAD_BYTE R0             ; Flags.
+        BSP_ROM_LOAD_WORD R5             ; Origin X Q3.
+        sm      (BRUSH_BOUNDS_ORIGIN_X_Q3), R5
+        BSP_ROM_LOAD_WORD R6             ; Origin Y Q3.
+        sm      (BRUSH_BOUNDS_ORIGIN_Y_Q3), R6
+        BSP_ROM_LOAD_WORD R7             ; Origin Z Q3.
+        sm      (BRUSH_BOUNDS_ORIGIN_Z_Q3), R7
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_FIRST_BUCKET), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_BUCKET_COUNT), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_BOUNDS_CENTER_X_Q2), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_BOUNDS_CENTER_Y_Q2), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_BOUNDS_CENTER_Z_Q2), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_BOUNDS_EXTENT_X_Q2), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_BOUNDS_EXTENT_Y_Q2), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_BOUNDS_EXTENT_Z_Q2), R0
+
+        jal     BrushGeometryOutsideFrustum
+        nop
+        moves   R0, R0
+        beq     BrushGeometryVisible
+        nop
+        GSU_ABSOLUTE_GOTO BrushBuildGeometryLinksDone
+BrushGeometryVisible:
+        lm      R5, (BRUSH_BOUNDS_ORIGIN_X_Q3)
+        lm      R6, (BRUSH_BOUNDS_ORIGIN_Y_Q3)
+        lm      R7, (BRUSH_BOUNDS_ORIGIN_Z_Q3)
+
+        ; Publish the active geometry/origin under its entity slot.
+        lm      R0, (BRUSH_CURRENT_SLOT)
+        move    R1, R0
+  .repeat 1
+        with    R1
+        add     R1
+  .endrepeat
+  .repeat 3
+        with    R0
+        add     R0
+  .endrepeat
+        with    R0
+        add     R1                       ; 10s.
+        iwt     R10, #BRUSH_SLOT_TABLE
+        with    R10
+        add     R0
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        movew   (R10), R6
+        inc     R10
+        inc     R10
+        movew   (R10), R7
+        inc     R10
+        inc     R10
+        lm      R0, (BRUSH_CURRENT_ENTITY)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (BRUSH_CURRENT_INLINE_MODEL)
+        moveb   (R10), R0
+
+        move    R0, #0
+        sm      (BRUSH_CURRENT_BUCKET_CURSOR), R0
+BrushBucketLoop:
+        lm      R0, (BRUSH_CURRENT_BUCKET_CURSOR)
+        lm      R1, (BRUSH_CURRENT_BUCKET_COUNT)
+        with    R0
+        cmp     R1
+        bne     BrushBucketPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushBuildGeometryLinksDone
+BrushBucketPresent:
+        lm      R1, (BRUSH_CURRENT_FIRST_BUCKET)
+        with    R1
+        add     R0
+  .repeat 3
+        with    R1
+        add     R1
+  .endrepeat                            ; 8b
+        iwt     R4, #BSP_BRUSH_FRAGMENT_BUCKETS_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_FRAGMENT_FIRST_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_LEAF), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_FRAGMENT), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_CURRENT_FRAGMENT_COUNT), R0
+        BSP_ROM_LOAD_BYTE R2
+        BSP_ROM_LOAD_WORD R3
+        moves   R2, R2
+        bne     BrushBucketAdvance        ; Static world owns solid leaves.
+        nop
+        jal     BrushMarkPainterAncestors
+        nop
+BrushFragmentLoop:
+        lm      R0, (BRUSH_CURRENT_FRAGMENT_COUNT)
+        moves   R0, R0
+        beq     BrushBucketAdvance
+        nop
+        jal     BrushAppendActiveLink
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushBuildGeometryLinksDone
+        nop
+        lm      R0, (BRUSH_CURRENT_FRAGMENT)
+        inc     R0
+        sm      (BRUSH_CURRENT_FRAGMENT), R0
+        lm      R0, (BRUSH_CURRENT_FRAGMENT_COUNT)
+        dec     R0
+        sm      (BRUSH_CURRENT_FRAGMENT_COUNT), R0
+        GSU_ABSOLUTE_GOTO BrushFragmentLoop
+BrushBucketAdvance:
+        lm      R0, (BRUSH_CURRENT_BUCKET_CURSOR)
+        inc     R0
+        sm      (BRUSH_CURRENT_BUCKET_CURSOR), R0
+        GSU_ABSOLUTE_GOTO BrushBucketLoop
+BrushBuildGeometryLinksDone:
+        lm      R11, (BRUSH_GEOMETRY_RETURN)
+        ret
+        nop
+BrushTransformAdvance:
+        lm      R0, (BRUSH_TRANSFORM_CURSOR)
+        inc     R0
+        sm      (BRUSH_TRANSFORM_CURSOR), R0
+        GSU_ABSOLUTE_GOTO BrushTransformLoop
+BrushBuildActiveLinksDone:
+        lm      R11, (BRUSH_LINK_RETURN)
+        ret
+        nop
+
+; R3 names a node. Return its painter-mask byte in R0, bit in R2, and byte
+; address in R10. Both the marker and traversal use this exact lookup.
+BrushPainterNodeBit:
+        sm      (BRUSH_BIT_RETURN), R11
+        move    R0, R3
+        move    R1, R0
+        with    R1
+        and     #7
+  .repeat 3
+        with    R0
+        lsr
+  .endrepeat
+        iwt     R10, #PAINTER_NODE_BITS
+        with    R10
+        add     R0
+        move    R0, #0
+        moveb   R0, (R10)
+        move    R2, #1
+BrushPainterNodeBitLoop:
+        moves   R1, R1
+        beq     BrushPainterNodeBitReady
+        nop
+        with    R2
+        add     R2
+        dec     R1
+        bra     BrushPainterNodeBitLoop
+        nop
+BrushPainterNodeBitReady:
+        lm      R11, (BRUSH_BIT_RETURN)
+        ret
+        nop
+
+.segment "GSUCODE"
+
+; Merge the active brush leaf's owning node and ancestors into the packet
+; painter mask. An already-set node proves that every ancestor is set too.
+BrushMarkPainterAncestors:
+        sm      (BRUSH_MARK_RETURN), R11
+BrushMarkPainterNode:
+        jal     BrushPainterNodeBit
+        nop
+        with    R0
+        and     R2
+        bne     BrushMarkPainterDone
+        nop
+        moveb   R0, (R10)
+        with    R0
+        or      R2
+        moveb   (R10), R0
+        moves   R3, R3
+        beq     BrushMarkPainterDone
+        nop
+        move    R0, R3
+        with    R0
+        add     R0
+        iwt     R4, #$8000
+        with    R4
+        add     R0
+        move    R0, #WORLD_NODE_PARENTS_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R3
+        bra     BrushMarkPainterNode
+        nop
+BrushMarkPainterDone:
+        lm      R11, (BRUSH_MARK_RETURN)
+        ret
+        nop
+
+; Return one when a conservative interval of every non-solid QBSF vertex is
+; wholly outside one exact fragment clip half-space. The center takes one
+; normal Q2 transform; staged ceil products propagate its AABB extents through
+; the quantized yaw/pitch transform without underestimating shift error.
+BrushGeometryOutsideFrustum:
+        sm      (BRUSH_BOUNDS_RETURN), R11
+        lm      R1, (BRUSH_BOUNDS_CENTER_X_Q2)
+        lm      R2, (BRUSH_BOUNDS_CENTER_Y_Q2)
+        lm      R3, (BRUSH_BOUNDS_CENTER_Z_Q2)
+        jal     ClipTransformQ2Registers
+        nop
+
+        lm      R0, (YAW_COS)
+        jal     BrushBoundsAbs
+        nop
+        sm      (BRUSH_BOUNDS_YAW_COS), R0
+        lm      R0, (YAW_SIN)
+        jal     BrushBoundsAbs
+        nop
+        sm      (BRUSH_BOUNDS_YAW_SIN), R0
+        lm      R0, (PITCH_COS)
+        jal     BrushBoundsAbs
+        nop
+        sm      (BRUSH_BOUNDS_PITCH_COS), R0
+        lm      R0, (PITCH_SIN)
+        jal     BrushBoundsAbs
+        nop
+        sm      (BRUSH_BOUNDS_PITCH_SIN), R0
+
+        ; Forward = ceil(ex*|yc|/4) + ceil(ey*|ys|/4).
+        lm      R0, (BRUSH_BOUNDS_EXTENT_X_Q2)
+        lm      R6, (BRUSH_BOUNDS_YAW_COS)
+        jal     BrushBoundsMulCeilQ2
+        nop
+        move    R7, R0
+        lm      R0, (BRUSH_BOUNDS_EXTENT_Y_Q2)
+        lm      R6, (BRUSH_BOUNDS_YAW_SIN)
+        jal     BrushBoundsMulCeilQ2
+        nop
+        with    R0
+        add     R7
+        sm      (BRUSH_BOUNDS_FORWARD_Q6), R0
+
+        ; Right = ceil(ey*|yc|/4) + ceil(ex*|ys|/4).
+        lm      R0, (BRUSH_BOUNDS_EXTENT_Y_Q2)
+        lm      R6, (BRUSH_BOUNDS_YAW_COS)
+        jal     BrushBoundsMulCeilQ2
+        nop
+        move    R7, R0
+        lm      R0, (BRUSH_BOUNDS_EXTENT_X_Q2)
+        lm      R6, (BRUSH_BOUNDS_YAW_SIN)
+        jal     BrushBoundsMulCeilQ2
+        nop
+        with    R0
+        add     R7
+        sm      (BRUSH_BOUNDS_RIGHT_Q6), R0
+
+        ; Up = ceil(ez*|pc|/4) + ceil(forward*|ps|/64).
+        lm      R0, (BRUSH_BOUNDS_EXTENT_Z_Q2)
+        lm      R6, (BRUSH_BOUNDS_PITCH_COS)
+        jal     BrushBoundsMulCeilQ2
+        nop
+        move    R7, R0
+        lm      R0, (BRUSH_BOUNDS_FORWARD_Q6)
+        lm      R6, (BRUSH_BOUNDS_PITCH_SIN)
+        jal     BrushBoundsMulCeilQ6
+        nop
+        with    R0
+        add     R7
+        sm      (BRUSH_BOUNDS_UP_Q6), R0
+
+        ; Depth = ceil(forward*|pc|/64) + ceil(ez*|ps|/4).
+        lm      R0, (BRUSH_BOUNDS_FORWARD_Q6)
+        lm      R6, (BRUSH_BOUNDS_PITCH_COS)
+        jal     BrushBoundsMulCeilQ6
+        nop
+        move    R7, R0
+        lm      R0, (BRUSH_BOUNDS_EXTENT_Z_Q2)
+        lm      R6, (BRUSH_BOUNDS_PITCH_SIN)
+        jal     BrushBoundsMulCeilQ2
+        nop
+        with    R0
+        add     R7
+        sm      (BRUSH_BOUNDS_DEPTH_Q6), R0
+
+        lm      R0, (BRUSH_BOUNDS_DEPTH_Q6)
+        inc     R0
+        with    R0
+        lsr
+        move    R7, R0
+        lm      R0, (BRUSH_BOUNDS_RIGHT_Q6)
+        inc     R0
+        with    R0
+        lsr
+        with    R0
+        add     R7
+        sm      (BRUSH_BOUNDS_LR_SUPPORT_Q6), R0
+        lm      R0, (BRUSH_BOUNDS_DEPTH_Q6)
+        inc     R0
+        with    R0
+        lsr
+        move    R7, R0
+        lm      R0, (BRUSH_BOUNDS_UP_Q6)
+        inc     R0
+        with    R0
+        lsr
+        with    R0
+        add     R7
+        sm      (BRUSH_BOUNDS_UD_SUPPORT_Q6), R0
+
+        lm      R8, (CLIP_DEPTH)
+        with    R8
+        asr
+        lm      R9, (CLIP_RIGHT)
+        with    R9
+        asr
+        lm      R10, (CLIP_UP)
+        with    R10
+        asr
+
+        move    R0, R8
+        with    R0
+        add     R9
+        moves   R0, R0
+        bpl     BrushBoundsPlane1
+        nop
+        lm      R1, (BRUSH_BOUNDS_LR_SUPPORT_Q6)
+        with    R0
+        add     R1
+        bmi     BrushGeometryOutside
+        nop
+BrushBoundsPlane1:
+        move    R0, R8
+        with    R0
+        sub     R9
+        moves   R0, R0
+        bpl     BrushBoundsPlane2
+        nop
+        lm      R1, (BRUSH_BOUNDS_LR_SUPPORT_Q6)
+        with    R0
+        add     R1
+        bmi     BrushGeometryOutside
+        nop
+BrushBoundsPlane2:
+        move    R0, R8
+        with    R0
+        sub     R10
+        moves   R0, R0
+        bpl     BrushBoundsPlane3
+        nop
+        lm      R1, (BRUSH_BOUNDS_UD_SUPPORT_Q6)
+        with    R0
+        add     R1
+        bmi     BrushGeometryOutside
+        nop
+BrushBoundsPlane3:
+        move    R0, R8
+        with    R0
+        add     R10
+        moves   R0, R0
+        bpl     BrushGeometryInside
+        nop
+        lm      R1, (BRUSH_BOUNDS_UD_SUPPORT_Q6)
+        with    R0
+        add     R1
+        bmi     BrushGeometryOutside
+        nop
+BrushGeometryInside:
+        move    R0, #0
+        bra     BrushGeometryBoundsDone
+        nop
+BrushGeometryOutside:
+        move    R0, #1
+BrushGeometryBoundsDone:
+        lm      R11, (BRUSH_BOUNDS_RETURN)
+        ret
+        nop
+
+BrushBoundsAbs:
+        moves   R0, R0
+        bpl     BrushBoundsAbsDone
+        nop
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+BrushBoundsAbsDone:
+        ret
+        nop
+
+BrushBoundsMulCeilQ2:
+        with    R0
+        lmult
+        with    R4
+        add     #3
+        move    R1, #0
+        with    R0
+        adc     R1
+  .repeat 2
+        with    R0
+        lsr
+        with    R4
+        ror
+  .endrepeat
+        move    R0, R4
+        ret
+        nop
+
+BrushBoundsMulCeilQ6:
+        with    R0
+        lmult
+        iwt     R1, #63
+        with    R4
+        add     R1
+        move    R1, #0
+        with    R0
+        adc     R1
+  .repeat 6
+        with    R0
+        lsr
+        with    R4
+        ror
+  .endrepeat
+        move    R0, R4
+        ret
+        nop
+
+.segment "GSU_BRUSH_CODE"
+
+; Fly mode augments the frozen replay snapshot with 38 signon-only baselines.
+; VSTATIC supplies entity identity and the exact QBSF geometry variant; the
+; unified runtime slot namespace is replay slots followed by static records.
+BrushBuildStaticLinks:
+        sm      (BRUSH_STATIC_RETURN), R11
+        move    R0, #0
+        sm      (BRUSH_TRANSFORM_CURSOR), R0
+BrushStaticLoop:
+        lm      R0, (BRUSH_TRANSFORM_CURSOR)
+        iwt     R1, #BSP_BRUSH_VSTATIC_COUNT
+        with    R0
+        cmp     R1
+        bne     BrushStaticPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushBuildStaticLinksDone
+BrushStaticPresent:
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R4, #BSP_BRUSH_VSTATIC_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_VSTATIC_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_ENTITY), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_GEOMETRY_VARIANT), R0
+        lm      R0, (BRUSH_TRANSFORM_CURSOR)
+        iwt     R1, #BSP_BRUSH_ENTITY_SLOT_COUNT
+        with    R0
+        add     R1
+        sm      (BRUSH_CURRENT_SLOT), R0
+        jal     BrushBuildGeometryLinks
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushBuildStaticLinksDone
+        nop
+        lm      R0, (BRUSH_TRANSFORM_CURSOR)
+        inc     R0
+        sm      (BRUSH_TRANSFORM_CURSOR), R0
+        GSU_ABSOLUTE_GOTO BrushStaticLoop
+BrushBuildStaticLinksDone:
+        lm      R11, (BRUSH_STATIC_RETURN)
+        ret
+        nop
+
+BrushAppendActiveLink:
+        sm      (BRUSH_LOAD_RETURN), R11
+        lm      R0, (BRUSH_LINK_COUNT)
+        iwt     R1, #GSU_BRUSH_LINK_CAPACITY
+        with    R0
+        cmp     R1
+        bcc     BrushLinkCapacityReady
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        with    R0
+        or      #BRUSH_OVERFLOW_LINKS
+        sm      (BRUSH_OVERFLOW), R0
+        GSU_ABSOLUTE_GOTO BrushAppendActiveLinkDone
+BrushLinkCapacityReady:
+        move    R3, R0                   ; Zero-based link index.
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        iwt     R10, #BRUSH_LINKS
+        with    R10
+        add     R0
+        lm      R0, (BRUSH_CURRENT_FRAGMENT)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+
+        lm      R0, (BRUSH_CURRENT_LEAF)
+        with    R0
+        add     R0
+        iwt     R4, #BRUSH_LEAF_HEADS
+        with    R4
+        add     R0
+        movew   R1, (R4)                ; Prior one-based head (10 bits).
+        lm      R0, (BRUSH_CURRENT_SLOT)
+  .repeat 10
+        with    R0
+        add     R0
+  .endrepeat
+        with    R0
+        or      R1
+        movew   (R10), R0
+        inc     R3
+        movew   (R4), R3
+        sm      (BRUSH_LINK_COUNT), R3
+BrushAppendActiveLinkDone:
+        lm      R11, (BRUSH_LOAD_RETURN)
+        ret
+        nop
+
+BrushMergePainterTokens:
+        sm      (BRUSH_MERGE_RETURN), R11
+        iwt     R10, #BRUSH_TRAVERSAL_STACK
+        move    R0, #BSP_WORLD_ROOT_NODE
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        sm      (BRUSH_TRAVERSAL_SP), R10
+BrushTraversalNext:
+        lm      R10, (BRUSH_TRAVERSAL_SP)
+        iwt     R0, #BRUSH_TRAVERSAL_STACK
+        move    R1, R10
+        with    R1
+        cmp     R0
+        bne     BrushTraversalPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushMergePainterDone
+BrushTraversalPresent:
+        dec     R10
+        dec     R10
+        movew   R0, (R10)
+        sm      (BRUSH_TRAVERSAL_SP), R10
+        moves   R0, R0
+        bmi     BrushTraversalLeaf
+        nop
+        move    R1, R0
+        iwt     R2, #BRUSH_TRAVERSAL_EMIT_TAG
+        with    R1
+        and     R2
+        beq     BrushTraversalVisitNode
+        nop
+        GSU_ABSOLUTE_GOTO BrushTraversalEmitNode
+BrushTraversalVisitNode:
+        move    R3, R0
+        jal     BrushPainterNodeBit
+        nop
+        with    R0
+        and     R2
+        bne     BrushTraversalVisitNodeActive
+        nop
+        GSU_ABSOLUTE_GOTO BrushTraversalNext
+BrushTraversalVisitNodeActive:
+        move    R0, R3
+        sm      (BRUSH_CURRENT_NODE), R0
+        jal     BrushLoadCurrentNode
+        nop
+        jal     BrushPushPainterNode
+        nop
+        GSU_ABSOLUTE_GOTO BrushTraversalNext
+
+BrushTraversalLeaf:
+        ; Quake child encoding is -1-leaf, exactly bitwise complement.
+        iwt     R1, #$FFFF
+        with    R0
+        xor     R1
+        sm      (BRUSH_CURRENT_LEAF), R0
+        with    R0
+        add     R0
+        iwt     R4, #BRUSH_LEAF_HEADS
+        with    R4
+        add     R0
+        movew   R3, (R4)
+        moves   R3, R3
+        beq     BrushTraversalNext
+        nop
+        ; Explicit group markers prevent two adjacent nonempty leaves from
+        ; collapsing when neither has an intervening selected world face.
+        sm      (BRUSH_CURRENT_FRAGMENT_COUNT), R3
+        lm      R1, (BRUSH_CURRENT_LEAF)
+        iwt     R2, #BRUSH_TOKEN_LEAF_TAG
+        with    R1
+        or      R2
+        move    R0, R1
+        jal     BrushAppendMixedToken
+        nop
+        lm      R3, (BRUSH_CURRENT_FRAGMENT_COUNT)
+BrushTraversalLeafLink:
+        moves   R3, R3
+        bne     BrushTraversalLeafLinkPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushTraversalNext
+BrushTraversalLeafLinkPresent:
+        dec     R3
+        move    R0, R3
+        iwt     R1, #BRUSH_TOKEN_FRAGMENT_TAG
+        with    R0
+        or      R1
+        jal     BrushAppendMixedToken
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        beq     BrushTraversalLeafContinue
+        nop
+        GSU_ABSOLUTE_GOTO BrushMergePainterDone
+BrushTraversalLeafContinue:
+        ; The packed link word retains a six-bit slot above its ten-bit next.
+        move    R0, R3
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     #2
+        iwt     R10, #BRUSH_LINKS
+        with    R10
+        add     R0
+        movew   R2, (R10)
+        iwt     R1, #$03FF
+        move    R3, R2
+        with    R3
+        and     R1
+        GSU_ABSOLUTE_GOTO BrushTraversalLeafLink
+
+BrushTraversalEmitNode:
+        ; The visit push stores this node's range immediately below its emit
+        ; token. Consume those words too, leaving the near child on the stack.
+        lm      R10, (BRUSH_TRAVERSAL_SP)
+        dec     R10
+        dec     R10
+        movew   R1, (R10)
+        dec     R10
+        dec     R10
+        movew   R0, (R10)
+        sm      (BRUSH_TRAVERSAL_SP), R10
+        sm      (BRUSH_NODE_FIRST_FACE), R0
+        sm      (BRUSH_NODE_FACE_END), R1
+
+        ; Walk the node's selected-face bits sequentially. Carrying the range
+        ; on the traversal stack removes the second node ROM load; retaining
+        ; the bitset contract avoids coupling this merge to packet ordering.
+        move    R3, R0
+        move    R1, R0
+        with    R1
+        and     #7
+  .repeat 3
+        with    R0
+        lsr
+  .endrepeat
+        iwt     R9, #SELECTED_FACE_BITS
+        with    R9
+        add     R0
+        move    R2, #1
+        move    R4, #8
+        with    R4
+        sub     R1
+BrushTraversalFaceMaskAlign:
+        moves   R1, R1
+        beq     BrushTraversalWorldFace
+        nop
+        with    R2
+        add     R2
+        dec     R1
+        bra     BrushTraversalFaceMaskAlign
+        nop
+BrushTraversalWorldFace:
+        lm      R0, (BRUSH_NODE_FACE_END)
+        with    R3
+        cmp     R0
+        bne     BrushTraversalWorldFacePresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushTraversalNext
+BrushTraversalWorldFacePresent:
+        move    R0, #0
+        moveb   R0, (R9)
+        with    R0
+        and     R2
+        beq     BrushTraversalWorldFaceAdvance
+        nop
+        move    R0, R3
+        jal     BrushAppendMixedToken
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushMergePainterDone
+        nop
+BrushTraversalWorldFaceAdvance:
+        inc     R3
+        with    R2
+        add     R2
+        dec     R4
+        bne     BrushTraversalWorldFace
+        nop
+        move    R2, #1
+        move    R4, #8
+        inc     R9
+        GSU_ABSOLUTE_GOTO BrushTraversalWorldFace
+
+BrushMergePainterDone:
+        lm      R11, (BRUSH_MERGE_RETURN)
+        ret
+        nop
+
+BrushLoadCurrentNode:
+        sm      (BRUSH_LOAD_RETURN), R11
+        lm      R0, (BRUSH_CURRENT_NODE)
+        move    R1, R0
+        with    R1
+        add     R1
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2                       ; 10n
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_NODES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_NODE_PLANE), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_NODE_FRONT), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_NODE_BACK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_NODE_FIRST_FACE), R0
+        BSP_ROM_LOAD_WORD R1
+        with    R1
+        add     R0
+        sm      (BRUSH_NODE_FACE_END), R1
+        lm      R11, (BRUSH_LOAD_RETURN)
+        ret
+        nop
+
+BrushPushPainterNode:
+        sm      (BRUSH_LINK_RETURN), R11
+        lm      R0, (BRUSH_NODE_PLANE)
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R0                       ; 5p
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_PLANES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_SIGNED_BYTE R7
+        BSP_ROM_LOAD_SIGNED_BYTE R8
+        BSP_ROM_LOAD_SIGNED_BYTE R9
+        BSP_ROM_LOAD_WORD R10
+        lm      R0, (CAMERA_X)
+        move    R6, R0
+        with    R6
+        mult    R7
+        lm      R0, (CAMERA_Y)
+        move    R1, R0
+        with    R1
+        mult    R8
+        with    R6
+        add     R1
+        lm      R0, (CAMERA_Z)
+        move    R1, R0
+        with    R1
+        mult    R9
+        with    R6
+        add     R1
+        with    R6
+        sub     R10
+        bmi     BrushPainterCameraBack
+        nop
+        lm      R7, (BRUSH_NODE_FRONT)   ; Near.
+        lm      R8, (BRUSH_NODE_BACK)    ; Far.
+        bra     BrushPainterChildrenReady
+        nop
+BrushPainterCameraBack:
+        lm      R7, (BRUSH_NODE_BACK)
+        lm      R8, (BRUSH_NODE_FRONT)
+BrushPainterChildrenReady:
+        lm      R10, (BRUSH_TRAVERSAL_SP)
+        movew   (R10), R7                ; Near, processed last.
+        inc     R10
+        inc     R10
+        lm      R0, (BRUSH_NODE_FIRST_FACE)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (BRUSH_NODE_FACE_END)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        iwt     R0, #BRUSH_TRAVERSAL_EMIT_TAG
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        movew   (R10), R8                ; Far, processed next.
+        inc     R10
+        inc     R10
+        sm      (BRUSH_TRAVERSAL_SP), R10
+        iwt     R0, #BRUSH_TRAVERSAL_STACK_END+1
+        move    R1, R10
+        with    R1
+        cmp     R0
+        bcc     BrushPushPainterDone
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        with    R0
+        or      #BRUSH_OVERFLOW_STACK
+        sm      (BRUSH_OVERFLOW), R0
+BrushPushPainterDone:
+        lm      R11, (BRUSH_LINK_RETURN)
+        ret
+        nop
+
+; R0 supplies one world source-face ID or one bit15-tagged link index.
+BrushAppendMixedToken:
+        sm      (BRUSH_LOAD_RETURN), R11
+        move    R3, R0
+        lm      R0, (BRUSH_TOKEN_COUNT)
+        iwt     R1, #GSU_BRUSH_MIXED_TOKEN_CAPACITY
+        with    R0
+        cmp     R1
+        bcc     BrushTokenCapacityReady
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        with    R0
+        or      #BRUSH_OVERFLOW_TOKENS
+        sm      (BRUSH_OVERFLOW), R0
+        GSU_ABSOLUTE_GOTO BrushAppendMixedTokenDone
+BrushTokenCapacityReady:
+        move    R1, R0
+        with    R1
+        add     R1
+        iwt     R10, #BRUSH_TOKENS
+        with    R10
+        add     R1
+        movew   (R10), R3
+        inc     R0
+        sm      (BRUSH_TOKEN_COUNT), R0
+BrushAppendMixedTokenDone:
+        lm      R11, (BRUSH_LOAD_RETURN)
+        ret
+        nop
