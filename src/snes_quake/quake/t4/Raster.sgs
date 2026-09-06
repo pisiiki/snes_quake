@@ -1,0 +1,140 @@
+; Fixed-lightmap raster and edge dispatch for technique 4. These routines are
+; copied over shared-code windows; the S-CPU restores the
+; original GSUCODE bytes before the legacy path or another technique runs.
+
+.segment "GSU_T4_RASTER_CODE"
+
+DEFINE_TEXTURE_SHADED_RASTER T4TextureRasterPolygonShaded, 1, TextureCacheActiveEdgeShaded, TextureIntersectActiveEdgeShaded, T4TextureStageLightmapEdge, 1
+
+; The face-level route points here only when its 16-byte rows cannot fit the
+; bounded staging arena. Publish the register-return edge exactly as the old
+; shared scratch path did, then return to the unchanged direct-span loop.
+T4TextureStageLightmapFallback:
+        moves   R2, R2
+        bne     T4TextureStageLightmapFallbackRight
+        nop
+        sm      (CONVEX_MIN_X), R0
+        sm      (TEXTURE_LEFT_S), R8
+        sm      (TEXTURE_LEFT_T), R9
+        sm      (TEXTURE_LEFT_SHADE), R12
+        ret
+        nop
+T4TextureStageLightmapFallbackRight:
+        sm      (CONVEX_MAX_X), R0
+        sm      (TEXTURE_RIGHT_S), R8
+        sm      (TEXTURE_RIGHT_T), R9
+        sm      (TEXTURE_RIGHT_SHADE), R12
+        ret
+        nop
+
+.assert T4TextureRasterPolygonShaded = TextureRasterPolygonShaded, error, "Technique-4 raster overlay moved away from the general raster entry"
+.assert * - T4TextureRasterPolygonShaded <= GSU_T4_RASTER_CODE_CAPACITY, error, "Technique-4 raster overlay exceeds its general-code window"
+
+.segment "GSU_T4_EDGE_PATCH"
+
+T4TextureShadeIntersectModeDispatch:
+        jal     TexturePerspectiveFactorQ12BaseLoaded
+        move    R6, R3
+        bra     TextureShadeIntersectScaleFactor
+        nop
+
+.assert T4TextureShadeIntersectModeDispatch = TextureShadeIntersectModeDispatch, error, "Technique-4 edge patch moved away from the general mode dispatch"
+.assert * - T4TextureShadeIntersectModeDispatch <= GSU_T4_EDGE_PATCH_CAPACITY, error, "Technique-4 edge patch exceeds the general mode-dispatch window"
+.assert * <= TextureShadeIntersectScaleFactor, error, "Technique-4 edge patch overlaps the shared scale path"
+
+.segment "GSU_T4_EDGE_DEPTH_CODE"
+
+T4TextureShadeIntersectScaledDepth:
+        BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
+        with    R5
+        add     R0
+        move    R12, R5
+        bra     TextureShadeIntersectScaledAttributes
+        nop
+
+.assert T4TextureShadeIntersectScaledDepth = TextureShadeIntersectScaledDepth, error, "Technique-4 edge depth output moved away from the general depth path"
+.assert * - T4TextureShadeIntersectScaledDepth <= GSU_T4_EDGE_DEPTH_CAPACITY, error, "Technique-4 edge depth output exceeds the general depth window"
+.assert * <= TextureShadeIntersectDepthEnd, error, "Technique-4 edge depth output overlaps the general continuation"
+
+; The common T4 row path writes each edge straight into its compact stage
+; record while the shaded-edge cache is resident. Oversized faces retain the
+; unchanged direct-span fallback and never enter this helper.
+.segment "GSU_T4_STAGE_CODE"
+
+T4TextureStageLightmapEdge:
+        lm      R10, (TEXTURE_COORD_PTR)
+        with    R10
+        add     R2
+        movew   (R10), R0
+        with    R10
+        add     #4
+        movew   (R10), R8
+        with    R10
+        add     #4
+        movew   (R10), R9
+        with    R10
+        add     #4
+        movew   (R10), R12
+        moves   R2, R2
+        bne     T4TextureStageLightmapRight
+        nop
+        ret
+        nop
+
+T4TextureStageLightmapRight:
+        ; R10 is base+14. The right X is already staged and no longer needs
+        ; to survive the overwhelmingly common orientation comparison.
+        with    R10
+        sub     #14
+        movew   R1, (R10)
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        with    R0
+        sub     R1
+        bpl     T4TextureStageLightmapOrdered
+        nop
+        GSU_ABSOLUTE_GOTO T4TextureStageLightmapReverseCold
+T4TextureStageLightmapOrdered:
+        with    R10
+        add     #14
+T4TextureStageLightmapAdvance:
+        sm      (TEXTURE_COORD_PTR), R10
+        GSU_ABSOLUTE_GOTO T4TextureRasterNextRow
+
+.assert T4TextureStageLightmapEdge = TextureStageLightmapRow, error, "Technique-4 stage helper moved away from the resident edge-cache window"
+.assert * - T4TextureStageLightmapEdge <= GSU_T4_STAGE_CODE_CAPACITY, error, "Technique-4 stage helper exceeds the shared row-writer window"
+.assert * <= TextureShadeIntersectScaledAttributes, error, "Technique-4 stage helper overlaps the shared attribute path"
+
+; The specialized shaded edge returns S, T, and depth in R8, R9, and R12.
+; World rows stage those values directly, and the T4 brush patches publish
+; them without the general EDGE -> LEFT/RIGHT scratch round trip.
+.segment "GSU_T4_EDGE_OUTPUT_CODE"
+
+T4TextureShadeIntersectOutputs:
+        lm      R5, (TEXTURE_BASE_S)
+        lm      R7, (TEXTURE_DELTA_S)
+        BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
+        with    R5
+        add     R0
+        move    R8, R5
+
+        lm      R5, (TEXTURE_BASE_T)
+        lm      R7, (TEXTURE_DELTA_T)
+        BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
+        with    R5
+        add     R0
+        move    R9, R5
+        bra     TextureShadeIntersectScreenX
+        nop
+
+  .repeat $47 - (* - T4TextureShadeIntersectOutputs)
+        nop
+  .endrepeat
+T4TextureShadeIntersectUnityOutputs:
+        GSU_ABSOLUTE_GOTO T4TextureShadeIntersectUnityOutputsCold
+
+.assert T4TextureShadeIntersectOutputs = TextureShadeIntersectScaledAttributes, error, "Technique-4 edge outputs moved away from the general attribute window"
+.assert T4TextureShadeIntersectUnityOutputs = TextureShadeIntersectUnityAttributes, error, "Technique-4 unity outputs moved away from the general unity path"
+.assert * - T4TextureShadeIntersectOutputs <= GSU_T4_EDGE_OUTPUT_CAPACITY, error, "Technique-4 edge outputs exceed the general attribute window"
+.assert * <= TextureShadeIntersectScreenX, error, "Technique-4 edge outputs overlap the shared screen-X continuation"

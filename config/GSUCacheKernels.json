@@ -1,0 +1,259 @@
+{
+  "schema": 2,
+  "segments": [
+    "GSUCODE",
+    "GSU_ALIAS_FLY_CODE",
+    "GSU_AUX_CODE",
+    "GSU_BRUSH_CODE",
+    "GSU_LIGHTMAP_UNPACK_ROM_CODE",
+    "GSU_TEXTURE_TAIL_CODE"
+  ],
+  "kernels": [
+    {
+      "name": "GSU_SelectVisibility",
+      "segment": "GSUCODE",
+      "start": "0x70c000",
+      "end": "0x70c18e"
+    },
+    {
+      "name": "PacketBegin",
+      "segment": "GSUCODE",
+      "start": "0x70c190",
+      "end": "0x70c2ac"
+    },
+    {
+      "name": "PacketScanLoadByte",
+      "segment": "GSUCODE",
+      "start": "0x70c2b0",
+      "end": "0x70c3b5"
+    },
+    {
+      "name": "PacketLoadProjectedWorldVertex",
+      "segment": "GSUCODE",
+      "start": "0x70c3c0",
+      "end": "0x70c4b7"
+    },
+    {
+      "name": "PacketProjectWorldVertex",
+      "segment": "GSUCODE",
+      "start": "0x70c4c0",
+      "end": "0x70c5e9"
+    },
+    {
+      "name": "PacketProjectTransformedWorldVertex",
+      "segment": "GSUCODE",
+      "start": "0x70c5f0",
+      "end": "0x70c6f5"
+    },
+    {
+      "name": "PacketCacheStoreProjection",
+      "segment": "GSUCODE",
+      "start": "0x70c700",
+      "end": "0x70c773"
+    },
+    {
+      "name": "PacketProjectFaceBegin",
+      "segment": "GSUCODE",
+      "start": "0x70c780",
+      "end": "0x70c796"
+    },
+    {
+      "name": "PacketProjectFaceLoop",
+      "segment": "GSUCODE",
+      "start": "0x70c7a0",
+      "end": "0x70c960"
+    },
+    {
+      "name": "PacketNearStraddler",
+      "segment": "GSUCODE",
+      "start": "0x70c960",
+      "end": "0x70c97a"
+    },
+    {
+      "name": "PacketAdmissionBegin",
+      "segment": "GSUCODE",
+      "start": "0x70c980",
+      "end": "0x70c9c7"
+    },
+    {
+      "name": "PacketAdmissionCountLoop",
+      "segment": "GSUCODE",
+      "start": "0x70c9d0",
+      "end": "0x70ca6a"
+    },
+    {
+      "name": "PacketAdmissionCopyLoop",
+      "segment": "GSUCODE",
+      "start": "0x70ca70",
+      "end": "0x70cb95"
+    },
+    {
+      "name": "PacketAdmissionFinish",
+      "segment": "GSUCODE",
+      "start": "0x70cba0",
+      "end": "0x70cbcd"
+    },
+    {
+      "name": "PacketMarkPainterAncestors",
+      "segment": "GSUCODE",
+      "start": "0x70cbd0",
+      "end": "0x70cc4f"
+    },
+    {
+      "name": "PacketBuildFaceLookup",
+      "segment": "GSUCODE",
+      "start": "0x70cc50",
+      "end": "0x70cc78"
+    },
+    {
+      "name": "PacketLoadPainterNode",
+      "segment": "GSUCODE",
+      "start": "0x70cc80",
+      "end": "0x70ccd2"
+    },
+    {
+      "name": "PacketPainterBegin",
+      "segment": "GSUCODE",
+      "start": "0x70cce0",
+      "end": "0x70cd07"
+    },
+    {
+      "name": "PacketPainterNextFrame",
+      "segment": "GSUCODE",
+      "start": "0x70cd10",
+      "end": "0x70cd89"
+    },
+    {
+      "name": "PacketPainterVisitNode",
+      "segment": "GSUCODE",
+      "start": "0x70cd90",
+      "end": "0x70ce2b"
+    },
+    {
+      "name": "PacketPainterEmitNode",
+      "segment": "GSUCODE",
+      "start": "0x70ce30",
+      "end": "0x70ce91"
+    },
+    {
+      "name": "PacketPainterCopyFace",
+      "segment": "GSUCODE",
+      "start": "0x70cea0",
+      "end": "0x70cff0"
+    },
+    {
+      "name": "PacketFinalize",
+      "segment": "GSUCODE",
+      "start": "0x70cff0",
+      "end": "0x70d0b2"
+    },
+    {
+      "name": "GSU_Code",
+      "segment": "GSUCODE",
+      "start": "0x70d0c0",
+      "end": "0x70d10b"
+    },
+    {
+      "name": "GSU_TextureCode",
+      "segment": "GSUCODE",
+      "start": "0x70d110",
+      "end": "0x70d139"
+    },
+    {
+      "name": "GSU_TextureLightmapCode",
+      "segment": "GSUCODE",
+      "start": "0x70d170",
+      "end": "0x70d197"
+    },
+    {
+      "name": "TextureLoadFaceLightmapCache",
+      "segment": "GSUCODE",
+      "start": "0x70d450",
+      "end": "0x70d45c"
+    },
+    {
+      "name": "RenderConvexFace",
+      "segment": "GSUCODE",
+      "start": "0x70e920",
+      "end": "0x70e9d1"
+    },
+    {
+      "name": "ConvexClipPlane",
+      "segment": "GSUCODE",
+      "start": "0x70ea20",
+      "end": "0x70eb98"
+    },
+    {
+      "name": "ConvexInterpolateEdge",
+      "segment": "GSUCODE",
+      "start": "0x70eba0",
+      "end": "0x70ed16"
+    },
+    {
+      "name": "ClipTransformVertex",
+      "segment": "GSUCODE",
+      "start": "0x70ed20",
+      "end": "0x70ee95"
+    },
+    {
+      "name": "ConvexProjectPolygon",
+      "segment": "GSUCODE",
+      "start": "0x70eea0",
+      "end": "0x70efc6"
+    },
+    {
+      "name": "ConvexRasterPolygon",
+      "segment": "GSUCODE",
+      "start": "0x70f020",
+      "end": "0x70f1dc"
+    },
+    {
+      "name": "RasterHotKernel",
+      "segment": "GSUCODE",
+      "start": "0x70f1e0",
+      "end": "0x70f227"
+    },
+    {
+      "name": "ExpandFrame",
+      "segment": "GSUCODE",
+      "start": "0x70f230",
+      "end": "0x70f383"
+    },
+    {
+      "name": "TextureEndpointBatchMath",
+      "segment": "GSU_AUX_CODE",
+      "start": "0x70b2a0",
+      "end": "0x70b49b"
+    },
+    {
+      "name": "GSU_ComposedSurfaceCache",
+      "segment": "GSU_AUX_CODE",
+      "start": "0x70bb60",
+      "end": "0x70bcea"
+    },
+    {
+      "name": "GSU_CoverageCode",
+      "segment": "GSU_BRUSH_CODE",
+      "start": "0x70a990",
+      "end": "0x70aa06"
+    },
+    {
+      "name": "TextureUnpackLightmapSamplesROM",
+      "segment": "GSU_LIGHTMAP_UNPACK_ROM_CODE",
+      "start": "0xa4ab50",
+      "end": "0xa4ac0e"
+    },
+    {
+      "name": "AliasFindCurrentLeaf",
+      "segment": "GSU_TEXTURE_TAIL_CODE",
+      "start": "0x703810",
+      "end": "0x703853"
+    },
+    {
+      "name": "FlyAliasTracePlaneDistance",
+      "segment": "GSU_ALIAS_FLY_CODE",
+      "start": "0x70af60",
+      "end": "0x70afeb"
+    }
+  ]
+}

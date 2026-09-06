@@ -1,0 +1,26 @@
+; Technique-4-only job entries. The legacy mode-dispatched renderer remains
+; independently reachable so parity and fallback qualification do not depend
+; on this path. Hot routine overlays added beside this file are selected by
+; the S-CPU before entering either dedicated job.
+
+.segment "GSUCODE"
+
+.export GSU_T4_TextureLightmapCode
+
+GSU_T4_TextureLightmapCode:
+        move    R0, #1
+        ramb
+        GSU_ABSOLUTE_GOTO GSU_TextureLightmapCode
+
+.segment "GSU_BRUSH_CODE"
+
+.export GSU_T4_BrushTextureLightmapCode
+
+GSU_T4_BrushTextureLightmapCode:
+        ; Technique 4 has a fixed render mode and composition routine. Enter
+        ; after the legacy job's mode dispatch while retaining its setup and
+        ; every configured dynamic-brush/alias feature.
+        move    R0, #1
+        sm      (TEXTURE_RENDER_MODE), R0
+        iwt     R1, #BrushArbiterSpanLightmapped
+        GSU_ABSOLUTE_GOTO BrushRendererComposeReady

@@ -20,6 +20,7 @@ BRUSH_ARB_CANDIDATE_CURSOR     = BRUSH_ARB_STATE + $16
 BRUSH_ARB_CANDIDATE_REMAINING  = BRUSH_ARB_STATE + $18
 BRUSH_ARB_SORT_PASS            = BRUSH_ARB_STATE + $1A
 BRUSH_ARB_SORT_INDEX           = BRUSH_ARB_STATE + $1C
+BRUSH_ARB_TOKEN_START          = BRUSH_ARB_SORT_PASS
 BRUSH_ARB_COPY_RETURN          = BRUSH_ARB_STATE + $1E
 BRUSH_ARB_SCREEN_START         = BRUSH_ARB_STATE + $20
 BRUSH_ARB_SCREEN_END           = BRUSH_ARB_STATE + $22
@@ -41,7 +42,7 @@ BRUSH_ARB_LIGHTMAP_REF         = BRUSH_STATE + $C8
 BRUSH_ARB_STAGE_COUNT          = BRUSH_STATE + $CA
 BRUSH_ARB_ACTIVE_LIGHTMAP      = BRUSH_STATE + $CC
 BRUSH_ARB_ROW_STAGE_MODE       = BRUSH_STATE + $CE
-BRUSH_ARB_POOL_BASE            = $9400
+BRUSH_ARB_POOL_BASE            = GSU_FACE_PLANES_OFFSET + $03F8
 BRUSH_ARB_POOL_LIMIT           = GSU_FACE_PLANES_GUARD_OFFSET
 BRUSH_ARB_LIGHTMAP_MISSING_BASE = $0200
 BRUSH_ARB_LIGHTMAP_FALLBACK    = $03FF
@@ -58,11 +59,11 @@ BRUSH_ARB_META_SOURCE_FACE     = 14
 BRUSH_ARB_META_BYTES           = GSU_BRUSH_ARBITER_METADATA_RECORD_BYTES
 
 .assert BRUSH_ARB_ACTIVE_LIGHTMAP + 2 <= BRUSH_STATE + $D0, error, "Brush arbiter driver state overlaps span state"
-.assert BSP_WORLD_TEXTURE_COUNT + BSP_BRUSH_TEXTURE_COUNT < 64, error, "Brush material texture no longer fits six bits"
+.assert BSP_WORLD_TEXTURE_COUNT + BSP_BRUSH_TEXTURE_COUNT < 256, error, "Brush material texture no longer fits one byte"
 .assert BRUSH_SLOT_TABLE + BRUSH_SLOT_COUNT * BRUSH_SLOT_RECORD_BYTES <= BRUSH_ARB_POOL_BASE, error, "Brush slot records overlap material pool"
 .assert BRUSH_ARB_POOL_BASE < BRUSH_ARB_POOL_LIMIT, error, "Brush material pool is empty"
 .assert BRUSH_ARB_META_BYTES = 16, error, "Brush arbiter metadata layout changed"
-.assert BSP_BRUSH_ENTITY_ID_MAX < 256, error, "Brush authority entity IDs no longer fit metadata bytes"
+.assert BSP_BRUSH_ENTITY_ID_MAX < 65536, error, "Brush authority entity IDs no longer fit metadata words"
 .assert BSP_BRUSH_INLINE_MODEL_MAX < 256, error, "Brush authority model IDs no longer fit metadata bytes"
 .assert BSP_BRUSH_MASKED_TEXTURE_COUNT = 0, error, "Brush arbiter requires opaque texture writes"
 
@@ -71,6 +72,9 @@ BRUSH_ARB_META_BYTES           = GSU_BRUSH_ARBITER_METADATA_RECORD_BYTES
 ; after this leaf group.
 BrushRenderLeafGroup:
         sm      (BRUSH_ARB_RETURN), R11
+        lm      R0, (BRUSH_TOKEN_CURSOR)
+        sm      (BRUSH_ARB_TOKEN_START), R0
+BrushArbiterModeCheck:
         lm      R0, (TEXTURE_RENDER_MODE)
         moves   R0, R0
         bne     BrushArbiterCollectBegin
@@ -164,6 +168,8 @@ BrushArbiterCollected:
         GSU_ABSOLUTE_GOTO BrushArbiterDone
 
 BrushArbiterMultiple:
+        jal     BrushTryDirectSafeGroup
+        nop
         jal     BrushArbiterPrepareMaterials
         nop
         jal     BrushArbiterRenderRows
@@ -262,12 +268,10 @@ BrushArbiterStoreCurrent:
         inc     R3
         inc     R3
         movew   (R3), R0
-        lm      R0, (BRUSH_CURRENT_INLINE_MODEL)
-        with    R0
-        swap
-        lm      R1, (BRUSH_CURRENT_ENTITY)
-        with    R0
-        or      R1
+        ; Token/link construction already preserves the authority order. Keep
+        ; the full raw uint16 entity ID here until material preparation reuses
+        ; this word.
+        lm      R0, (BRUSH_CURRENT_ENTITY)
         inc     R3
         inc     R3
         movew   (R3), R0
@@ -385,21 +389,16 @@ BrushArbiterPrepareMaterialPresent:
         jal     BrushResolveTextureOverride
         nop
 
-        ; Pack resolved texture[5:0]:packed-face[9:0] into the now-sort-dead
-        ; entity/model word. Source-face remains intact for diagnostics.
-        lm      R0, (TEXTURE_ID)
-        with    R0
-        swap
-  .repeat 2
-        with    R0
-        add     R0
-  .endrepeat
-        lm      R1, (BRUSH_CURRENT_PACKED_FACE)
-        with    R0
-        or      R1
+        ; Sorting is complete. Reuse its authority words for the full-byte
+        ; texture identity and ten-bit packed face consumed by row rendering.
+        lm      R0, (BRUSH_CURRENT_PACKED_FACE)
         lm      R10, (BRUSH_ARB_PREPASS_CURSOR)
         with    R10
         add     #BRUSH_ARB_META_ENTITY_MODEL
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_ID)
         movew   (R10), R0
 
         iwt     R0, #BRUSH_ARB_LIGHTMAP_FALLBACK
@@ -519,7 +518,7 @@ BrushArbiterRenderRows:
         ; Convert that conservative group bound once and clear only depth
         ; cells that a candidate span can touch.
         lm      R1, (BRUSH_ARB_GROUP_MIN_X)
-        iwt     R0, #62
+        iwt     R0, #59
         with    R1
         add     R0
         BSP_ARITH_SHIFT7 R1, R2
@@ -529,7 +528,7 @@ BrushArbiterRenderRows:
         move    R1, #0
 BrushArbiterClearFirstReady:
         lm      R3, (BRUSH_ARB_GROUP_MAX_X)
-        iwt     R0, #63
+        iwt     R0, #60
         with    R3
         sub     R0
         BSP_ARITH_SHIFT7 R3, R4
@@ -619,13 +618,55 @@ BrushArbiterClearCurrentDepthRow:
         lm      R10, (BRUSH_ARB_CLEAR_PTR)
         iwt     R0, #$FFFF
         lm      R12, (BRUSH_ARB_CLEAR_COUNT)
+        move    R1, R12
+        with    R1
+        and     #1
+        beq     BrushArbiterClearDepthPairs
+        nop
+BrushArbiterClearDepthOdd:
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        dec     R12
+BrushArbiterClearDepthPairs:
+        move    R1, R12
+        with    R1
+        and     #2
+        beq     BrushArbiterClearDepthQuads
+        nop
+BrushArbiterClearDepthPair:
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        dec     R12
+        dec     R12
+BrushArbiterClearDepthQuads:
+        with    R12
+        lsr
+        with    R12
+        lsr
+        beq     BrushArbiterClearDepthDone
+        nop
         iwt     R13, #BrushArbiterClearDepthLoop
 BrushArbiterClearDepthLoop:
         movew   (R10), R0
         inc     R10
         inc     R10
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        movew   (R10), R0
+        inc     R10
+        inc     R10
         loop
         nop
+BrushArbiterClearDepthDone:
 
         lm      R0, (BRUSH_ARB_ROW_STAGE_MODE)
         moves   R0, R0
@@ -686,18 +727,11 @@ BrushArbiterCandidateSpanPresent:
         sm      (BRUSH_ARB_LIGHTMAP_REF), R0
 
         with    R9
-        add     #2
+        add     #4
         movew   R0, (R9)
-        move    R1, R0
-        iwt     R2, #$03FF
-        with    R1
-        and     R2
+        iwt     R1, #$00FF
         with    R0
-        hib
-  .repeat 2
-        with    R0
-        lsr
-  .endrepeat
+        and     R1
 
         lm      R1, (BRUSH_ARB_ACTIVE_TEXTURE)
         with    R0
@@ -909,12 +943,16 @@ BrushArbiterForwardNextReady:
         cmp     R1
         bcs     BrushArbiterForwardProjective
         nop
+        jal     TextureCacheActiveEdgeShaded
+        nop
         iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET
         jal     TextureIntersectActiveEdgeShaded
         nop
         bra     BrushArbiterForwardIntersected
         nop
 BrushArbiterForwardProjective:
+        jal     TextureCacheActiveEdgeShaded
+        nop
         jal     TextureIntersectActiveEdgeProjective
         nop
 BrushArbiterForwardIntersected:
@@ -1032,7 +1070,7 @@ BrushArbiterReverseIntersected:
         sm      (TEXTURE_RIGHT_SHADE), R2
 BrushArbiterXOrderReady:
         lm      R1, (CONVEX_MIN_X)
-        iwt     R0, #62
+        iwt     R0, #59
         with    R1
         add     R0
         BSP_ARITH_SHIFT7 R1, R2
@@ -1042,7 +1080,7 @@ BrushArbiterXOrderReady:
         move    R1, #0
 BrushArbiterFirstReady:
         lm      R3, (CONVEX_MAX_X)
-        iwt     R0, #63
+        iwt     R0, #60
         with    R3
         sub     R0
         BSP_ARITH_SHIFT7 R3, R4

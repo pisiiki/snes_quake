@@ -1,4 +1,4 @@
-; Dedicated 8bpp palette for the three textureless render modes.
+; Dedicated 8bpp palette for the retained textureless lightmap mode.
 ;
 ; A strict BGR555 gray diagonal contains only 32 colors. This ramp walks
 ; individual channel increments while keeping the channels within one code,
@@ -18,70 +18,6 @@ QuakeBSPUntexturedPalette:
         .incbin "../Data/QuakeBSPTexturePalette.bin", 480, 32
 QuakeBSPUntexturedPaletteEnd:
 .assert QuakeBSPUntexturedPaletteEnd - QuakeBSPUntexturedPalette = 512, error, "Textureless palette must contain 256 colors"
-
-; Technique 6 owns all 256 palette entries. A strict gray diagonal has only
-; 32 BGR555 words, so this deterministic ramp advances the least perceptually
-; significant blue/red channels between gray anchors. Every word is distinct,
-; integer luminance increases strictly, and channel spread never exceeds two.
-.macro BSP_DISTANCE_COLOR base, red, green, blue
-        .word   ((base + red) | ((base + green) << 5) | ((base + blue) << 10))
-.endmacro
-
-QuakeBSPUntexturedDistancePalette:
-  .repeat 8, base
-        BSP_DISTANCE_COLOR base, 0, 0, 0
-        BSP_DISTANCE_COLOR base, 0, 0, 1
-        BSP_DISTANCE_COLOR base, 0, 0, 2
-        BSP_DISTANCE_COLOR base, 1, 0, 0
-        BSP_DISTANCE_COLOR base, 1, 0, 1
-        BSP_DISTANCE_COLOR base, 2, 0, 1
-        BSP_DISTANCE_COLOR base, 0, 1, 0
-        BSP_DISTANCE_COLOR base, 0, 1, 1
-        BSP_DISTANCE_COLOR base, 1, 1, 0
-  .endrepeat
-  .repeat 22, offset
-        BSP_DISTANCE_COLOR offset + 8, 0, 0, 0
-        BSP_DISTANCE_COLOR offset + 8, 0, 0, 1
-        BSP_DISTANCE_COLOR offset + 8, 0, 0, 2
-        BSP_DISTANCE_COLOR offset + 8, 1, 0, 0
-        BSP_DISTANCE_COLOR offset + 8, 1, 0, 1
-        BSP_DISTANCE_COLOR offset + 8, 2, 0, 1
-        BSP_DISTANCE_COLOR offset + 8, 0, 1, 0
-        BSP_DISTANCE_COLOR offset + 8, 1, 1, 0
-  .endrepeat
-        BSP_DISTANCE_COLOR 30, 0, 0, 0
-        BSP_DISTANCE_COLOR 30, 0, 0, 1
-        BSP_DISTANCE_COLOR 30, 1, 0, 0
-        BSP_DISTANCE_COLOR 30, 1, 0, 1
-        BSP_DISTANCE_COLOR 30, 0, 1, 0
-        BSP_DISTANCE_COLOR 30, 0, 1, 1
-        BSP_DISTANCE_COLOR 30, 1, 1, 0
-        BSP_DISTANCE_COLOR 31, 0, 0, 0
-QuakeBSPUntexturedDistancePaletteEnd:
-.assert QuakeBSPUntexturedDistancePaletteEnd - QuakeBSPUntexturedDistancePalette = 512, error, "Distance palette must contain 256 colors"
-
-; Half-world-unit Q6 depth buckets map near=8 to white and far=99 to
-; black. The GSU clamps its five-bit-shifted depth before indexing this table.
-QuakeBSPUntexturedDistanceDepthShade:
-  .repeat 256, bucket
-    .if bucket <= 16
-        .byte   255
-    .elseif bucket >= 198
-        .byte   0
-    .else
-        .byte   255 - (((bucket - 16) * 255 + 91) / 182)
-    .endif
-  .endrepeat
-QuakeBSPUntexturedDistanceDepthShadeEnd:
-.assert QuakeBSPUntexturedDistanceDepthShadeEnd - QuakeBSPUntexturedDistanceDepthShade = 256, error, "Distance-depth LUT must contain 256 entries"
-
-; These are complete output-index rows for the lookup-table collapse performed
-; only when a textureless renderer is selected. The existing GSU span kernels
-; remain byte-for-byte unchanged.
-QuakeBSPUntexturedNoneRows:
-        .res    55, 63
-QuakeBSPUntexturedNoneRowsEnd:
-.assert QuakeBSPUntexturedNoneRowsEnd - QuakeBSPUntexturedNoneRows = 55, error, "Textureless None row table changed"
 
 QuakeBSPUntexturedLightmapRows:
         .byte   63, 62, 61, 60, 59, 58, 57, 56

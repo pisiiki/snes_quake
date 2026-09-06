@@ -1,6 +1,6 @@
 ; Dedicated perspective-correct edge interpolation for technique 2. The
-; lightmapped/depth-shaded sibling retains its own mode handling; this path
-; always carries raw Q6 depth into the projective span contract.
+; lightmapped sibling retains its own mode handling; this path always carries
+; raw Q6 geometric depth into the projective span contract.
 TextureIntersectActiveEdgeProjective:
         sm      (TEXTURE_EDGE_RETURN), R11
         movew   R4, (R10)
@@ -259,9 +259,10 @@ TextureAlbedoCoordinateBlockReady:
         romb
 
 TextureAlbedoSpanLoopPrepare:
-        ; Both selected samplers preserve R3/R8-R10/R12-R13. Keep the pixel
-        ; cursor, limits, plot coordinates, coordinate pointer, and dispatch
-        ; target resident for the complete projective block.
+        ; Both selected samplers preserve R3/R8-R10/R13. Keep the pixel cursor,
+        ; limits, coordinate pointer, and dispatch target resident. Retain the
+        ; R12 preload for stable linked layout, but do not rely on it: the
+        ; power-of-two sampler uses R12 for its row-shift continuation.
         lm      R8, (TEXTURE_SPAN_X)
         lm      R9, (TEXTURE_SPAN_END_X)
         lm      R12, (TEXTURE_PLOT_Y)
@@ -282,7 +283,7 @@ TextureAlbedoSpanLoop:
         move    R1, #0
         moveb   R1, (R3)
         inc     R3
-        move    R2, R12
+        lm      R2, (TEXTURE_PLOT_Y)
         plot
 
         with    R8

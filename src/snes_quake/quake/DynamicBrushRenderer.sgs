@@ -3,9 +3,7 @@
 
 .segment "GSU_BRUSH_CODE"
 
-.export GSU_BrushTextureCode, GSU_BrushTextureShadeCode
-.export GSU_BrushTextureDistanceCode, GSU_BrushTextureLightmapCode
-.export GSU_UntexturedDistanceCode, GSU_BrushUntexturedDistanceCode
+.export GSU_BrushTextureCode, GSU_BrushTextureLightmapCode
 
 DynamicBrushOverlayStart:
 
@@ -13,31 +11,23 @@ DynamicBrushOverlayStart:
 .include "DynamicBrushRaster.sgs"
 .include "DynamicBrushArbiter.sgs"
 .include "DynamicBrushArbiterSpan.sgs"
-; Keep retained renderer/cache addresses stable while dead setup space is
-; reclaimed by live span work. GSU_BrushTextureCode remains at $70A6AF.
+; Preserve the retained entry address while setup still fits its historical
+; window. New overlay features may consume that dead padding and move the cold
+; entry points earlier without changing their exported ABI.
+.if * - DynamicBrushOverlayStart < $1AAF
   .repeat $1AAF - (* - DynamicBrushOverlayStart)
         nop
   .endrepeat
+.endif
 
 GSU_BrushTextureCode:
         move    R0, #2
         bra     BrushRendererStart
         nop
 
-GSU_BrushTextureShadeCode:
-        move    R0, #0
-        bra     BrushRendererStart
-        nop
-
-GSU_BrushTextureDistanceCode:
-        ; Distance shading keeps its standalone shaded-raster dispatch while
-        ; selecting the projective edge/arbitration contract below. Only the
-        ; winning texel's final compose operation differs.
-        move    R0, #3
-        sm      (TEXTURE_RENDER_MODE), R0
-        iwt     R1, #BrushArbiterSpanDistance
-        bra     BrushRendererComposeReady
-        nop
+; Keep the address-sensitive technique-4 brush windows stable while obsolete
+; entry slots remain vacant.
+.res $10
 
 GSU_BrushTextureLightmapCode:
         move    R0, #1
@@ -51,13 +41,14 @@ BrushRendererStart:
         iwt     R1, #BrushArbiterSpanLightmapped
 BrushRendererComposeReady:
         sm      (BRUSH_ARBITER_COMPOSE_ROUTINE), R1
+        jal     TexturePublishOrdinaryQ12Routes
+        nop
         move    R0, #1
         ramb
         move    R0, #$11
         cmode
-        iwt     R10, #COMMAND+11
-        move    R0, #0
-        moveb   R0, (R10)
+        iwt     R10, #COMMAND+12
+        movew   R0, (R10)
         sm      (GSU_TELEMETRY_BRUSH_VISUAL_STATE), R0
 
         jal     LoadProjectedPacketState
@@ -92,43 +83,37 @@ BrushRendererComposeReady:
         ; Zero admitted brush links leave the staged packet as the complete
         ; painter-ordered result. Reuse its normal renderer and avoid building
         ; a view cache only to traverse an equivalent world-only token stream.
+        lm      R0, (BRUSH_OVERLAY_FLAGS)
+        with    R0
+        and     #BSP_OVERLAY_ALIAS_ENTITIES
+        bne     BrushRenderMixed
+        nop
         lm      R0, (BRUSH_LINK_COUNT)
         moves   R0, R0
         beq     BrushRenderFallbackWorld
         nop
+BrushRenderMixed:
         jal     BuildPacketViewCache
         nop
+        bra     BrushRenderMixedFast
+        nop
+        ; Reserved address-layout window outside the executed path preserves
+        ; every qualified technique-4 brush overlay address.
+        .res    $10
+BrushRenderMixedFast:
         jal     BrushRenderMixedTokens
         nop
         bra     BrushRenderComplete
         nop
 BrushRenderFallbackWorld:
-        lm      R0, (TEXTURE_RENDER_MODE)
-        move    R1, #3
-        with    R0
-        cmp     R1
-        beq     BrushRenderWorldDistance
-        nop
-        move    R1, #4
-        with    R0
-        cmp     R1
-        beq     BrushRenderWorldDistance
-        nop
-        moves   R0, R0
-        beq     BrushRenderWorldShaded
-        nop
         jal     TextureRenderFaces
         nop
         bra     BrushRenderComplete
         nop
-BrushRenderWorldShaded:
-        jal     TextureRenderFacesShaded
+  .repeat GSU_T4_BRUSH_FALLBACK_CAPACITY - (* - BrushRenderFallbackWorld)
         nop
-        bra     BrushRenderComplete
-        nop
-BrushRenderWorldDistance:
-        jal     TextureRenderFacesDistance
-        nop
+  .endrepeat
+BrushRenderFallbackWorldEnd:
 BrushRenderComplete:
         GSU_FLUSH_PLOT 0, 0
         iwt     R10, #TELEMETRY
@@ -137,16 +122,6 @@ BrushRenderComplete:
         stop
         nop
 
-; Append static/dynamic distance fallback code after the pre-existing brush
-; renderer so retained modes keep their linked layout and instruction stream.
-DEFINE_TEXTURE_SHADED_RASTER TextureRasterPolygonDistance, 1
-DEFINE_TEXTURE_SHADED_FACE TextureRenderConvexFaceDistance, TextureRasterPolygonDistance, TextureRasterPolygonUntexturedDistance
-DEFINE_TEXTURE_SHADE_FACE_WALKER TextureRenderFacesDistance, TextureRenderConvexFaceDistance, 1
-TextureBuildCoordinateBlockDistanceRegisters:
-        iwt     R0, #TextureDistanceCoordinateBlockReady
-        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
-
-.include "UntexturedDistanceRenderer.sgs"
 .include "PacketViewCache.sgs"
 
 ; Test-only coverage entry is cold and fits the always-loaded overlay. Keeping
@@ -215,5 +190,44 @@ CoverageColorModeReady:
 GSU_CACHE_KERNEL_END GSU_CoverageCode
 
 .include "TextureColdSpanSetup.sgs"
+
+; The brush overlay has a small cold tail while auxiliary code is saturated.
+; Alias rendering borrows it for cold presentation helpers used outside any
+; dynamic-brush call, so their code and state lifetimes cannot overlap.
+; Map one logical 128x112 coordinate to the GSU's tiled 2x presentation order.
+; R0 is the logical input and mapped output; R4 is scratch so AliasRenderBillboard
+; can retain its dynamic depth-plane cursor in R10 across both map calls.
+AliasMapTextureCoordinate:
+        iwt     R4, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R4
+        add     R0
+        move    R0, #0
+        moveb   R0, (R4)
+        ret
+        nop
+
+; Complete the first-sample clamp after the texture-tail DDA reduction. Keeping
+; this cold return path here leaves enough hidden-row space for exact endpoint
+; decomposition without changing either overlay boundary.
+AliasInitializeAxisClampCold:
+        dec     R2
+        with    R4
+        cmp     R2
+        bcc     AliasInitializeAxisReady
+        nop
+        move    R4, R2
+AliasInitializeAxisReady:
+        ret
+        nop
+
+AliasRenderDone:
+        ; Billboard state and texels select several QBA1 ROM banks. Restore
+        ; the ordinary face sampler's published bank before mixed painting
+        ; resumes, then return through the billboard's saved outer link.
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        lm      R11, (ALIAS_RENDER_RETURN)
+        ret
+        nop
 
 .assert * - GSU_BrushTextureCode <= GSU_BRUSH_CODE_CAPACITY, error, "Dynamic-brush renderer exceeds staged overlay"

@@ -1,0 +1,256 @@
+diff --git a/common/threads.cc b/common/threads.cc
+--- a/common/threads.cc
++++ b/common/threads.cc
+@@ -3,2 +3,3 @@
++#include <cstdlib>
+ #include <memory>
+ #include <common/log.hh>
+@@ -12,3 +13,7 @@
+ static std::unique_ptr<tbb::global_control> tbbGlobalControl;
+-
++static void resetTBBGlobalControl()
++{
++    tbbGlobalControl.reset();
++}
++
+ void configureTBB(int maxthreads, bool lowPriority)
+@@ -28,2 +33,7 @@
+-
++        if (std::atexit(resetTBBGlobalControl) != 0) {
++            // Avoid the unsafe static-destruction path if registration fails.
++            tbbGlobalControl.reset();
++            Error("failed to register the TBB shutdown handler");
++        }
++
+         logging::print("running with {} thread(s)\n", maxthreads);
+diff --git a/light/trace_embree.cc b/light/trace_embree.cc
+--- a/light/trace_embree.cc
++++ b/light/trace_embree.cc
+@@ -660,3 +660,7 @@
+-    device = rtcNewDevice(NULL);
++    // Pin the qualified ISA so Windows and Linux produce identical lightmaps.
++    device = rtcNewDevice("isa=avx2");
++    if (device == nullptr) {
++        Error("AVX2 is unavailable; use the qualified-assets build fallback");
++    }
+     rtcSetDeviceErrorFunction(
+         device, ErrorCallback, nullptr); // mxd. Changed from rtcDeviceSetErrorFunction to silence compiler warning...
+diff --git a/include/qbsp/faces.hh b/include/qbsp/faces.hh
+index a3702ac4..be435b60 100644
+--- a/include/qbsp/faces.hh
++++ b/include/qbsp/faces.hh
+@@ -28,4 +28,4 @@ struct tree_t;
+ 
+ void MakeMarkFaces(node_t *headnode);
+ void FixupDetailFence(tree_t &tree);
+-void MakeFaces(node_t *node);
++void MakeFaces(node_t *node, int subdivide_area);
+diff --git a/include/qbsp/qbsp.hh b/include/qbsp/qbsp.hh
+index 269c88d2..66e1bb3e 100644
+--- a/include/qbsp/qbsp.hh
++++ b/include/qbsp/qbsp.hh
+@@ -172,6 +172,8 @@ public:
+     setting_func nosubdivide;
+     setting_invertible_bool software;
+     setting_int32 subdivide;
++    setting_int32 subdividearea;
++    setting_int32 subdivideareamodel;
+     setting_bool nofill;
+     setting_bool nomerge;
+     setting_bool nomergeacrossliquids; // deprecated
+diff --git a/qbsp/faces.cc b/qbsp/faces.cc
+index afb0478c..f105f8dc 100644
+--- a/qbsp/faces.cc
++++ b/qbsp/faces.cc
+@@ -586,7 +586,8 @@ If the face is >256 in either texture direction, carve a valid sized
+ piece off and insert the remainder in the next link
+ ===============
+ */
+-static std::list<std::unique_ptr<face_t>> SubdivideFace(std::unique_ptr<face_t> f, makefaces_stats_t &stats)
++static std::list<std::unique_ptr<face_t>> SubdivideFace(
++    std::unique_ptr<face_t> f, makefaces_stats_t &stats, int subdivide_area)
+ {
+     double mins, maxs;
+     double v;
+@@ -604,6 +605,96 @@ static std::list<std::unique_ptr<face_t>> SubdivideFace(std::unique_ptr<face_t>
+         result.push_back(std::move(f));
+         return result;
+     }
++
++    if (subdivide_area > 0) {
++        const int max_samples = subdivide_area;
++        if (max_samples < 4) {
++            FError("-subdividearea must be at least 4 samples");
++        }
++
++        lmshift = std::min<int>(f->original_side->lmshift, 4);
++        const double sample_step = 1 << lmshift;
++        std::list<std::unique_ptr<face_t>> pending;
++        std::list<std::unique_ptr<face_t>> result;
++        pending.push_back(std::move(f));
++
++        while (!pending.empty()) {
++            f = std::move(pending.front());
++            pending.pop_front();
++
++            double axis_mins[2] = {VECT_MAX, VECT_MAX};
++            double axis_maxs[2] = {-VECT_MAX, -VECT_MAX};
++            int block_mins[2] = {};
++            int block_maxs[2] = {};
++            int widths[2] = {};
++            for (axis = 0; axis < 2; ++axis) {
++                const auto texture_row = tex.vecs.row(axis);
++                const qvec3d texture_axis = texture_row.xyz();
++                for (const auto &point : f->w) {
++                    const double coordinate =
++                        qv::dot(point, texture_axis) + texture_row[3];
++                    axis_mins[axis] = std::min(axis_mins[axis], coordinate);
++                    axis_maxs[axis] = std::max(axis_maxs[axis], coordinate);
++                }
++                block_mins[axis] =
++                    static_cast<int>(std::floor(axis_mins[axis] / sample_step));
++                block_maxs[axis] =
++                    static_cast<int>(std::ceil(axis_maxs[axis] / sample_step));
++                widths[axis] = block_maxs[axis] - block_mins[axis] + 1;
++            }
++
++            if (widths[0] * widths[1] <= max_samples) {
++                result.push_back(std::move(f));
++                continue;
++            }
++
++            int split_axis = -1;
++            int split_width = 0;
++            double worst_ratio = -1.0;
++            for (axis = 0; axis < 2; ++axis) {
++                const int other_width = widths[1 - axis];
++                const int allowed_width = max_samples / other_width;
++                if (allowed_width < 2 || widths[axis] <= allowed_width) {
++                    continue;
++                }
++                const double ratio =
++                    static_cast<double>(widths[axis]) / allowed_width;
++                if (ratio > worst_ratio) {
++                    worst_ratio = ratio;
++                    split_axis = axis;
++                    split_width = allowed_width;
++                }
++            }
++            if (split_axis < 0) {
++                split_axis = widths[0] >= widths[1] ? 0 : 1;
++                split_width = std::max(2, (widths[split_axis] + 1) / 2);
++            }
++
++            const auto texture_row = tex.vecs.row(split_axis);
++            plane.normal = texture_row.xyz();
++            v = qv::normalizeInPlace(plane.normal);
++            double split_coordinate =
++                (block_mins[split_axis] + split_width - 1) * sample_step;
++            if (split_coordinate <= axis_mins[split_axis] + ZERO_EPSILON ||
++                split_coordinate >= axis_maxs[split_axis] - ZERO_EPSILON) {
++                split_coordinate =
++                    (axis_mins[split_axis] + axis_maxs[split_axis]) * 0.5;
++            }
++            plane.dist = (split_coordinate - texture_row[3]) / v;
++
++            std::unique_ptr<face_t> front;
++            std::unique_ptr<face_t> back;
++            std::tie(front, back) = SplitFace(std::move(f), plane);
++            if (!front || !back) {
++                FError("-subdividearea could not split an oversized lightmap face");
++            }
++            pending.push_back(std::move(front));
++            pending.push_back(std::move(back));
++        }
++
++        stats.c_subdivide += result.size() - 1;
++        return result;
++    }
+     // subdivision is pretty much pointless other than because of lightmap block limits
+     // one lightmap block will always be added at the end, for smooth interpolation
+ 
+@@ -693,7 +784,8 @@ static std::list<std::unique_ptr<face_t>> SubdivideFace(std::unique_ptr<face_t>
+     return surfaces;
+ }
+ 
+-static void SubdivideNodeFaces(node_t *node, makefaces_stats_t &stats)
++static void SubdivideNodeFaces(
++    node_t *node, makefaces_stats_t &stats, int subdivide_area)
+ {
+     std::list<std::unique_ptr<face_t>> result;
+ 
+@@ -701,7 +793,8 @@ static void SubdivideNodeFaces(node_t *node, makefaces_stats_t &stats)
+ 
+     // subdivide each face and push the results onto subdivided
+     for (auto &face : nodedata->facelist) {
+-        result.splice(result.end(), SubdivideFace(std::move(face), stats));
++        result.splice(result.end(),
++            SubdivideFace(std::move(face), stats, subdivide_area));
+     }
+ 
+     nodedata->facelist = std::move(result);
+@@ -759,18 +852,19 @@ mark the side that originally created it
+   water / water : none
+ ===============
+ */
+-static void MakeFaces_r(node_t *node, makefaces_stats_t &stats)
++static void MakeFaces_r(
++    node_t *node, makefaces_stats_t &stats, int subdivide_area)
+ {
+     // recurse down to leafs
+     if (auto *nodedata = node->get_nodedata()) {
+-        MakeFaces_r(nodedata->children[0], stats);
+-        MakeFaces_r(nodedata->children[1], stats);
++        MakeFaces_r(nodedata->children[0], stats, subdivide_area);
++        MakeFaces_r(nodedata->children[1], stats, subdivide_area);
+ 
+         // merge together all visible faces on the node
+         if (!qbsp_options.nomerge.value())
+             MergeNodeFaces(node, stats);
+-        if (qbsp_options.subdivide.boolValue())
+-            SubdivideNodeFaces(node, stats);
++        if (qbsp_options.subdivide.boolValue() || subdivide_area > 0)
++            SubdivideNodeFaces(node, stats, subdivide_area);
+ 
+         return;
+     }
+@@ -804,11 +898,11 @@ static void MakeFaces_r(node_t *node, makefaces_stats_t &stats)
+ MakeFaces
+ ============
+ */
+-void MakeFaces(node_t *node)
++void MakeFaces(node_t *node, int subdivide_area)
+ {
+     logging::funcheader();
+ 
+     makefaces_stats_t stats{};
+ 
+-    MakeFaces_r(node, stats);
++    MakeFaces_r(node, stats, subdivide_area);
+ }
+diff --git a/qbsp/qbsp.cc b/qbsp/qbsp.cc
+index c37bebfe..7a823704 100644
+--- a/qbsp/qbsp.cc
++++ b/qbsp/qbsp.cc
+@@ -464,6 +464,10 @@ qbsp_settings::qbsp_settings()
+           "change settings to allow for (or make adjustments to optimize for the lack of) software support"},
+       subdivide{this, "subdivide", 240, &common_format_group,
+           "change the subdivide threshold, in luxels. 0 will disable subdivision entirely"},
++      subdividearea{this, "subdividearea", 0, &common_format_group,
++          "subdivide only until each face lightmap has at most this many samples; 0 disables area subdivision"},
++      subdivideareamodel{this, "subdivideareamodel", 0, &common_format_group,
++          "override -subdividearea for inline brush models; 0 disables area subdivision for those models"},
+       nofill{this, "nofill", false, &debugging_group, "don't perform outside filling"}, // tests, docs
+       nomerge{this, "nomerge", false, &debugging_group, "don't perform face merging"}, // tests, docs
+       nomergeacrossliquids{this, "nomergeacrossliquids", false, &common_format_group, "deprecated, no effect"},
+@@ -1236,7 +1240,9 @@ static void ProcessEntity(mapentity_t &entity, hull_index_t hullnum)
+     MakeTreePortals(tree);
+ 
+     MarkVisibleSides(tree, brushes);
+-    MakeFaces(tree.headnode);
++    MakeFaces(tree.headnode,
++        map.is_world_entity(entity) ? qbsp_options.subdividearea.value()
++                                    : qbsp_options.subdivideareamodel.value());
+ 
+     FreeTreePortals(tree);
+     PruneNodes(tree.headnode);

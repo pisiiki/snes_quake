@@ -1,8 +1,8 @@
 ; SuperFX flat-span renderer for the E1M3 BSP scene.
 
 .include "libSFX.i"
-.include "../shared/GSU_Cache.i"
-.include "../shared/GSU_Primitives.i"
+.include "GSU_Cache.i"
+.include "GSU_Primitives.i"
 .include "MemoryMap.i"
 
 ; Prefer the GSU's shorter equivalent encoding whenever a direct word access
@@ -35,12 +35,12 @@
 
 .include "quake/PacketSelection.sgs"
 .include "quake/PacketEmissionAndTextureSetup.sgs"
+.include "quake/ComposedSurfaceCacheRoutes.i"
 .include "quake/TextureRasterAndSampling.sgs"
 ; Keep the shared lightmapped helpers adjacent to their callers. The standalone
 ; albedo span follows them so its independent code cannot perturb that layout.
 .include "quake/FlatRasterAndKernels.sgs"
 .include "quake/ProjectiveAlbedoSpan.sgs"
-.include "quake/ProjectiveDistanceSpan.sgs"
 ClassifyClipOutcode:
         BSP_CLASSIFY_CLIP_OUTCODE
         ret
@@ -49,3 +49,15 @@ ClassifyClipOutcode:
 .include "quake/TextureEndpointBatch.sgs"
 .include "quake/DynamicBrushRowStage.sgs"
 .include "quake/DynamicBrushSpanLightmapProof.sgs"
+.include "quake/ComposedSurfaceCache.sgs"
+.include "quake/AliasBillboardRenderer.sgs"
+.include "quake/TextureTailHelpers.sgs"
+.include "quake/SkyRenderer.sgs"
+.include "quake/t4/Renderer.sgs"
+; Fly-only painter code has a deferred overlay so ordered boot does not copy
+; code it cannot execute. Its run address follows the qualified brush image.
+.include "quake/FlyAliasVisibility.sgs"
+.include "quake/t4/Faces.sgs"
+.include "quake/t4/Raster.sgs"
+.include "quake/t4/Sampling.sgs"
+.include "quake/t4/DynamicBrush.sgs"

@@ -1,0 +1,126 @@
+; Expand a group-aligned six-bit face grid into its established one-byte
+; $c0..$ff cache representation. R12, R10, and R14 are count, destination, and
+; packed source. The steady-state loop handles four samples per count branch;
+; its tail handles the final one through three samples.
+.macro BSP_UNPACK_LIGHTMAP_SAMPLES
+        .local Group, Tail, Done
+        move    R4, #4
+        iwt     R5, #$00C0
+        iwt     R6, #$003F
+        iwt     R11, #$0010
+        move    R7, R12
+        with    R7
+        and     #3
+  .repeat 2
+        with    R12
+        lsr
+  .endrepeat
+        moves   R12, R12
+        beq     Tail
+        nop
+Group:
+        BSP_ROM_LOAD_BYTE R1
+        move    R0, R1
+        with    R0
+        and     R6
+        with    R0
+        add     R5
+        moveb   (R10), R0
+        inc     R10
+        BSP_ROM_LOAD_BYTE R2
+        move    R3, R1
+        with    R3
+        umult   R4
+        with    R3
+        hib
+        move    R0, R2
+        with    R0
+        and     #$0F
+        with    R0
+        umult   R4
+        with    R0
+        or      R3
+        with    R0
+        add     R5
+        moveb   (R10), R0
+        inc     R10
+        move    R3, R2
+        with    R3
+        umult   R11
+        with    R3
+        hib
+        BSP_ROM_LOAD_BYTE R1
+        move    R0, R1
+        with    R0
+        and     #3
+        with    R0
+        umult   R11
+        with    R0
+        or      R3
+        with    R0
+        add     R5
+        moveb   (R10), R0
+        inc     R10
+        move    R0, R1
+  .repeat 2
+        with    R0
+        lsr
+  .endrepeat
+        with    R0
+        add     R5
+        moveb   (R10), R0
+        inc     R10
+        dec     R12
+        bne     Group
+        nop
+Tail:
+        moves   R7, R7
+        beq     Done
+        nop
+        BSP_ROM_LOAD_BYTE R1
+        move    R0, R1
+        with    R0
+        and     R6
+        with    R0
+        add     R5
+        moveb   (R10), R0
+        dec     R7
+        beq     Done
+        inc     R10
+        BSP_ROM_LOAD_BYTE R2
+        move    R3, R1
+        with    R3
+        umult   R4
+        with    R3
+        hib
+        move    R0, R2
+        with    R0
+        and     #$0F
+        with    R0
+        umult   R4
+        with    R0
+        or      R3
+        with    R0
+        add     R5
+        moveb   (R10), R0
+        dec     R7
+        beq     Done
+        inc     R10
+        move    R3, R2
+        with    R3
+        umult   R11
+        with    R3
+        hib
+        BSP_ROM_LOAD_BYTE R1
+        move    R0, R1
+        with    R0
+        and     #3
+        with    R0
+        umult   R11
+        with    R0
+        or      R3
+        with    R0
+        add     R5
+        moveb   (R10), R0
+Done:
+.endmacro

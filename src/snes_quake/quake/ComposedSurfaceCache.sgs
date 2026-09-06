@@ -1,0 +1,476 @@
+; Camera-independent exact texture/lightmap surfaces. Selection is cold and
+; face-granular; only a descriptor hit installs the alternate pixel cache.
+
+.segment "GSU_AUX_CODE"
+
+; Preserve every established GSU_BRUSH_CODE address: its world-token call site
+; targets this cold wrapper without growing the overlay. Misses tail-call the
+; unchanged world-face routine; hits duplicate only the state needed to render.
+BrushTryRenderComposedWorldFace:
+        sm      (BRUSH_TOKEN_RETURN), R11
+        lm      R3, (BRUSH_CURRENT_TOKEN)
+        sm      (PACKET_SOURCE_INDEX), R3
+        ; Technique 7 shares the ordinary lightmap sampler but must never read
+        ; these final texture+lightmap indices. CPU dispatch publishes exact
+        ; technique-4 eligibility without growing this per-face gate.
+        lm      R0, (TEXTURE_COMPOSED_ALLOWED)
+        dec     R0
+        bne     BrushTryRenderComposedWorldFaceMiss
+        nop
+        jal     TextureSelectComposedSurface
+        nop
+        moves   R0, R0
+        beq     BrushTryRenderComposedWorldFaceMiss
+        nop
+
+        lm      R10, (BRUSH_WORLD_FACE_POINTER)
+        jal     LoadPacketFaceFirstIndex
+        move    R1, #0
+        moveb   R1, (R10)
+        sm      (CONVEX_FACE_VERTICES), R1
+        with    R0
+        add     R0
+        iwt     R10, #INDICES
+        with    R10
+        add     R0
+        sm      (CONVEX_INDEX_PTR), R10
+        lm      R0, (BRUSH_WORLD_FACE_POINTER)
+        with    R0
+        add     #BSP_FACE_RECORD_BYTES
+        sm      (BRUSH_WORLD_FACE_POINTER), R0
+
+        ; The descriptor lookup publishes Q12 routes through R3. Reload the
+        ; source identity before deriving its absolute texture-coordinate run.
+        lm      R3, (PACKET_SOURCE_INDEX)
+        move    R1, R3
+        with    R1
+        add     R1
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_FACES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_WORLD_INDEX), R0
+
+        iwt     R0, #$FFFF
+        sm      (BRUSH_WORLD_ACTIVE_TEXTURE), R0
+        jal     TextureRenderConvexFaceShaded
+        nop
+        jal     TexturePrimeLightmapCache
+        nop
+        jal     TexturePublishOrdinaryQ12Routes
+        nop
+        lm      R11, (BRUSH_TOKEN_RETURN)
+        ret
+        nop
+BrushTryRenderComposedWorldFaceMiss:
+        lm      R11, (BRUSH_TOKEN_RETURN)
+        iwt     R13, #BrushRenderWorldFace
+        jmp     R13
+        nop
+
+; Keep all descriptor-hit control out of the saturated main GSU bank. The
+; brush active-texture sentinel is harmless in the standalone walker and
+; guarantees the next brush miss reloads material state changed by a hit.
+TextureTryRenderComposedFace:
+        sm      (LIGHTMAP_LOAD_RETURN), R11
+        ; Cache payloads are final palette indices, not standalone lightmap
+        ; samples. Admit only textured technique 4, never technique 7.
+        lm      R0, (TEXTURE_COMPOSED_ALLOWED)
+        dec     R0
+        bne     TextureTryRenderComposedFaceMiss
+        nop
+        jal     TextureSelectComposedSurface
+        nop
+        moves   R0, R0
+        beq     TextureTryRenderComposedFaceReturn
+        nop
+        iwt     R0, #$FFFF
+        sm      (BRUSH_WORLD_ACTIVE_TEXTURE), R0
+        jal     TextureRenderConvexFaceShaded
+        nop
+        jal     TexturePrimeLightmapCache
+        nop
+        jal     TexturePublishOrdinaryQ12Routes
+        nop
+        move    R0, #1
+TextureTryRenderComposedFaceReturn:
+        lm      R11, (LIGHTMAP_LOAD_RETURN)
+        ret
+        nop
+TextureTryRenderComposedFaceMiss:
+        move    R0, #0
+        bra     TextureTryRenderComposedFaceReturn
+        nop
+
+; These dedicated low-RAM route words survive clip/project scratch and the
+; endpoint stage. Jobs publish the ordinary pair once; a composed hit swaps in
+; its cache-local pair only for the duration of that face.
+TexturePublishOrdinaryQ12Routes:
+        iwt     R1, #TextureDivideQ12Lookup
+        iwt     R2, #TextureDivideQ12LoadedCached
+        iwt     R3, #TextureDivideQ12Prepared
+        bra     TexturePublishQ12RoutesStore
+        nop
+TexturePublishComposedQ12Routes:
+        iwt     R1, #TextureComposedDivideQ12Lookup
+        iwt     R2, #TextureComposedDivideQ12Loaded
+        iwt     R3, #TextureComposedDivideQ12Prepared
+        bra     TexturePublishQ12RoutesStore
+        nop
+TexturePublishQ12RoutesWithoutComposed:
+        ; Publish the ordinary projective helpers when composed-surface reuse
+        ; is unavailable. CPU dispatch restores exact technique eligibility
+        ; before the next frame starts.
+        move    R0, #0
+        sm      (TEXTURE_COMPOSED_ALLOWED), R0
+TexturePublishQ12RoutesStore:
+        sm      (TEXTURE_Q12_LOOKUP_ROUTINE), R1
+        sm      (TEXTURE_Q12_LOADED_ROUTINE), R2
+        sm      (TEXTURE_Q12_PREPARED_ROUTINE), R3
+        ret
+        nop
+
+; Return R0=1 after publishing the eight-byte descriptor for the source face.
+; R0=0 is the no-hit path, which leaves normal material setup to the caller.
+TextureSelectComposedSurface:
+        move    R7, R11
+        move    R0, #0
+        sm      (TEXTURE_WRAP_FLAGS), R0
+        lm      R1, (PACKET_SOURCE_INDEX)
+        with    R1
+        add     R1
+        iwt     R4, #BSP_COMPOSED_DIRECTORY_GSU_ROM_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_COMPOSED_DIRECTORY_GSU_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        iwt     R1, #BSP_COMPOSED_CACHE_MISS
+        with    R0
+        cmp     R1
+        beq     TextureSelectComposedSurfaceMiss
+        nop
+
+        move    R1, R0
+  .repeat 3
+        with    R1
+        add     R1                       ; 2d, 4d, 8d
+  .endrepeat
+        iwt     R4, #BSP_COMPOSED_DESCRIPTOR_GSU_ROM_ADDRESS
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ROM_BANK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_ROM_ADDRESS), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (TEXTURE_WIDTH), R0
+        ; $8000 is outside the byte-sized ordinary wrap-flag domain and means
+        ; selected but not yet cached. The first visible span changes it to
+        ; $8001 so later blocks enter below CACHE without refilling the window.
+        iwt     R0, #$8000
+        sm      (TEXTURE_WRAP_FLAGS), R0
+        jal     TexturePublishComposedQ12Routes
+        nop
+        move    R0, #1
+TextureSelectComposedSurfaceReturn:
+        move    R11, R7
+        ret
+        nop
+TextureSelectComposedSurfaceMiss:
+        move    R0, #0
+        bra     TextureSelectComposedSurfaceReturn
+        nop
+
+; R5/R6 are the first exact Q4 coordinate and R10 addresses the remaining
+; block coordinates. This cold entry sets the face ROM bank once per block.
+TextureComposedSpanStart:
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        inc     R0
+        iwt     R1, #$8001
+        with    R0
+        cmp     R1
+        bne     TextureComposedSpanCached
+        nop
+        sm      (TEXTURE_WRAP_FLAGS), R0
+        GSU_ABSOLUTE_GOTO GSU_ComposedSurfaceCache
+TextureComposedSpanCached:
+        GSU_ABSOLUTE_GOTO TextureComposedSpanLoop
+
+; The alternate cache contains only face-local addressing, final-index fetch,
+; plot, and the coordinate-stream continuation needed by a selected face.
+GSU_CACHE_KERNEL_BEGIN GSU_ComposedSurfaceCache
+TextureComposedSpanLoop:
+  .repeat 4
+        with    R5
+        asr
+  .endrepeat
+  .repeat 4
+        with    R6
+        asr
+  .endrepeat
+        ; Coordinates are face-global and can exceed the 8-bit UMULT domain.
+        ; LMULT preserves the exact low-word row offset for signed 16-bit T.
+        lm      R0, (TEXTURE_WIDTH)
+        with    R0
+        lmult
+        with    R4
+        add     R5
+        lm      R1, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+        color
+
+        lm      R0, (TEXTURE_SPAN_X)
+        iwt     R8, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R8
+        add     R0
+        moveb   R1, (R8)
+        lm      R2, (TEXTURE_PLOT_Y)
+        plot
+
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        bne     TextureComposedSpanContinue
+        inc     R0
+        bra     TextureComposedSpanDone
+        nop
+TextureComposedSpanContinue:
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        iwt     R8, #TEXTURE_SPAN_X
+        lm      R1, (TEXTURE_SIGN_S)
+        with    R0
+        cmp     R1
+        beq     TextureComposedSpanCheckBlock
+        ; Publish X with a single STW in the boundary branch delay slot. R8's
+        ; former coordinate-map pointer is dead and each sampler reloads it.
+        stw     (R8)
+        GSU_ABSOLUTE_GOTO TextureComposedSpanLoop
+TextureComposedSpanCheckBlock:
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+        GSU_ABSOLUTE_GOTO TextureLightmapBlockSetup
+TextureComposedSpanDone:
+        lm      R11, (TEXTURE_SPAN_RETURN)
+        ret
+        nop
+
+; Cache-resident reciprocal mirror lookup. Cold ROM misses retain R10 and
+; return directly to the selected loaded-multiply continuation.
+TextureComposedDivideQ12Lookup:
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES+1
+        with    R2
+        cmp     R4
+        bcs     TextureComposedDivideQ12LookupMiss
+        nop
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_OFFSET-GSU_DIVIDE_Q12_RECIPROCAL_ENTRY_BYTES
+        with    R4
+        add     R2
+        move    R0, #0
+        ramb
+        movew   R12, (R4)
+        inc     R4
+        inc     R4
+        movew   R13, (R4)
+        move    R0, #1
+        ramb
+        jmp     R10
+        nop
+TextureComposedDivideQ12LookupMiss:
+        move    R1, R2
+        dec     R1
+        GSU_ABSOLUTE_GOTO TextureDivideQ12HotMirrorMiss
+
+TextureComposedDivideQ12Prepared:
+        move    R8, R0
+        move    R9, R2
+        lm      R12, (TEXTURE_RECIPROCAL_HIGH)
+        lm      R13, (TEXTURE_RECIPROCAL_LOW)
+TextureComposedDivideQ12Loaded:
+        move    R6, R12
+        move    R0, R8
+        with    R0
+        lmult
+        move    R3, R4
+        move    R6, R13
+        move    R0, R8
+        with    R0
+        lmult
+        with    R4
+        add     R4
+        with    R0
+        adc     R0
+        with    R3
+        add     R0
+        with    R4
+        lsr
+        with    R4
+        cmp     R8
+        bcs     TextureComposedDivideQ12Ready
+        nop
+        GSU_ABSOLUTE_GOTO TextureDivideQ12CorrectionCold
+TextureComposedDivideQ12Ready:
+        ret
+        nop
+
+TextureComposedLightmapBlock8Setup:
+        sm      (TEXTURE_SIGN_S), R4
+        move    R0, R4
+        jal     TexturePerspectiveSampleSpanBuffered
+        sm      (TEXTURE_BLOCK_END_S), R5
+        sm      (TEXTURE_BLOCK_END_T), R6
+        move    R10, R6
+        move    R0, #8
+        sm      (TEXTURE_SPAN_DEN), R0
+        move    R0, R5
+        lm      R1, (TEXTURE_SPAN_S)
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     TextureComposedLightmapBlock8SPositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+TextureComposedLightmapBlock8SPositive:
+        move    R8, R4
+        move    R9, R0
+        with    R9
+        and     #7
+  .repeat 3
+        with    R0
+        lsr
+  .endrepeat
+        move    R7, R0
+
+        move    R0, R10
+        lm      R1, (TEXTURE_SPAN_T)
+        with    R0
+        sub     R1
+        move    R4, #1
+        moves   R0, R0
+        bpl     TextureComposedLightmapBlock8TPositive
+        nop
+        iwt     R4, #-1
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+TextureComposedLightmapBlock8TPositive:
+        move    R10, R8
+        move    R11, R4
+        move    R13, R0
+        with    R13
+        and     #7
+  .repeat 3
+        with    R0
+        lsr
+        .endrepeat
+        move    R8, R0
+        move    R4, R10
+
+        ; Keep the register-fed coordinate setup beside its composed DDA. The
+        ; ordinary helper performs these same initializations outside this
+        ; alternate window.
+        iwt     R0, #TextureLightmapCoordinateBlockReady
+        sm      (TEXTURE_COORD_RETURN), R0
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        move    R1, #0
+        move    R2, #0
+        lm      R3, (TEXTURE_SPAN_DEN)
+        move    R12, R3
+        with    R1
+        sub     R3
+        with    R2
+        sub     R3
+        moves   R4, R4
+        bpl     TextureComposedCoordinateSStepReady
+        nop
+        move    R0, #0
+        with    R0
+        sub     R7
+        move    R7, R0
+TextureComposedCoordinateSStepReady:
+        moves   R11, R11
+        bpl     TextureComposedCoordinateTStepReady
+        nop
+        move    R0, #0
+        with    R0
+        sub     R8
+        move    R8, R0
+TextureComposedCoordinateTStepReady:
+
+TextureComposedBuildCoordinateLoop:
+        with    R5
+        add     R7
+        with    R1
+        add     R9
+        bmi     TextureComposedBuildCoordinateSReady
+        nop
+        with    R1
+        sub     R3
+        with    R5
+        add     R4
+TextureComposedBuildCoordinateSReady:
+        with    R6
+        add     R8
+        with    R2
+        add     R13
+        bmi     TextureComposedBuildCoordinateTReady
+        nop
+        with    R2
+        sub     R3
+        with    R6
+        add     R11
+TextureComposedBuildCoordinateTReady:
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        movew   (R10), R6
+        inc     R10
+        inc     R10
+        dec     R12
+        bne     TextureComposedBuildCoordinateLoop
+        nop
+        iwt     R0, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        sm      (TEXTURE_COORD_PTR), R0
+        lm      R11, (TEXTURE_COORD_RETURN)
+        ret
+  .repeat 4
+        nop
+  .endrepeat
+        .byte   $01                     ; one-byte NOP keeps the cache ABI size
+GSU_CACHE_KERNEL_END GSU_ComposedSurfaceCache

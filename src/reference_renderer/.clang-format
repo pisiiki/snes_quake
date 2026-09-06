@@ -1,0 +1,33 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+AlignAfterOpenBracket: BlockIndent
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: Always
+  AfterFunction: true
+  AfterStruct: true
+  BeforeCatch: true
+  BeforeElse: true
+BreakAfterOpenBracketBracedList: true
+BreakBeforeCloseBracketBracedList: true
+BreakAfterOpenBracketFunction: true
+BreakBeforeCloseBracketFunction: true
+AllowShortFunctionsOnASingleLine: None
+BreakFunctionDefinitionParameters: false
+BreakConstructorInitializers: AfterColon
+ConstructorInitializerIndentWidth: 0
+PackConstructorInitializers: Never
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ColumnLimit: 120
+PenaltyIndentedWhitespace: 5
+UseTab: Never
+DerivePointerAlignment: false
+PointerAlignment: Left
+BinPackArguments: false
+BinPackParameters: OnePerLine
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+SortIncludes: Never

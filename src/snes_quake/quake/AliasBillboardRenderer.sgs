@@ -1,0 +1,975 @@
+; Camera-facing QBA1 alias-entity billboards. Pixels stay in the same painter
+; stream as world and dynamic brushes; transparent texels preserve prior work.
+
+.segment "GSU_AUX_CODE"
+
+ALIAS_RENDER_RETURN            = ALIAS_STATE + $20
+ALIAS_SPRITE_ID                = ALIAS_STATE + $22
+ALIAS_PIXEL_BANK               = ALIAS_STATE + $24
+ALIAS_PIXEL_ADDRESS            = ALIAS_STATE + $26
+ALIAS_WIDTH                    = ALIAS_STATE + $28 ; stored source raster
+ALIAS_HEIGHT                   = ALIAS_STATE + $2A
+ALIAS_LEFT                     = ALIAS_STATE + $2C
+ALIAS_TOP                      = ALIAS_STATE + $2E
+; LEFT is dead once both projected axes are published. Raster rows reuse it
+; for the mapped presentation Y while R13 carries the invariant X span.
+ALIAS_MAPPED_Y                 = ALIAS_LEFT
+ALIAS_X_AXIS                   = ALIAS_STATE + $30
+ALIAS_EDGE_X_HALF_Q7           = ALIAS_X_AXIS + $00
+ALIAS_FIRST_X                  = ALIAS_X_AXIS + $02
+ALIAS_LAST_X                   = ALIAS_X_AXIS + $04
+ALIAS_SPAN_X_HALF_Q7           = ALIAS_X_AXIS + $06
+ALIAS_Y_AXIS                   = ALIAS_STATE + $38
+ALIAS_EDGE_Y_HALF_Q7           = ALIAS_Y_AXIS + $00
+ALIAS_FIRST_Y                  = ALIAS_Y_AXIS + $02
+ALIAS_LAST_Y                   = ALIAS_Y_AXIS + $04
+ALIAS_SPAN_Y_HALF_Q7           = ALIAS_Y_AXIS + $06
+; Axis setup phase-overlays the not-yet-initialized raster words below.
+ALIAS_AXIS_RETURN              = ALIAS_STATE + $40
+ALIAS_AXIS_END                 = ALIAS_STATE + $46
+ALIAS_DEST_X                   = ALIAS_STATE + $42
+ALIAS_DEST_Y                   = ALIAS_STATE + $44
+ALIAS_U_ACCUM                  = ALIAS_STATE + $4A
+ALIAS_V_ACCUM                  = ALIAS_STATE + $4C
+; World extents only survive directory decode through their corresponding
+; projections, then phase-overlay the not-yet-seeded raster accumulators.
+ALIAS_WORLD_WIDTH              = ALIAS_U_ACCUM
+ALIAS_WORLD_HEIGHT             = ALIAS_V_ACCUM
+; FIRST_Y is dead after DEST_Y is published, so raster setup reuses it for the
+; invariant horizontal half-Q7 source step.
+ALIAS_U_STEP                   = ALIAS_FIRST_Y
+ALIAS_V_STEP                   = ALIAS_EDGE_X_HALF_Q7
+ALIAS_U_MAX                    = ALIAS_EDGE_Y_HALF_Q7
+ALIAS_FLAT_COLOR               = ALIAS_STATE + $50
+ALIAS_VISIBILITY_POINTER       = ALIAS_STATE + $52
+ALIAS_VISIBILITY_BIT           = ALIAS_STATE + $54
+ALIAS_VISIBILITY_ROUTINE       = ALIAS_STATE + $56
+ALIAS_DIRECTIONAL_SIN          = ALIAS_STATE + $58
+ALIAS_DIRECTIONAL_COS          = ALIAS_STATE + $5A
+ALIAS_DIRECTIONAL_FORWARD      = ALIAS_STATE + $5C
+ALIAS_DIRECTIONAL_RIGHT        = ALIAS_STATE + $5E
+ALIAS_DIRECTORY_RETURN         = ALIAS_AXIS_RETURN
+.assert ALIAS_DIRECTIONAL_RIGHT + 2 <= GSU_FACE_PLANES_OFFSET + GSU_FACE_PLANES_CAPACITY, error, "Alias raster state escapes face-plane phase"
+
+AliasRenderBillboard:
+        sm      (ALIAS_RENDER_RETURN), R11
+        ; Mixed tokens name one byte in the staged QBA1 token-reference table.
+        lm      R0, (BRUSH_CURRENT_TOKEN)
+        iwt     R1, #$1FFF
+        with    R0
+        and     R1
+        jal     AliasPrepareVisibility
+        nop
+        moves   R1, R1
+        beq     AliasVisibilityReady
+        nop
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+AliasVisibilityReady:
+        iwt     R10, #GSU_ALIAS_TOKENS_OFFSET
+        with    R10
+        add     R0
+        move    R0, #0
+        moveb   R0, (R10)
+        move    R1, R0
+        with    R1
+        swap
+        move    R2, #$007F
+        with    R0
+        and     R2
+
+        ; Eight-byte states contain a direct sprite, or a tagged fly MDL base,
+        ; followed by the exact signed Q2 origin.
+        move    R2, #BSP_ALIAS_STATE_RECORD_BYTES
+        with    R0
+        umult   R2
+        moves   R1, R1
+        bpl     AliasDynamicState
+        nop
+        iwt     R4, #BSP_ALIAS_STATIC_STATES_ADDRESS
+        with    R4
+        add     R0
+        move    R0, #BSP_ALIAS_STATIC_STATES_BANK
+        bra     AliasStatePointerReady
+        nop
+AliasDynamicState:
+        lm      R4, (ALIAS_DYNAMIC_ADDRESS)
+        with    R4
+        add     R0
+        lm      R0, (ALIAS_DYNAMIC_BANK)
+AliasStatePointerReady:
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (ALIAS_SPRITE_ID), R0
+        BSP_ROM_LOAD_WORD R1
+        BSP_ROM_LOAD_WORD R2
+        BSP_ROM_LOAD_WORD R3
+        jal     ClipTransformQ2Registers
+        nop
+        lm      R0, (CLIP_DEPTH)
+        move    R1, #(BSP_NEAR_DEPTH << BSP_VIEW_FRACTION_BITS)
+        with    R0
+        sub     R1
+        bpl     :+
+        nop
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+:
+        ; Sprite directory: bank/model/address, stored and world extents,
+        ; frame/view diagnostics, and the exact origin pivot.
+        jal     AliasLoadSpriteDirectory
+        nop
+
+        ; All four rectangle edges share the origin depth reciprocal.
+        lm      R2, (CLIP_DEPTH)
+        jal     TexturePrepareDivideQ12
+        nop
+
+        ; Normalize both axes to a component that increases in screen order.
+        ; The shared cold setup projects coherent endpoints and retains the raw
+        ; span/phase while publishing only clipped raster bounds.
+        lm      R1, (CLIP_RIGHT)
+        lm      R0, (ALIAS_LEFT)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R1
+        add     R0
+        move    R0, R1
+        lm      R1, (ALIAS_WORLD_WIDTH)
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R10, #ALIAS_X_AXIS
+        jal     AliasProjectAxis
+        nop
+
+        lm      R1, (CLIP_UP)
+        lm      R0, (ALIAS_TOP)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R1
+        add     R0
+        move    R0, #0
+        with    R0
+        sub     R1
+        lm      R1, (ALIAS_WORLD_HEIGHT)
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R10, #ALIAS_Y_AXIS
+        jal     AliasProjectAxis
+        nop
+
+        ; A fully negative span has no visible sample to advance toward.
+        ; Reject it before collapsing the initial clip, or replacing FIRST
+        ; with zero would move it past LAST and make the inclusive loops wrap.
+        lm      R0, (ALIAS_LAST_X)
+        moves   R0, R0
+        bpl     :+
+        nop
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+:
+        lm      R0, (ALIAS_LAST_Y)
+        moves   R0, R0
+        bpl     :+
+        nop
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+:
+        ; Technique 2 has render mode two. Techniques 4 and 7 share render
+        ; mode one, so use the T4-only composed-cache admission word to tell
+        ; textured lightmaps from untextured lightmaps. Resolve this once per
+        ; billboard so technique 7 reaches the existing flat-white pixel tail
+        ; without adding work to the hot loop.
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        bne     AliasColorModeReady
+        nop
+        lm      R0, (GSU_TEXTURE_COMPOSED_ALLOWED_OFFSET)
+AliasColorModeReady:
+        sm      (ALIAS_FLAT_COLOR), R0
+AliasColorReady:
+        lm      R0, (ALIAS_PIXEL_BANK)
+        romb
+
+        ; Seed U from the first covered pixel center, not from the projected
+        ; rectangle edge. Keeping the exact half-Q7 remainder makes silhouettes
+        ; sample the same source texels as the reference pixel-center rule.
+        lm      R1, (ALIAS_EDGE_X_HALF_Q7)
+        lm      R2, (ALIAS_WIDTH)
+        lm      R3, (ALIAS_SPAN_X_HALF_Q7)
+        jal     AliasInitializeAxis
+        nop
+        move    R12, R4
+        sm      (ALIAS_U_ACCUM), R12
+        move    R9, R0
+        sm      (ALIAS_AXIS_END), R9
+
+        ; Apply the equivalent vertical phase once; R7 and the residual then
+        ; advance across both clipped and visible destination rows.
+        lm      R1, (ALIAS_EDGE_Y_HALF_Q7)
+        lm      R2, (ALIAS_HEIGHT)
+        lm      R3, (ALIAS_SPAN_Y_HALF_Q7)
+        jal     AliasInitializeAxis
+        nop
+        move    R7, R4
+        sm      (ALIAS_V_ACCUM), R0
+        move    R8, #64
+        lm      R0, (ALIAS_FIRST_Y)
+        sm      (ALIAS_DEST_Y), R0
+        jal     AliasClipInitialX
+        nop
+        jal     AliasPrepareRasterSteps
+        nop
+AliasRowLoop:
+        move    R0, R7
+        lm      R1, (ALIAS_WIDTH)
+        with    R0
+        umult   R1
+        lm      R1, (ALIAS_PIXEL_ADDRESS)
+        with    R0
+        add     R1
+        move    R5, R0
+
+        ; Retain source-row address setup for the established row-tail state,
+        ; but defer horizontal loads until a destination row is visible.
+        lm      R0, (ALIAS_DEST_Y)
+        moves   R0, R0
+        bpl     AliasVisibleRowSetup
+        nop
+        GSU_ABSOLUTE_GOTO AliasRowPixelsDone
+AliasVisibleRowSetup:
+        lm      R6, (ALIAS_U_ACCUM)
+        lm      R9, (ALIAS_AXIS_END)
+        lm      R12, (ALIAS_DEST_X)
+        ; Count down the inclusive destination span in R3.
+        lm      R3, (ALIAS_LAST_X)
+        with    R3
+        sub     R12
+
+AliasVisibleRow:
+        ; Publish the mapped destination row and the horizontal DDA span once
+        ; per visible row. The retired depth-only helper also performed these
+        ; two color-rendering duties; keep them independent of depth state.
+        jal     AliasStageVisibleRow
+        nop
+AliasPixelLoop:
+        move    R4, R6
+        move    R0, R5
+        with    R4
+        add     R0
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        ; Assets bias opaque colors by one and reserve zero for transparency.
+        ; DEC restores the palette index and makes transparency negative.
+        dec     R0
+        bmi     AliasPixelTransparent
+        nop
+        move    R4, R0
+        ; Visibility dispatch uses R8 as its legal indirect-jump register.
+        lm      R8, (ALIAS_VISIBILITY_ROUTINE)
+        link    #2
+        jmp     R8
+        nop
+        moves   R0, R0
+        beq     AliasPixelTransparent
+        nop
+        move    R0, R4
+AliasPixelVisibilityPassed:
+        lm      R1, (ALIAS_FLAT_COLOR)
+        moves   R1, R1
+        beq     AliasPixelFlatColor
+        nop
+        bra     AliasPixelColorReady
+        nop
+AliasPixelFlatColor:
+        move    R0, #63
+AliasPixelColorReady:
+        color
+        ; Textured presentation mirrors and mosaics tile quads. Map logical
+        ; billboard coordinates through the same table as every world/brush
+        ; span before PLOT so both streams land on the same displayed pixel.
+        move    R0, R12
+        jal     AliasMapTextureCoordinate
+        nop
+        move    R1, R0
+        lm      R2, (ALIAS_MAPPED_Y)
+        plot
+        ; R2 otherwise carries U_STEP across visibility calls. PLOT is the
+        ; only drawable-path consumer that displaces it.
+        lm      R2, (ALIAS_U_STEP)
+AliasPixelTransparent:
+        dec     R3
+        bmi     AliasRowPixelsDone
+        inc     R10
+        inc     R12
+        move    R0, R9
+        with    R0
+        add     R2
+AliasAdvanceSourceX:
+        with    R0
+        cmp     R13
+        bcc     AliasSourceXReady
+        nop
+        with    R0
+        sub     R13
+        inc     R6
+AliasClampSourceX:
+        ; An exactly covered right-edge pixel produces source index width.
+        ; Match the reference's bounded nearest sample instead of reading the
+        ; first texel of the next row.
+        lm      R1, (ALIAS_U_MAX)
+        with    R6
+        cmp     R1
+        bcc     AliasAdvanceSourceX
+        nop
+        move    R6, R1
+        bra     AliasAdvanceSourceX
+        nop
+AliasSourceXReady:
+        move    R9, R0
+        GSU_ABSOLUTE_GOTO AliasPixelLoop
+
+AliasRowPixelsDone:
+        lm      R0, (ALIAS_DEST_Y)
+        lm      R1, (ALIAS_LAST_Y)
+        with    R0
+        cmp     R1
+        bne     AliasNextRow
+        nop
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+AliasNextRow:
+        inc     R0
+        sm      (ALIAS_DEST_Y), R0
+        lm      R0, (ALIAS_V_ACCUM)
+        lm      R1, (ALIAS_V_STEP)
+        with    R0
+        add     R1
+AliasAdvanceSourceY:
+        lm      R1, (ALIAS_SPAN_Y_HALF_Q7)
+        with    R0
+        cmp     R1
+        bcc     AliasClampSourceY
+        nop
+        with    R0
+        sub     R1
+        inc     R7
+        bra     AliasAdvanceSourceY
+        nop
+AliasClampSourceY:
+        ; The same inclusive-edge case applies to the final source row.
+        lm      R1, (ALIAS_HEIGHT)
+        dec     R1
+        with    R7
+        cmp     R1
+        bcc     AliasSourceYReady
+        nop
+        move    R7, R1
+AliasSourceYReady:
+        sm      (ALIAS_V_ACCUM), R0
+        GSU_ABSOLUTE_GOTO AliasRowLoop
+
+; Prepare one screen-oriented axis. R0 is the first signed Q6 component, R1 is
+; its positive Q6 sprite extent, and R10 selects ALIAS_X_AXIS or ALIAS_Y_AXIS.
+; The monotone endpoints are classified before either unsaturated divide. The
+; DDA stores half-Q7 edges (3*q) and spans. The generated 91-texel maximum is
+; 34944 units at the near plane (34947 under a generic floor-difference bound),
+; safely unsigned-16-bit while retaining precisely the full-Q7 sampling ratio.
+AliasProjectAxis:
+        sm      (ALIAS_AXIS_RETURN), R11
+        with    R1
+        add     R0
+        sm      (ALIAS_AXIS_END), R1
+        lm      R2, (CLIP_DEPTH)
+
+        ; The normalized pair is monotone increasing. Reject it if both
+        ; endpoints lie on the same side of the broad +/-depth frustum.
+        moves   R0, R0
+        bpl     AliasProjectAxisRightPlane
+        nop
+        moves   R1, R1
+        bpl     AliasProjectAxisIntersects
+        nop
+        move    R3, #0
+        with    R3
+        sub     R1
+        with    R3
+        cmp     R2
+        bcc     AliasProjectAxisIntersects
+        nop
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+AliasProjectAxisRightPlane:
+        with    R0
+        cmp     R2
+        bcc     AliasProjectAxisIntersects
+        nop
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+AliasProjectAxisIntersects:
+        move    R1, R0
+        move    R4, #1
+        jal     ConvexProjectComponentUnsaturated
+        nop
+        ; The screen-center terms are multiples of 64 in half-Q7, so omitting
+        ; them is exact for both the masked phase and endpoint subtraction.
+        move    R0, R3
+        with    R0
+        add     R0
+        with    R0
+        add     R3
+        movew   (R10), R0
+        move    R2, #31
+        jal     AliasEndpointCoordinate
+        nop
+        inc     R10
+        inc     R10
+        movew   (R10), R0
+
+        move    R10, R5
+        lm      R1, (ALIAS_AXIS_END)
+        lm      R2, (CLIP_DEPTH)
+        move    R4, #1
+        jal     ConvexProjectComponentUnsaturated
+        nop
+        move    R0, R3
+        with    R0
+        add     R0
+        with    R0
+        add     R3
+        move    R8, R0
+        move    R2, #$ffe0
+        jal     AliasEndpointCoordinate
+        nop
+        move    R6, R0
+        move    R2, R1
+        with    R2
+        add     R2
+
+        movew   R1, (R10)
+        move    R0, R8
+        with    R0
+        sub     R1
+        with    R10
+        add     #6
+        movew   (R10), R0
+
+        ; Reject empty/offscreen bounds, then clamp only the published last
+        ; pixel. The raw edge and endpoint span continue to seed exact phase.
+        moves   R6, R6
+        bmi     AliasProjectAxisRejected
+        nop
+        move    R10, R5
+        inc     R10
+        inc     R10
+        movew   R1, (R10)
+        move    R0, R6
+        with    R0
+        sub     R1
+        bmi     AliasProjectAxisRejected
+        nop
+        moves   R1, R1
+        bmi     AliasProjectAxisClampLast
+        nop
+        with    R1
+        cmp     R2
+        bcs     AliasProjectAxisRejected
+        nop
+AliasProjectAxisClampLast:
+        with    R6
+        cmp     R2
+        bcc     AliasProjectAxisLastReady
+        nop
+        move    R6, R2
+        dec     R6
+AliasProjectAxisLastReady:
+        move    R10, R5
+        with    R10
+        add     #4
+        movew   (R10), R6
+        lm      R11, (ALIAS_AXIS_RETURN)
+        ret
+        nop
+AliasProjectAxisRejected:
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+
+; The v4 directory expansion no longer fits the full auxiliary overlay. Cross
+; to cold ROM2 code and preserve the ordinary JAL return in phase scratch.
+AliasLoadSpriteDirectory:
+        sm      (ALIAS_DIRECTORY_RETURN), R11
+        move    R9, #$02
+        iwt     R8, #.loword(AliasLoadSpriteDirectoryROM)
+        from    R8
+        ljmp    R9
+        nop
+
+.segment "GSU_SKY_ROM_CODE"
+
+; Decode the expanded v4 sprite directory outside the crowded auxiliary
+; renderer. Frame/view/model bytes are offline diagnostics, not hot state.
+AliasLoadSpriteDirectoryROM:
+        lm      R0, (ALIAS_SPRITE_ID)
+        moves   R0, R0
+        bpl     AliasLoadSpriteDirectoryReady
+        nop
+        jal     AliasResolveDirectionalSpriteROM
+        nop
+        lm      R0, (ALIAS_SPRITE_ID)
+AliasLoadSpriteDirectoryReady:
+        ; IDs exceed 255 now that every retained frame owns eight real views.
+        ; UMULT is only 8x8, so form the 14-byte directory stride in 16 bits.
+        move    R1, R0
+        with    R1
+        add     R1                     ; 2n
+        move    R2, R1                 ; retain 2n
+        with    R1
+        add     R1                     ; 4n
+        with    R1
+        add     R1                     ; 8n
+        with    R1
+        add     R1                     ; 16n
+        with    R1
+        sub     R2                     ; 14n
+        iwt     R4, #BSP_ALIAS_SPRITE_DIRECTORY_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_ALIAS_SPRITE_DIRECTORY_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        sm      (ALIAS_PIXEL_BANK), R0
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer; skip model.
+        BSP_ROM_LOAD_WORD R0
+        sm      (ALIAS_PIXEL_ADDRESS), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (ALIAS_WIDTH), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (ALIAS_HEIGHT), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (ALIAS_WORLD_WIDTH), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (ALIAS_WORLD_HEIGHT), R0
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer; skip frame.
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer; skip view.
+        BSP_ROM_LOAD_WORD R0
+        sm      (ALIAS_LEFT), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (ALIAS_TOP), R0
+        lm      R8, (ALIAS_DIRECTORY_RETURN)
+        move    R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+
+; Resolve the nearest 45-degree MDL view from the actual entity-to-camera
+; vector. The rational boundary is exact for every signed 16-bit Q6 pair and
+; avoids atan/trig tables in the fly-only path.
+AliasResolveDirectionalSpriteROM:
+        ; Recover the dynamic-state index from the active flattened token and
+        ; load its camera-independent exact Q6 entity facing.
+        lm      R0, (BRUSH_CURRENT_TOKEN)
+        iwt     R1, #$1FFF
+        with    R0
+        and     R1
+        iwt     R10, #GSU_ALIAS_TOKENS_OFFSET
+        with    R10
+        add     R0
+        move    R0, #0
+        moveb   R0, (R10)
+        move    R1, #$007F
+        with    R0
+        and     R1
+        with    R0
+        add     R0
+        iwt     R4, #BSP_ALIAS_FLY_FACING_ADDRESS
+        with    R4
+        add     R0
+        move    R0, #BSP_ALIAS_FLY_FACING_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        with    R0
+        sex
+        sm      (ALIAS_DIRECTIONAL_SIN), R0
+        BSP_ROM_LOAD_BYTE R0
+        with    R0
+        sex
+        sm      (ALIAS_DIRECTIONAL_COS), R0
+
+        ; The impossible sine -128 tags EF_ROTATE pickups. All flagged models
+        ; share the same immutable clock basis staged with this render job.
+        lm      R0, (ALIAS_DIRECTIONAL_SIN)
+        iwt     R1, #BSP_ALIAS_ROTATION_SENTINEL
+        with    R0
+        cmp     R1
+        bne     AliasDirectionalBasisReady
+        nop
+        iwt     R10, #GSU_ALIAS_ROTATION_OFFSET
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        sex
+        sm      (ALIAS_DIRECTIONAL_SIN), R0
+        inc     R10
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        sex
+        sm      (ALIAS_DIRECTIONAL_COS), R0
+AliasDirectionalBasisReady:
+
+        lm      R5, (ALIAS_DIRECTIONAL_COS)
+        lm      R7, (DX)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 2
+        lm      R5, (ALIAS_DIRECTIONAL_SIN)
+        lm      R7, (DY)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 2
+        with    R12
+        add     R0
+        move    R0, #0
+        with    R0
+        sub     R12
+        sm      (ALIAS_DIRECTIONAL_FORWARD), R0
+
+        lm      R5, (ALIAS_DIRECTIONAL_COS)
+        lm      R7, (DY)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 2
+        lm      R5, (ALIAS_DIRECTIONAL_SIN)
+        lm      R7, (DX)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 2
+        with    R12
+        sub     R0
+        move    R0, #0
+        with    R0
+        sub     R12
+        sm      (ALIAS_DIRECTIONAL_RIGHT), R0
+
+        ; R9 bits retain forward-negative (2) and right-negative (1).
+        move    R9, #0
+        lm      R7, (ALIAS_DIRECTIONAL_FORWARD)
+        moves   R7, R7
+        bpl     AliasDirectionalForwardMagnitudeReady
+        nop
+        with    R9
+        or      #2
+        move    R0, #0
+        with    R0
+        sub     R7
+        moves   R0, R0
+        bpl     AliasDirectionalForwardMagnitudePositive
+        nop
+        iwt     R0, #$7FFF
+AliasDirectionalForwardMagnitudePositive:
+        move    R7, R0
+AliasDirectionalForwardMagnitudeReady:
+        lm      R8, (ALIAS_DIRECTIONAL_RIGHT)
+        moves   R8, R8
+        bpl     AliasDirectionalRightMagnitudeReady
+        nop
+        with    R9
+        or      #1
+        move    R0, #0
+        with    R0
+        sub     R8
+        moves   R0, R0
+        bpl     AliasDirectionalRightMagnitudePositive
+        nop
+        iwt     R0, #$7FFF
+AliasDirectionalRightMagnitudePositive:
+        move    R8, R0
+AliasDirectionalRightMagnitudeReady:
+        move    R0, R7
+        with    R0
+        or      R8
+        bne     :+
+        nop
+        GSU_ABSOLUTE_GOTO AliasDirectionalViewZero
+:
+
+        ; Diagonal iff minor/major >= tan(22.5): the 577/1393 rational
+        ; straddles no representable Q6 ratio. R10 marks a right-major pair.
+        with    R7
+        cmp     R8
+        bcs     AliasDirectionalForwardMajor
+        nop
+        move    R10, #1
+        move    R2, R7
+        move    R3, R8
+        bra     AliasDirectionalCompareBoundary
+        nop
+AliasDirectionalForwardMajor:
+        move    R10, #0
+        move    R2, R8
+        move    R3, R7
+AliasDirectionalCompareBoundary:
+        move    R0, R2
+        iwt     R6, #1393
+        with    R0
+        lmult
+        move    R12, R4
+        move    R13, R0
+        move    R0, R3
+        iwt     R6, #577
+        with    R0
+        lmult
+        with    R13
+        cmp     R0
+        bcc     AliasDirectionalCardinal
+        nop
+        bne     AliasDirectionalDiagonal
+        nop
+        with    R12
+        cmp     R4
+        bcc     AliasDirectionalCardinal
+        nop
+
+AliasDirectionalDiagonal:
+        move    R0, R9
+        with    R0
+        and     #1
+        beq     AliasDirectionalDiagonalRightPositive
+        nop
+        move    R0, R9
+        with    R0
+        and     #2
+        beq     AliasDirectionalViewSeven
+        nop
+        move    R0, #5
+        bra     AliasDirectionalViewReady
+        nop
+AliasDirectionalDiagonalRightPositive:
+        move    R0, R9
+        with    R0
+        and     #2
+        beq     AliasDirectionalViewOne
+        nop
+        move    R0, #3
+        bra     AliasDirectionalViewReady
+        nop
+
+AliasDirectionalCardinal:
+        moves   R10, R10
+        bne     AliasDirectionalRightMajor
+        nop
+        move    R0, R9
+        with    R0
+        and     #2
+        beq     AliasDirectionalViewZero
+        nop
+        move    R0, #4
+        bra     AliasDirectionalViewReady
+        nop
+AliasDirectionalRightMajor:
+        move    R0, R9
+        with    R0
+        and     #1
+        beq     AliasDirectionalViewTwo
+        nop
+        move    R0, #6
+        bra     AliasDirectionalViewReady
+        nop
+
+AliasDirectionalViewSeven:
+        move    R0, #7
+        bra     AliasDirectionalViewReady
+        nop
+AliasDirectionalViewTwo:
+        move    R0, #2
+        bra     AliasDirectionalViewReady
+        nop
+AliasDirectionalViewOne:
+        move    R0, #1
+        bra     AliasDirectionalViewReady
+        nop
+AliasDirectionalViewZero:
+        move    R0, #0
+AliasDirectionalViewReady:
+        lm      R1, (ALIAS_SPRITE_ID)
+        iwt     R2, #BSP_ALIAS_FLY_DIRECTIONAL_MASK
+        with    R1
+        and     R2
+        with    R1
+        add     R0
+        sm      (ALIAS_SPRITE_ID), R1
+        ret
+        nop
+
+.segment "GSU_TEXTURE_TAIL_CODE"
+
+; Publish invariant DDA steps and the inclusive source clamp outside the full
+; auxiliary overlay. R8 enters as the half-Q7 constant; R2 returns as U_STEP
+; and remains live across the raster's visibility calls.
+AliasPrepareRasterSteps:
+        lm      R1, (ALIAS_WIDTH)
+        move    R0, R1
+        with    R0
+        umult   R8
+        sm      (ALIAS_U_STEP), R0
+        dec     R1
+        sm      (ALIAS_U_MAX), R1
+        lm      R0, (ALIAS_HEIGHT)
+        with    R0
+        umult   R8
+        sm      (ALIAS_V_STEP), R0
+        lm      R2, (ALIAS_U_STEP)
+        ret
+        nop
+
+; R0 enters as the visible logical destination Y. The pixel loop keeps R13 as
+; its horizontal half-Q7 span while PLOT consumes the mapped destination row.
+AliasStageVisibleRow:
+        iwt     R4, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R4
+        add     R0
+        move    R13, #0
+        moveb   R13, (R4)
+        sm      (ALIAS_MAPPED_Y), R13
+        lm      R13, (ALIAS_SPAN_X_HALF_Q7)
+        ret
+        nop
+
+; Resolve one token's default/hidden/partial QAV2 state outside the crowded
+; auxiliary renderer. Return the unchanged token ordinal in R0 and hidden in
+; R1; partial state is retained in the shared alias words.
+AliasPrepareVisibility:
+        move    R3, R0
+        with    R0
+        add     R0
+        iwt     R10, #GSU_ALIAS_VISIBILITY_POINTERS_OFFSET
+        with    R10
+        add     R0
+        movew   R2, (R10)
+        iwt     R1, #$FFFE
+        with    R2
+        cmp     R1
+        beq     AliasPrepareVisibilityDone
+        nop
+        iwt     R1, #$FFFF
+        with    R2
+        cmp     R1
+        beq     AliasPrepareVisibleReturn
+        nop
+        ; Ordered QAV2 mask pointers live below $4000. Fly rows publish the
+        ; signed $8000 sentinel. The preceding compare leaves valid pointers
+        ; positive and the fly sentinel negative, so partial ordered setup
+        ; pays no instructions beyond the two moved from its routine setup.
+        bmi     AliasPrepareFlyReturn
+        nop
+        sm      (ALIAS_VISIBILITY_POINTER), R2
+        move    R0, #1
+        sm      (ALIAS_VISIBILITY_BIT), R0
+        iwt     R0, #AliasTestQavVisibility
+        sm      (ALIAS_VISIBILITY_ROUTINE), R0
+        move    R1, #0
+AliasPrepareVisibilityDone:
+        move    R0, R3
+        ret
+        nop
+AliasPrepareFlyReturn:
+        iwt     R0, #FlyAliasTestVisibility
+        sm      (ALIAS_VISIBILITY_ROUTINE), R0
+        move    R1, #0
+        move    R0, R3
+        ret
+        nop
+AliasPrepareVisibleReturn:
+        iwt     R0, #AliasTestVisible
+        sm      (ALIAS_VISIBILITY_ROUTINE), R0
+        move    R1, #0
+        move    R0, R3
+        ret
+        nop
+
+; Advance one partial token's candidate-order visibility bit. R0 returns zero
+; for an opaque-hidden candidate and nonzero for a drawable candidate.
+AliasTestVisible:
+        ; The caller has a non-$ff texel in R0; incrementing is a one-byte
+        ; nonzero success result and it restores the original color from R4.
+        inc     R0
+        ret
+        nop
+AliasTestQavVisibility:
+        ; QAV bit walking needs R3 as scratch while the raster owns it as the
+        ; row countdown. FIRST_X is dead after initial clipping.
+        sm      (ALIAS_FIRST_X), R3
+        lm      R10, (ALIAS_VISIBILITY_POINTER)
+        move    R0, #0
+        moveb   R0, (R10)
+        lm      R1, (ALIAS_VISIBILITY_BIT)
+        move    R8, R0
+        with    R8
+        and     R1
+        ; IBT sign-extends $80 to $FF80. The visibility bit is an unsigned
+        ; byte mask, so load $0080 explicitly before deciding to advance.
+        iwt     R3, #$0080
+        move    R0, R1
+        with    R0
+        cmp     R3
+        beq     AliasTestVisibilityNextByte
+        nop
+        with    R0
+        add     R0
+        bra     AliasTestVisibilityAdvanced
+        nop
+AliasTestVisibilityNextByte:
+        move    R0, #1
+        inc     R10
+        sm      (ALIAS_VISIBILITY_POINTER), R10
+AliasTestVisibilityAdvanced:
+        sm      (ALIAS_VISIBILITY_BIT), R0
+        move    R0, R8
+        lm      R3, (ALIAS_FIRST_X)
+        ret
+        nop
+
+; Collapse negative left clipping once per billboard using the same axis
+; recurrence as the pixel tail. Keep this cold helper outside the crowded
+; auxiliary renderer.
+.segment "GSU_TEXTURE_TAIL_CODE"
+
+AliasClipInitialX:
+        lm      R12, (ALIAS_FIRST_X)
+        sm      (ALIAS_DEST_X), R12
+        moves   R12, R12
+        bpl     AliasClipInitialXDone
+        nop
+        lm      R6, (ALIAS_U_ACCUM)
+        lm      R9, (ALIAS_AXIS_END)
+AliasClipInitialXStep:
+        inc     R12
+        move    R0, R9
+        lm      R1, (ALIAS_WIDTH)
+        with    R1
+        umult   R8
+        with    R0
+        add     R1
+AliasClipInitialXReduce:
+        lm      R1, (ALIAS_SPAN_X_HALF_Q7)
+        with    R0
+        cmp     R1
+        bcc     AliasClipInitialXReady
+        with    R0
+        sub     R1
+        inc     R6
+        lm      R1, (ALIAS_WIDTH)
+        dec     R1
+        with    R6
+        cmp     R1
+        bcc     AliasClipInitialXReduce
+        nop
+        move    R6, R1
+        bra     AliasClipInitialXReduce
+        nop
+AliasClipInitialXReady:
+        move    R9, R0
+        moves   R12, R12
+        bmi     AliasClipInitialXStep
+        nop
+        sm      (ALIAS_U_ACCUM), R6
+        sm      (ALIAS_AXIS_END), R9
+        sm      (ALIAS_DEST_X), R12
+AliasClipInitialXDone:
+        ret
+        nop

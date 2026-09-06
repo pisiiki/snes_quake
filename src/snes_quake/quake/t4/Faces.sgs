@@ -1,0 +1,16 @@
+; Technique-4 world-face material dispatch. The general face walker and its
+; albedo branch remain byte-identical in ROM110 for legacy techniques.
+
+.segment "GSU_T4_FACE_DISPATCH_PATCH"
+
+T4TextureFaceLightmapDispatch:
+        jal     TextureLoadFaceLightmap
+        jal     TextureRenderConvexFaceShaded
+        bra     TextureFaceAdvance
+        nop
+  .repeat GSU_T4_FACE_DISPATCH_CAPACITY - (* - T4TextureFaceLightmapDispatch)
+        nop
+  .endrepeat
+
+.assert .loword(T4TextureFaceLightmapDispatch) = GSU_T4_FACE_DISPATCH_OFFSET, error, "Technique-4 face dispatch patch moved"
+.assert * = TextureFaceProjectiveAlbedo, error, "Technique-4 face dispatch changed the albedo continuation"

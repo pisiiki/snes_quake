@@ -1,11 +1,6 @@
-; Transition-only lookup selection for 8bpp renderers. None/LightMap
-; textureless modes collapse colormap rows; Distance instead swaps in its
-; dedicated full-range depth-to-index LUT.
+; Transition-only lookup selection for the retained lightmapped renderers.
 
-TEXTURE_COLORMAP_TEXTURED_DISTANCE    = 0
 TEXTURE_COLORMAP_TEXTURED_LIGHTMAP    = 1
-TEXTURE_COLORMAP_UNTEXTURED_NONE      = 2
-TEXTURE_COLORMAP_UNTEXTURED_DISTANCE  = 3
 TEXTURE_COLORMAP_UNTEXTURED_LIGHTMAP  = 4
 
 ; Seed one byte, then deliberately use an overlapping forward MVN to replicate
@@ -48,11 +43,23 @@ Row:
         bcc     Row
 .endmacro
 
-; Technique 3 uses 55 compact depth rows; technique 4 uses 64 natural
-; lightmap rows. Complete tables are copied or collapsed only when the selected
-; table changes. Techniques 0..2 ignore this RAM.
+; Technique 4 uses the natural 64-row table and technique 7 collapses those
+; rows to a neutral ramp. Technique 2 ignores this RAM.
 SyncTextureColormap:
         RW_assume a16i16
+        ; The final-index cache is valid only when both texture and lightmap
+        ; output are requested. Publish this once while the GSU is idle so the
+        ; established per-face gate remains unchanged in cost.
+        lda     render_camera+10
+        and     #$00FF
+        cmp     #BSP_TECHNIQUE_TEXTURED_LIGHTMAP
+        beq     @ComposedAllowed
+        lda     #$0000
+        bra     @ComposedPublish
+@ComposedAllowed:
+        lda     #$0001
+@ComposedPublish:
+        sta     f:GSU_DATA_BASE+GSU_TEXTURE_COMPOSED_ALLOWED_OFFSET
         lda     render_camera+10
         and     #$00FF
         cmp     #$0002
@@ -65,43 +72,26 @@ SyncTextureColormapDispatch:
         bne     :+
         jmp     SyncTextureColormapTexturedLightmap
 :
-        cmp     #$0003
-        beq     SyncTextureColormapTexturedDistance
-        cmp     #$0005
-        bne     :+
-        jmp     SyncTextureColormapUntexturedNone
-:
-        cmp     #$0006
-        bne     :+
-        jmp     SyncTextureColormapUntexturedDistance
-:
         cmp     #$0007
         bne     :+
         jmp     SyncTextureColormapUntexturedLightmap
 :
         rts
 
-; Flat renderers phase-overlay the bank-$70 hot reciprocal mirror. Rebuild it
-; only on the transition back to a textured technique; steady frames just test
-; the validity word while the GSU is idle.
+; Flat renderers phase-overlay the bank-$70 hot reciprocal mirror and overwrite
+; the hidden texture rows that host the cold clear helper. Rebuild the mirror,
+; its reserved turbulence-sampler tail, and the texture helper only on the
+; transition back to a textured technique; steady frames just test the validity
+; word while the GSU is idle.
 SyncTextureDivideQ12Mirror:
-        lda     texture_divide_q12_mirror_valid
+        lda     texture_phase_overlay_valid
         bne     SyncTextureDivideQ12MirrorDone
         BSP_STATIC_COPY GSU_DIVIDE_Q12_HOT_MIRROR, QuakeBSPDivideQ12Reciprocal, GSU_DIVIDE_Q12_HOT_MIRROR_BYTES
+        BSP_STATIC_COPY __GSU_TURBULENCE_HOT_CODE_RUN__, __GSU_TURBULENCE_HOT_CODE_LOAD__, __GSU_TURBULENCE_HOT_CODE_SIZE__
+        BSP_STATIC_COPY __GSU_TEXTURE_TAIL_CODE_RUN__, __GSU_TEXTURE_TAIL_CODE_LOAD__, __GSU_TEXTURE_TAIL_CODE_SIZE__
         lda     #$0001
-        sta     texture_divide_q12_mirror_valid
+        sta     texture_phase_overlay_valid
 SyncTextureDivideQ12MirrorDone:
-        rts
-
-SyncTextureColormapTexturedDistance:
-        lda     texture_colormap_mode
-        cmp     #TEXTURE_COLORMAP_TEXTURED_DISTANCE
-        beq     SyncTextureColormapTexturedDistanceDone
-        BSP_STATIC_COPY GSU_TEXTURE_DEPTH_SHADE, QuakeBSPTextureDepthShade, GSU_TEXTURE_DEPTH_SHADE_BYTES
-        BSP_STATIC_COPY GSU_TEXTURE_COLORMAP, QuakeBSPTextureColormap, GSU_TEXTURE_COLORMAP_BYTES
-        lda     #TEXTURE_COLORMAP_TEXTURED_DISTANCE
-        sta     texture_colormap_mode
-SyncTextureColormapTexturedDistanceDone:
         rts
 
 SyncTextureColormapTexturedLightmap:
@@ -112,27 +102,6 @@ SyncTextureColormapTexturedLightmap:
         lda     #TEXTURE_COLORMAP_TEXTURED_LIGHTMAP
         sta     texture_colormap_mode
 SyncTextureColormapTexturedLightmapDone:
-        rts
-
-SyncTextureColormapUntexturedNone:
-        lda     texture_colormap_mode
-        cmp     #TEXTURE_COLORMAP_UNTEXTURED_NONE
-        beq     SyncTextureColormapUntexturedNoneDone
-        BSP_STATIC_COPY GSU_TEXTURE_DEPTH_SHADE, QuakeBSPTextureDepthShade, GSU_TEXTURE_DEPTH_SHADE_BYTES
-        BSP_COLLAPSE_COLORMAP_ROWS QuakeBSPUntexturedNoneRows, 55
-        lda     #TEXTURE_COLORMAP_UNTEXTURED_NONE
-        sta     texture_colormap_mode
-SyncTextureColormapUntexturedNoneDone:
-        rts
-
-SyncTextureColormapUntexturedDistance:
-        lda     texture_colormap_mode
-        cmp     #TEXTURE_COLORMAP_UNTEXTURED_DISTANCE
-        beq     SyncTextureColormapUntexturedDistanceDone
-        BSP_STATIC_COPY GSU_TEXTURE_DEPTH_SHADE, QuakeBSPUntexturedDistanceDepthShade, GSU_TEXTURE_DEPTH_SHADE_BYTES
-        lda     #TEXTURE_COLORMAP_UNTEXTURED_DISTANCE
-        sta     texture_colormap_mode
-SyncTextureColormapUntexturedDistanceDone:
         rts
 
 SyncTextureColormapUntexturedLightmap:

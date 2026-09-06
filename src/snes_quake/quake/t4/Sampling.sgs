@@ -1,0 +1,261 @@
+; Technique-4 sampling keeps every square power-of-two miptex on one direct
+; hot path. The cold per-face selector publishes code pointers only; it never
+; mutates live GSU program RAM.
+
+.macro T4_PUBLISH_LIGHTMAP_ROUTES
+        iwt     R1, #TextureLightmapBilinearSpanLoop
+        sm      (TEXTURE_STEP_T), R1
+        iwt     R1, #TextureLightmapConstantSpanLoop
+        sm      (TEXTURE_REM_S), R1
+        iwt     R1, #TextureLightmapVerticalSpanLoop
+        sm      (TEXTURE_REM_T), R1
+        iwt     R1, #TextureLightmapHorizontalSpanLoop
+        sm      (TEXTURE_ERR_S), R1
+        iwt     R1, #TextureLightmapInteriorSpanLoop
+        sm      (TEXTURE_ERR_T), R1
+.endmacro
+
+.segment "GSU_T4_BLOCK_SELECT_CODE"
+
+T4TextureLightmapSelectBlockRoutine:
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        lm      R0, (LIGHTMAP_BLOCK_FAST)
+        moves   R0, R0
+        bpl     T4TextureLightmapRouteIndexReady
+        nop
+        ; Four out of five prepared blocks are proven interior. Publish their
+        ; direct route without indexing the six-entry general dispatch table.
+        move    R0, #5
+        ; Mixed-axis faces publish a generic interior route in the same slot,
+        ; while square power-of-two faces publish the direct route. Load that
+        ; face-specific slot without rebuilding its table address per block.
+        lm      R13, (TEXTURE_ERR_T)
+        bra     T4TextureLightmapBlockRoutineReady
+        nop
+T4TextureLightmapRouteIndexReady:
+        GSU_ABSOLUTE_GOTO T4TextureLightmapRouteIndexReadyCold
+  .repeat $1C - (* - T4TextureLightmapSelectBlockRoutine)
+        nop
+  .endrepeat
+T4LightmapSampleCachedDegenerate:
+        dec     R0
+        bne     T4LightmapSampleCachedVertical
+        nop
+        lm      R4, (LIGHTMAP_BLOCK_UL)
+        GSU_ABSOLUTE_GOTO LightmapSampleMap
+T4LightmapSampleCachedVertical:
+        move    R5, R9
+        lm      R6, (LIGHTMAP_BLOCK_LL)
+        GSU_ABSOLUTE_GOTO TextureLightmapOneAxisSample
+T4TextureLightmapBlockRoutineReady:
+        iwt     R7, #TextureLightmapSampleReady
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        jmp     R13
+        nop
+  .repeat GSU_T4_BLOCK_SELECT_CAPACITY - (* - T4TextureLightmapSelectBlockRoutine)
+        nop
+  .endrepeat
+
+.assert T4TextureLightmapSelectBlockRoutine = TextureLightmapSelectBlockRoutine, error, "Technique-4 block selector moved away from the general selector entry"
+.assert T4LightmapSampleCachedDegenerate = LightmapSampleCachedDegenerate, error, "Technique-4 degenerate decoder moved away from the general route"
+.assert T4TextureLightmapBlockRoutineReady = TextureLightmapBlockRoutineReady, error, "Technique-4 block continuation moved away from the general continuation"
+.assert * = TextureLightmapBilinearSpanLoop, error, "Technique-4 block selector changed the downstream pixel-loop address"
+
+.segment "GSU_T4_SAMPLE_WRAP_CODE"
+
+T4TextureSampleAbsoluteRegisters:
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        move    R7, R0
+        with    R0
+        and     #BSP_WORLD_TEXTURE_FLAG_POWER_OF_TWO_AXES
+        moves   R0, R0
+        beq     T4TextureSampleMixedAxes
+        nop
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+        with    R5
+        and     R1
+        lm      R1, (TEXTURE_WRAP_MASK_T)
+        with    R6
+        and     R1
+        bra     TextureSampleCoordinatesReady
+        nop
+T4TextureSampleMixedAxes:
+        ; The general path only records whether both axes are powers of two.
+        ; Detect a power-of-two S axis independently so mixed 128x192 miptex
+        ; do one mask instead of repeatedly adding 128 pixels to negative S.
+        lm      R1, (TEXTURE_WIDTH_Q4)
+        move    R2, R1
+        dec     R2
+        with    R2
+        and     R1
+        moves   R2, R2
+        beq     T4TextureSamplePowerOfTwoS
+        nop
+        GSU_ABSOLUTE_GOTO T4TextureSampleWrapSGeneric
+T4TextureSamplePowerOfTwoS:
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+        with    R5
+        and     R1
+        GSU_ABSOLUTE_GOTO T4TextureSampleAbsoluteSDone
+
+  .repeat $36 - (* - T4TextureSampleAbsoluteRegisters)
+        nop
+  .endrepeat
+T4TextureSampleAbsoluteSDone:
+        moves   R6, R6
+        bpl     T4TextureSampleAbsoluteTHigh
+        nop
+        lm      R1, (TEXTURE_HEIGHT_Q4)
+        with    R6
+        add     R1
+        bra     T4TextureSampleAbsoluteSDone
+        nop
+T4TextureSampleAbsoluteTHigh:
+        lm      R1, (TEXTURE_HEIGHT_Q4)
+        move    R0, R6
+        with    R0
+        sub     R1
+        bmi     T4TextureSampleAbsoluteTDone
+        nop
+        move    R6, R0
+        bra     T4TextureSampleAbsoluteTHigh
+        nop
+T4TextureSampleAbsoluteTDone:
+        bra     TextureSampleAbsoluteCoordinatesReady
+        nop
+T4TextureSample:
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        move    R7, #0
+
+.assert T4TextureSampleAbsoluteRegisters = TextureSampleAbsoluteRegisters, error, "Technique-4 wrap sampler moved away from the general sampler entry"
+.assert T4TextureSampleAbsoluteSDone = TextureSampleAbsoluteSDone, error, "Technique-4 T-wrap loop moved away from the general sampler window"
+.assert T4TextureSample = TextureSample, error, "Technique-4 state-loading sampler moved away from the general sampler entry"
+.assert * = TextureSampleAbsoluteCoordinatesReady, error, "Technique-4 wrap sampler changed the downstream sampler address"
+.assert * - T4TextureSampleAbsoluteRegisters <= GSU_T4_SAMPLE_WRAP_CAPACITY, error, "Technique-4 wrap sampler exceeds the general coordinate-wrap window"
+
+.segment "GSU_T4_SAMPLE_CODE"
+
+T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters:
+        ; Keep the established general row router byte-for-byte: moving the
+        ; uncommon-width continuation out of this cache window costs more on
+        ; those faces than fixing the dominant width saves.
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+        with    R5
+        and     R1
+  .repeat 4
+        with    R5
+        lsr
+  .endrepeat
+        with    R6
+        and     R1
+        lm      R12, (TEXTURE_STEP_SHADE_Q8)
+        jmp     R12
+        with    R6
+T4TextureSamplePowerOfTwoRowShift3:
+        add     R6
+        with    R6
+T4TextureSamplePowerOfTwoRowShift2:
+        add     R6
+        with    R6
+T4TextureSamplePowerOfTwoRowShift1:
+        add     R6
+        with    R6
+T4TextureSamplePowerOfTwoRowReady:
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R6
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+        ret
+        nop
+        nop
+
+.assert T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters = TextureSampleAbsolutePowerOfTwoSingleBankRegisters, error, "Technique-4 sampler moved away from the general sampler entry"
+.assert T4TextureSamplePowerOfTwoRowShift3 = TextureSamplePowerOfTwoRowShift3, error, "Technique-4 width-128 row route moved away from the general route"
+.assert T4TextureSamplePowerOfTwoRowShift2 = TextureSamplePowerOfTwoRowShift2, error, "Technique-4 width-64 row route moved away from the general route"
+.assert T4TextureSamplePowerOfTwoRowShift1 = TextureSamplePowerOfTwoRowShift1, error, "Technique-4 width-32 row route moved away from the general route"
+.assert T4TextureSamplePowerOfTwoRowReady = TextureSamplePowerOfTwoRowReady, error, "Technique-4 width-16 row route moved away from the general route"
+.assert * - T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters <= GSU_T4_SAMPLE_CODE_CAPACITY, error, "Technique-4 sampler exceeds the general power-of-two sampler window"
+.assert * <= TextureLightmapInteriorSpanLoop, error, "Technique-4 sampler overlaps the lightmap interior loop"
+
+.segment "GSU_T4_SAMPLE_SELECT_PATCH"
+
+T4TextureSelectPowerOfTwoStatePatch:
+        GSU_ABSOLUTE_GOTO T4TextureSelectPowerOfTwoStateReady
+
+.assert T4TextureSelectPowerOfTwoStatePatch = TextureSelectPowerOfTwoStateReady, error, "Technique-4 sampler selector patch moved away from the general selector suffix"
+.assert * - T4TextureSelectPowerOfTwoStatePatch <= GSU_T4_SAMPLE_SELECT_CAPACITY, error, "Technique-4 sampler selector patch exceeds the general selector suffix"
+.assert * <= TexturePreparePowerOfTwoSamplerState, error, "Technique-4 sampler selector patch overlaps sampler-state preparation"
+
+.segment "GSU_T4_SAMPLE_AUX_CODE"
+
+T4TextureSelectPowerOfTwoStateReady:
+        iwt     R1, #T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        T4_PUBLISH_LIGHTMAP_ROUTES
+        ret
+        nop
+
+T4TextureSampleWrapSGeneric:
+        moves   R5, R5
+        bpl     T4TextureSampleWrapSHigh
+        nop
+        lm      R1, (TEXTURE_WIDTH_Q4)
+        with    R5
+        add     R1
+        bra     T4TextureSampleWrapSGeneric
+        nop
+T4TextureSampleWrapSHigh:
+        lm      R1, (TEXTURE_WIDTH_Q4)
+        move    R0, R5
+        with    R0
+        sub     R1
+        bmi     T4TextureSampleWrapSDone
+        nop
+        move    R5, R0
+        bra     T4TextureSampleWrapSHigh
+        nop
+T4TextureSampleWrapSDone:
+        GSU_ABSOLUTE_GOTO T4TextureSampleAbsoluteSDone
+
+T4TextureLightmapRouteIndexReadyCold:
+        with    R0
+        add     R0
+        iwt     R10, #TEXTURE_STEP_S
+        with    R10
+        add     R0
+        movew   R13, (R10)
+        GSU_ABSOLUTE_GOTO T4TextureLightmapBlockRoutineReady
+
+; Only rows whose polygon walkers cross enter this cold direct-fetch path.
+; Swap the four adjacent {left,right} words in place, then rejoin the still-
+; resident stage helper to publish the next record address.
+T4TextureStageLightmapReverseCold:
+        dec     R10
+        dec     R10
+        move    R12, #4
+T4TextureStageLightmapSwapLoop:
+        movew   R0, (R10)
+        inc     R10
+        inc     R10
+        movew   R1, (R10)
+        movew   (R10), R0
+        dec     R10
+        dec     R10
+        movew   (R10), R1
+        with    R10
+        add     #4
+        dec     R12
+        bne     T4TextureStageLightmapSwapLoop
+        nop
+        GSU_ABSOLUTE_GOTO T4TextureStageLightmapAdvance
+
+.assert .loword(T4TextureSelectPowerOfTwoStateReady) = GSU_T4_SAMPLE_AUX_OFFSET, error, "Technique-4 sampler auxiliaries moved away from their overlay window"
+.assert * - T4TextureSelectPowerOfTwoStateReady <= GSU_T4_SAMPLE_AUX_CAPACITY, error, "Technique-4 sampler auxiliaries exceed the projective-albedo span window"
+.assert * <= TextureDivideQ12EdgeCached, error, "Technique-4 sampler auxiliaries overlap shared divide code"

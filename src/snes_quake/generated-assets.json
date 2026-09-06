@@ -1,0 +1,1050 @@
+{
+  "assetSetSha256": "77b28515862f4c6999f12d672cf2f043c282107c855723a426fef98f2791f630",
+  "bankOccupancy": {
+    "aliases": {
+      "freeCapacityBytes": 33599,
+      "physicalHalfbanks": [
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        14,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        37,
+        15
+      ],
+      "reservedCapacityBytes": 557056
+    },
+    "brushRuntime": {
+      "physicalHalfbanks": [
+        46,
+        47,
+        48
+      ],
+      "usedBytesByBank": [
+        32757,
+        32679,
+        18112
+      ]
+    },
+    "composedCache": {
+      "directoryPhysicalBank": 2,
+      "physicalHalfbanks": [
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86
+      ]
+    }
+  },
+  "configuration": {
+    "bytes": 2044,
+    "path": "config/rom-config.json",
+    "sha256": "66704ae1dcb0ae0e71d83ead3fbbf978581f615f779d64d638f21a906d4ae109"
+  },
+  "defaultFeatureCoverage": {
+    "declaration": {
+      "bytes": 11647,
+      "sha256": "26d5b6447c6692300b823da1d46a870bd4d83d5c3930c558172fd2f7c50ebff4"
+    },
+    "defaultFeatures": {
+      "dynamicBrushes": {
+        "enabled": true,
+        "oracle": "renderer-native-reference",
+        "value": true
+      },
+      "lightmap": {
+        "enabled": true,
+        "oracle": "renderer-native-reference",
+        "value": true
+      },
+      "mdlBillboards": {
+        "enabled": true,
+        "oracle": "renderer-native-reference",
+        "value": true
+      },
+      "noFramebufferClear": {
+        "enabled": true,
+        "oracle": "renderer-native-reference",
+        "value": true
+      },
+      "technique": {
+        "enabled": true,
+        "oracle": "renderer-native-reference",
+        "value": 4
+      },
+      "textures": {
+        "enabled": true,
+        "oracle": "renderer-native-reference",
+        "value": true
+      },
+      "turbulentLiquids": {
+        "enabled": true,
+        "oracle": "renderer-native-reference",
+        "value": true
+      }
+    },
+    "evidence": {
+      "schema": "quake-default-feature-semantic-evidence-v1",
+      "sha256": "d9e70727e2981f22e3e153e70336fa27c69fd1841ccb5d37ebfc84474fb0d273"
+    },
+    "evidenceRoles": [
+      "fly",
+      "ordered2",
+      "ordered20",
+      "realtime",
+      "referenceLaunch",
+      "referenceSample101",
+      "referenceSample951",
+      "releaseVideo",
+      "runtimeMenu",
+      "scenarioWorldFly",
+      "scenarios"
+    ],
+    "releaseVideo": {
+      "frameCount": 4473,
+      "observedFeatureState": {
+        "dynamicBrushes": true,
+        "lightmap": true,
+        "mdlBillboards": true,
+        "technique": 4,
+        "textures": true
+      },
+      "romSha256": "e29ac927c09491be760844dcdfe4ca06cc48ce9f3cc5ffbbddc55d12d935971e",
+      "sequenceComplete": true,
+      "video": {
+        "bytes": 9449440,
+        "sha256": "c7c6b994a1e9ef009cca4d4a9a7abfe32171d0b406e079b14c86382712a24590"
+      }
+    },
+    "schema": "quake-default-feature-release-binding-v2",
+    "status": "pass"
+  },
+  "files": [
+    {
+      "bytes": 1225,
+      "path": "QuakeBSPAliasAssets.i",
+      "sha256": "aaca5826f3dd0f51a9d2d13978d9321656851f8de6b79c1a6afb6e075b259319"
+    },
+    {
+      "bytes": 438487,
+      "path": "QuakeBSPAliasAssets.json",
+      "sha256": "03bf8f5cbfd8dc6ed884fe1e08e0a2871b949837124e8f1ba5dd118d0e8cf53e"
+    },
+    {
+      "bytes": 4965,
+      "path": "QuakeBSPAliasAssets.s",
+      "sha256": "c9aa0fd1401eab9739e67f4c6d81ca73012979881f15d6f6de7dba3626236029"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime0.bin",
+      "sha256": "7f053bf360746ad1a63721569e3fe28df38c6fa3795d20bdbd48433ce191b9f3"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime1.bin",
+      "sha256": "114a938b2f5dea492aa6c25bba08d96319d5f5ba43551d1eef6e555df847254f"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime10.bin",
+      "sha256": "514886511a9ef4dd8c931dfa5b725d97ec63224fac469e7d3ea53b9b2fd3c39b"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime11.bin",
+      "sha256": "c538d91e47bb51868fd9c4d862c49d3e37cb84d8c0cfd619ae33bedbe2aa481b"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime12.bin",
+      "sha256": "ff7013c6c009bc1ad6e464c7a95a492d002895e9d3b626a7244ec60bcc40bd3d"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime13.bin",
+      "sha256": "9deb36889b13051201212518337a8b0dd1d39a3d70ba95e618d1ad05b22d6ec5"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime14.bin",
+      "sha256": "b5ef80f37481a998b144ee75867a578c390b474db616a2ac6d764df870898ccc"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime15.bin",
+      "sha256": "b5185aaba79aa6687c6b02b57d6ab54d00e5993f9eec78b19ff85dabb9999c3d"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime2.bin",
+      "sha256": "912b43a5d6e5ffe7f2505d0d1df31d319b10a18d2cfdd5ada03c31600fcfc7d3"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime3.bin",
+      "sha256": "c0415ea564c6fe4a637f18d6de57a888987ba283819758369e6897a59a9196d5"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime4.bin",
+      "sha256": "215fbe7ea8a510871cffdeb72523913bbe8cccbc857f4b226b4fb686261fe3f8"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime5.bin",
+      "sha256": "5a73ac35f039bc935a1661f8a6c0a46be0dc2abd0a8e5217f462afc2e8c813e5"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime6.bin",
+      "sha256": "0b31ef6e9aecf2dc8c4eb8b9451c361222b3fadecbe748fed296148adec96cd7"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime7.bin",
+      "sha256": "b3e908e0aa5db96d64290a021e82567f288fa6f3285e5c1ca547858799556e6f"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime8.bin",
+      "sha256": "d062dbe4d55902aab093da28e90c8728e89e19b0c1e76ee75479fcbe2b4ee71d"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasRuntime9.bin",
+      "sha256": "b1bdbac793f493a05ebed9d240c8fe9803ad3ef638098cc295b59e33a8782cc6"
+    },
+    {
+      "bytes": 1265,
+      "path": "QuakeBSPAliasVisibility.i",
+      "sha256": "8388d846f2f869c71ca2dd1a82272ce5bd9a3c6e03d7cc95c42ba010c9a9b7d5"
+    },
+    {
+      "bytes": 4570,
+      "path": "QuakeBSPAliasVisibility.json",
+      "sha256": "f699930eb067dc3517679ad5b1564aeb7ccf39344204d79f2940eede121e6271"
+    },
+    {
+      "bytes": 884,
+      "path": "QuakeBSPAliasVisibility.s",
+      "sha256": "cd8fe17973c8841e68d3177e81ff6ac495e715943ed39efce543f08146345376"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasVisibilityDisabled.bin",
+      "sha256": "9f91d8ec1df4fc6953b7fc3b0f652220cad91a8e70e8be52d6a62558cce7d09f"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPAliasVisibilityEnabled.bin",
+      "sha256": "6afad0fd3b29c3a5f5b317e13e765f55691e0609b33b73ff822734f7a553a9bb"
+    },
+    {
+      "bytes": 5950,
+      "path": "QuakeBSPBrushAssets.i",
+      "sha256": "b95bd73dcba7b5172af5e803b294f0d1d7c73aa70ba93a5758291811b83bbe7d"
+    },
+    {
+      "bytes": 337724,
+      "path": "QuakeBSPBrushAssets.json",
+      "sha256": "ea0d7b050a6e4fc32e8699e7fd9ba0bab430d02400bfb3aaa624a7a767d81629"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushFragments0.bin",
+      "sha256": "47993d47fedaed701c2d92d398ee4b877c1c4f57283631e9307d9c6a3c91c870"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushFragments1.bin",
+      "sha256": "9b74cce988506cb25b7bb32b0c697d6824f04d8752b855bff02ce5c649bc3e54"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushFragments2.bin",
+      "sha256": "34935ab06d1d7876c78890372632e3a1776765c81386d45c80a12b19b9480b9f"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushFragments3.bin",
+      "sha256": "f538e31a59c330340b216f08a822db86eeee1fa6730b4692f0ebedcc3e356441"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushFragments4.bin",
+      "sha256": "53c204ad87e4c8a1bf9befd165ee02c72ea658e0551fe263e0195a455de0d775"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushFragments5.bin",
+      "sha256": "00fc1eb98baf293c0651f7edc62c79e937c7d368eab9531a0c73ff109cf76b8d"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushFragments6.bin",
+      "sha256": "6989cd01de3f050c2feced479e7d15451573b444412edf4f1b2f0caff55dc237"
+    },
+    {
+      "bytes": 53054,
+      "path": "QuakeBSPBrushReplay.bin",
+      "sha256": "b9e501c72cf0473f8d333b562b2c71dca3f8fd83772a2999fee191ba8c190f9d"
+    },
+    {
+      "bytes": 20284,
+      "path": "QuakeBSPBrushReplay.json",
+      "sha256": "75bef98a8e36afdb842ca3d778bbfb46c969da349aa1509a33fa90db066ede5c"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushRuntime0.bin",
+      "sha256": "30d6ba4031caf0f29ca0f2f08f8884d8024ad71179cdf67ca0e10d5d3843e930"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushRuntime1.bin",
+      "sha256": "638a1f3df2c3fed3433baa4160ebd301d30f25a090bac5d9963fb26c1ad39f74"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushRuntime2.bin",
+      "sha256": "aedc541c50454a336dcd75a6c132afa1a53a12620d4b9716e83713f8a99c2210"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushTexturePixels0.bin",
+      "sha256": "60b82d43a6e4be4b654ee0d1400a398b31ee1c0e1777ef9e37f99939d2dcd656"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushTexturePixels1.bin",
+      "sha256": "0accd5936a8c58c8d3688cfcaf2b36a4caf081d2dea042454257fc88e44723a3"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushTexturePixels2.bin",
+      "sha256": "bd1a15cf44df9c1eb3d9b5b3d7d72a5990292a2f2dcbfd09c07fee9b7522919c"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPBrushTexturePixels3.bin",
+      "sha256": "eb8cc982f8616dfa81e47f94859535f3e3e605fab195e611e1999636f8910238"
+    },
+    {
+      "bytes": 725,
+      "path": "QuakeBSPCollision.i",
+      "sha256": "3a3dab6a76c91534e4b796b9e58cc814a542e8b671243a0ec002f0da166c6187"
+    },
+    {
+      "bytes": 1565,
+      "path": "QuakeBSPCollision.json",
+      "sha256": "33098f1222b6c2cca4860abde1e4b9217b4b864b7a81f35f2c1ef6380afe5f99"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPCollisionPacked0.bin",
+      "sha256": "38dd14649409bf3bddf9fa3254eda22a27269338ad262e67b3e2b51d1e30f143"
+    },
+    {
+      "bytes": 32246,
+      "path": "QuakeBSPCollisionPacked1.bin",
+      "sha256": "520f457c17f975bacd0128ac8f00631c5cc80bdfd463b8fd518dac1fa7f41975"
+    },
+    {
+      "bytes": 1300,
+      "path": "QuakeBSPComposedCache.i",
+      "sha256": "e177efa04dbbfb658cab4f34b0d64a3784a3ab343618ccd984f33f02c962af89"
+    },
+    {
+      "bytes": 13325,
+      "path": "QuakeBSPComposedCacheAssets.s",
+      "sha256": "f6e93b375eb26ae5db6fb6f636820fa9ccbcc6771b82dcede3ebb6a415e6123a"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk00.bin",
+      "sha256": "0d00e4023fd80871cfbbd08412108dc1b5ac06211e608206ddbf746e0eecf858"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk01.bin",
+      "sha256": "0494e01eca13a5e0609ee2310bac794906dd259c7d56165e620458735e72eb11"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk02.bin",
+      "sha256": "b4eaca16d7187188ed8b84b0e67af6fa6bcf4c1d71111bd16ac051f5fa43b4ab"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk03.bin",
+      "sha256": "74a9d3f7d95ce750e2303672452d63964f1ebec5577643acb46dbc3a0bac34d8"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk04.bin",
+      "sha256": "8ee8500e3c4a77cba9acdb34fbdefab03688f6083aa1e01d02a5fcea86aaebb2"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk05.bin",
+      "sha256": "892fc9665894839cfa03716a6d8c4ff80aa1206be138f3b3ce0aa30287fd76d9"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk06.bin",
+      "sha256": "71cb0a5398ef8c47c77088600b255c0b8c8f3c53e4e5d1717c66ee54bf064b82"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk07.bin",
+      "sha256": "a86adcac24d1321552f3dd1ecadb2b964ad983b209245c063d3ea2df51fe3e8e"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk08.bin",
+      "sha256": "3302170daa0082fde0df2566fc54a61b31d3c31d5d8852cfd0f62978c9372574"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk09.bin",
+      "sha256": "208ffad837645f7d169f751efbe343e4acade4aca7fd44aabca8e2d13d550fc6"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk10.bin",
+      "sha256": "de9df7faa4e6d70ed5bb43559adbc2d82b867ebf2b7e8d7bb5af9acbe4ee7cb5"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk11.bin",
+      "sha256": "43bd740651be4b49efbe520ce46b4d35281eca1b9dd8f822dafb056a9dfb8aca"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk12.bin",
+      "sha256": "e7c991e1962882224e35e3b5a2e566fbee1cf7db35a60a414988185876ba7f20"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk13.bin",
+      "sha256": "738a064e039da3857d6c30ee6f181092add8cee145f0bea5701981aaf21a467f"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk14.bin",
+      "sha256": "9181174ed960d66e781a75e247ac7fa08771c3d92d71fe27ce5f43339588fe65"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk15.bin",
+      "sha256": "48211a61c5360c5c8946a971a04ee08030f971014224fc4a1c7d636159f59ff1"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk16.bin",
+      "sha256": "20e5068b91f2e322389871defb6232efd3e14155d480c1d230ea68a60eacd818"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk17.bin",
+      "sha256": "6f23a01da7377200aca3e7b584893491f99abb4cdaaf57492352fd0394164553"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk18.bin",
+      "sha256": "95860a5418712e3d7c954878920a11ae2659ac5b8261faaf025dc581a617da94"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk19.bin",
+      "sha256": "73b343c6e75be61b196a4860c01892466cece7f288d6a68b36b8dc770670927b"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk20.bin",
+      "sha256": "a9806796ba11a16c95fe187ab13f2dae3166b3e0d42e5cf84889b4b91659e88b"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk21.bin",
+      "sha256": "785ab6b7e8fea9e43a614742f8df89959c84945b31026803021a9cffa0df4a7a"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPComposedCacheChunk22.bin",
+      "sha256": "aff50d93de04a3b27edc243d2be7f046383ebce79b7a5efc6cdb86dc74fec548"
+    },
+    {
+      "bytes": 1568,
+      "path": "QuakeBSPComposedCacheDescriptors.bin",
+      "sha256": "013ae5c3d70934817c53e3c8426e0e850e0a45ecd4932b26300faf353534a9d5"
+    },
+    {
+      "bytes": 2499,
+      "path": "QuakeBSPComposedCacheDirectoryPayload.bin",
+      "sha256": "b181bef9f003a9092110dd248a5a6bdfb658af44d904c2b0f37795240d00ed40"
+    },
+    {
+      "bytes": 7798,
+      "path": "QuakeBSPComposedCacheFaceDirectory.bin",
+      "sha256": "d183185317299ece030df89b7d8de5651cb36c876933e7eb160bff79bc31c330"
+    },
+    {
+      "bytes": 90039,
+      "path": "QuakeBSPComposedCacheMetadata.json",
+      "sha256": "137e989bb3b8de2b3cfd42b1ff388fd179eb429361e01c08b75ebd0fa3558ce3"
+    },
+    {
+      "bytes": 32,
+      "path": "QuakeBSPCos.bin",
+      "sha256": "e37389f1e49c99c8407940f784affa903eeac65f807b2cbbf39013fe23783fb3"
+    },
+    {
+      "bytes": 14840,
+      "path": "QuakeBSPDemoPrecise.bin",
+      "sha256": "25062dd8e54ed229eccc3c7b5699701a33fb5f95213b882af769b6c171e17585"
+    },
+    {
+      "bytes": 2968,
+      "path": "QuakeBSPDemoPreciseTiming.bin",
+      "sha256": "0a20566f14cfa159d19123f4fcdfc399812f03f6eaea9addb9d4522e0ac8151c"
+    },
+    {
+      "bytes": 1944,
+      "path": "QuakeBSPDemoTiming.bin",
+      "sha256": "654434444ff737598f81e75a2243e56cf6e39629ba8183a6676c4a55c57b9129"
+    },
+    {
+      "bytes": 4860,
+      "path": "QuakeBSPDemoTrack.bin",
+      "sha256": "3ab592cf1f376b1d8f8b6b0f88fed7bfd9670ef009dfcdf8abf72471965a9887"
+    },
+    {
+      "bytes": 131068,
+      "path": "QuakeBSPDivideQ12Reciprocal.bin",
+      "sha256": "4c070100fb843535edf019fa8249ba996333de812c24411f3f1aa0668b728f3e"
+    },
+    {
+      "bytes": 256,
+      "path": "QuakeBSPExpandLeft.bin",
+      "sha256": "8b51e4ceca1fe200231aeb329c0c5e678997e1305f63f89059a6eac23f1072d4"
+    },
+    {
+      "bytes": 256,
+      "path": "QuakeBSPExpandRight.bin",
+      "sha256": "0945dc89a1358469c4a56d07db5ca144e42f49b86d167d61a2ccc6bf4cd87ffa"
+    },
+    {
+      "bytes": 1340,
+      "path": "QuakeBSPFacePlanes.bin",
+      "sha256": "f654e904e83d04b9e891fa5bb5b3b5eb0edf963c6a45d5b1084cab98564e3e4c"
+    },
+    {
+      "bytes": 1340,
+      "path": "QuakeBSPFaces.bin",
+      "sha256": "b8680a0b12ae31f4a5ba3d9188da5ae6ea1027087231fc095769bc0030b5230f"
+    },
+    {
+      "bytes": 2446,
+      "path": "QuakeBSPIndices.bin",
+      "sha256": "a91d634394a07bf83bc42b7da31fe550db9529368fd81a2bf8748397790d3e40"
+    },
+    {
+      "bytes": 16384,
+      "path": "QuakeBSPLightmapColormap.bin",
+      "sha256": "7206d434f6cb9c01cd96d0cd465f9c8be27feaf874891f55a8fbee0b220df09f"
+    },
+    {
+      "bytes": 256,
+      "path": "QuakeBSPLightmapLevelZeroColormap.bin",
+      "sha256": "b3158d061a2c8c1cd867ed1997a373ac292d323785712890bf41b45abf691883"
+    },
+    {
+      "bytes": 243087,
+      "path": "QuakeBSPMetadata.json",
+      "sha256": "49a139454630fe9fc68ed2150ee03278cab1a7725c11d7e96661a72708f9c793"
+    },
+    {
+      "bytes": 592,
+      "path": "QuakeBSPMonsterCameras.bin",
+      "sha256": "3ba58af4d200c5cb315c088d7cab352634d32bb63c089d557c071da486bab7cf"
+    },
+    {
+      "bytes": 135,
+      "path": "QuakeBSPMonsterCameras.i",
+      "sha256": "caea4938988eca133956d2ded2cbb67acb32f1d32aa7596749c373d07c31da87"
+    },
+    {
+      "bytes": 27888,
+      "path": "QuakeBSPMonsterCameras.json",
+      "sha256": "0ae9835d392fd5cfb3d68de4e1b587a5e4de843a0fbbff2af17f0f833fc5a701"
+    },
+    {
+      "bytes": 37776,
+      "path": "QuakeBSPOrderedReplay.bin",
+      "sha256": "d54018cfa36b389d7f3d3dcf4ee25d9e91b69f75377677a7ce5f63e4d0502ba3"
+    },
+    {
+      "bytes": 1546,
+      "path": "QuakeBSPOrderedReplay.json",
+      "sha256": "110e2d8d4c8a048bef40c24c6ca4262f78dd032b9ff1a460aaf3469da58cea02"
+    },
+    {
+      "bytes": 377014,
+      "path": "QuakeBSPOrderedReplay20Hz.bin",
+      "sha256": "cca846e389e2b901e119f0790182422a0aa3005c6a11ca11d33aa11800b50fec"
+    },
+    {
+      "bytes": 1553,
+      "path": "QuakeBSPOrderedReplay20Hz.json",
+      "sha256": "c7ee3cb56e9e5ffa5f796529e32440fc2364890ca13c33edb2fb351e0d90c29e"
+    },
+    {
+      "bytes": 24457,
+      "path": "QuakeBSPPacketOracle.json",
+      "sha256": "0c0fff93bd32b9a0e73ec080b6a3739a3c7288d7e7e77beefdb49a654d7e5d81"
+    },
+    {
+      "bytes": 32,
+      "path": "QuakeBSPPalette.bin",
+      "sha256": "52513d1e3c4e92cc86441eb5b0d0d732a1b6eb49f05c7d02b003f45e48d3f7e1"
+    },
+    {
+      "bytes": 2048,
+      "path": "QuakeBSPReciprocal.bin",
+      "sha256": "9fd658a01906c48631410ff7d5da2874751505459c875c849be9f5889e70f3cf"
+    },
+    {
+      "bytes": 17906,
+      "path": "QuakeBSPReferenceSoundReplay.bin",
+      "sha256": "7175284f68c0d61f4885d4c175504b01aff9ed3f4ac4c0ddbd4ec3a6eb00fb15"
+    },
+    {
+      "bytes": 5306,
+      "path": "QuakeBSPScene.i",
+      "sha256": "47015aa6d443e4feacedb4d93a2f58de036376ed5aabd370595229f4a24b8a6b"
+    },
+    {
+      "bytes": 32,
+      "path": "QuakeBSPSin.bin",
+      "sha256": "62d1532d900604103aa351c88c7ca31ec88f10be45ea518fb211e9f9926a5c16"
+    },
+    {
+      "bytes": 3711,
+      "path": "QuakeBSPSkyAssets.i",
+      "sha256": "708a21f86db10744b42e4e1549b64c0ee20ce74548551074703535341e7f375a"
+    },
+    {
+      "bytes": 12855,
+      "path": "QuakeBSPSkyAssets.json",
+      "sha256": "6a81bf09c84208843221089ce03a59ffce4fde487f6962ef9e0b15a0e491ee23"
+    },
+    {
+      "bytes": 703,
+      "path": "QuakeBSPSkyAssets.s",
+      "sha256": "1db7dbf57da1d5c8b58512f08b49a06b8d0df4f9dec31770f02e6ac875814495"
+    },
+    {
+      "bytes": 4452,
+      "path": "QuakeBSPSkyPhases.bin",
+      "sha256": "b8dd5f087842c4ea0d639b2d3b4cdbdf02ef84bc10308fc1ef3a4355bbc9357d"
+    },
+    {
+      "bytes": 1188,
+      "path": "QuakeBSPSoundtrack.i",
+      "sha256": "46fb8a4dc5a578f3e39a927e9d75de9750c855adc4b29e0a0b81a79c0cba44c7"
+    },
+    {
+      "bytes": 38982,
+      "path": "QuakeBSPSoundtrack.json",
+      "sha256": "15ae6cdc033149a3e12c1edc10d521542ba4734975d0dbb0054e3c88af98b5b9"
+    },
+    {
+      "bytes": 43820,
+      "path": "QuakeBSPSoundtrackAssets.s",
+      "sha256": "ed85ae1f5692330e063ba4838261f7c2146a60220cd0187d179d894590ff404b"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank00.bin",
+      "sha256": "c56527c0254930cd979b4f40fc7998fc5bab1ddec8525b87ff8edf378041fc1f"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank01.bin",
+      "sha256": "63d63603273a2aaf539a0468e941ed0b129885c6053d351ca2c99122f37d4e3a"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank02.bin",
+      "sha256": "57a1e5823a43ef93e1f40c4730f930caaf9333e5170db5640454b2d75fa7c8ea"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank03.bin",
+      "sha256": "51ef9bbf2b9b0833eb828891bf59648754c932691d23e2da54ffb82c8996696c"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank04.bin",
+      "sha256": "066b3aaf08e2845d855bbfeb4a8d9c846008f4b71a1d2871c525faf9bd38d267"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank05.bin",
+      "sha256": "4375d94a08c33c29a10e99347975c4e65da1efde44e1ede0f8a07d27f6416aab"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank06.bin",
+      "sha256": "98f5a6dfb183ff05db54098cb68dfca998fef6bccec18cd9c7f9869e2f71c19d"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank07.bin",
+      "sha256": "6406985dee21ce9888e91203c4791625ba7a1eec6d50276f457ddfd773930984"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank08.bin",
+      "sha256": "743e2082b34380b50541cc3f2ee6d6b59d3a7f0fc73cc2207ca84cf00cd3a271"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank09.bin",
+      "sha256": "b116a508cbe2cca4f600bf8244687294a8bfb670bd3d047c81f9c9279baf6462"
+    },
+    {
+      "bytes": 32256,
+      "path": "QuakeBSPSoundtrackBank10.bin",
+      "sha256": "c0a0105c8ab3c23970c600741283128dd6bf3bdbaa86aed767ab6dc52c8b7398"
+    },
+    {
+      "bytes": 5760,
+      "path": "QuakeBSPSoundtrackBank11.bin",
+      "sha256": "fda4bfb8f6fc6497fee729d6a9dd24278c1f8db6562ed20466dff3540d9b589d"
+    },
+    {
+      "bytes": 154,
+      "path": "QuakeBSPSoundtrackCacheDirectory.bin",
+      "sha256": "f97fbab98781505a960dfa93e5e05b9025a3cbf6186f0c8c028e083b2f327160"
+    },
+    {
+      "bytes": 416,
+      "path": "QuakeBSPSoundtrackSampleDirectory.bin",
+      "sha256": "24f3d061a019214eab36f00f942de770d02b38311e9a3b1dd3bf3826df725b11"
+    },
+    {
+      "bytes": 8744,
+      "path": "QuakeBSPSoundtrackSchedule.bin",
+      "sha256": "c53109973dc76bd66c46c06ff3acc1ffde70cbb765ce49ae472d32ae515c554c"
+    },
+    {
+      "bytes": 128,
+      "path": "QuakeBSPTextureCoordinateMap.bin",
+      "sha256": "10dba2b3f395cbb4a601a95d0177ef78cdf96e050241040377a773a8e9ec8f45"
+    },
+    {
+      "bytes": 512,
+      "path": "QuakeBSPTexturePalette.bin",
+      "sha256": "82975db712ac02846d7a30a2e07536230d0510b8b2d2e6443471d2a427a9c5df"
+    },
+    {
+      "bytes": 2048,
+      "path": "QuakeBSPTextureTilemap.bin",
+      "sha256": "a5796875674a433cc76b4bd58c01a7f9861eb6b8504358c44c5c901c22c9e4b4"
+    },
+    {
+      "bytes": 2048,
+      "path": "QuakeBSPTilemap.bin",
+      "sha256": "f8a259423a98274f819f0d957364a390fdef4161271e911eeb077e960a34d4e4"
+    },
+    {
+      "bytes": 1132,
+      "path": "QuakeBSPTurbulenceAssets.i",
+      "sha256": "8b8f0334e421ae2c20ae7a930d6705829cfc0e6a87fa7cb7605848c8af579eb2"
+    },
+    {
+      "bytes": 14160,
+      "path": "QuakeBSPTurbulenceAssets.json",
+      "sha256": "fa264ac8b215cc5c312386052039e316dfc6228b3f6d9b18a1935932abd72482"
+    },
+    {
+      "bytes": 1035,
+      "path": "QuakeBSPTurbulenceAssets.s",
+      "sha256": "f04aec9c97b8649d12e1b5fac5fbb4e5cfde9332812f263181de8879dd3bcc8f"
+    },
+    {
+      "bytes": 4452,
+      "path": "QuakeBSPTurbulencePhases.bin",
+      "sha256": "a635dc1ad6a9e8d147a179388896ddcc11e1d8ca7a1b6625e5fd78d0538dc1e7"
+    },
+    {
+      "bytes": 128,
+      "path": "QuakeBSPTurbulenceTable.bin",
+      "sha256": "49497c9501de26f4bffc4d4f6207cbf854a9485c1836826e7b18de153d2d7ae9"
+    },
+    {
+      "bytes": 1044,
+      "path": "QuakeBSPVertices.bin",
+      "sha256": "3c8319b8bef86f270721d8270a08e6b64dd1e2cf03ce623f855c20732120457c"
+    },
+    {
+      "bytes": 7798,
+      "path": "QuakeBSPWorldFaceOwners.bin",
+      "sha256": "dbbc29bb558624d390abc399e7cb20772fcf5ad85bddcfa79ffdfbf9719092f8"
+    },
+    {
+      "bytes": 19495,
+      "path": "QuakeBSPWorldFacePlanes.bin",
+      "sha256": "b848aaf40ab9c0d15148ff8f0dc59a26f8a9adff81f7ac6c31104650a481de2b"
+    },
+    {
+      "bytes": 3899,
+      "path": "QuakeBSPWorldFaceTextureIds.bin",
+      "sha256": "44b1a21aa0a250bc10729c6e73e149e85d2bbe96f44b7b3bb3f6e9b2b03b4abb"
+    },
+    {
+      "bytes": 23394,
+      "path": "QuakeBSPWorldFaces.bin",
+      "sha256": "8db44cedf09c52dfe6801c3bbc1c035399e3b5b9d1f2ed5b1bb6cddc69d3ed14"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldIndices0.bin",
+      "sha256": "d98c03e78b4c99e562efef7d67a7b30ee7b4ac42ea830f9795e4c0983be5f929"
+    },
+    {
+      "bytes": 4350,
+      "path": "QuakeBSPWorldIndices1.bin",
+      "sha256": "e759ad23658383aaa131360c3ffd01467c6c73bcaacd62f48496743b1da612ff"
+    },
+    {
+      "bytes": 16184,
+      "path": "QuakeBSPWorldLeaves.bin",
+      "sha256": "1eef083afe3855a1cb6887e2ba32bf12b078678107786cc8820ae1b87d3de136"
+    },
+    {
+      "bytes": 27293,
+      "path": "QuakeBSPWorldLightmapDirectory.bin",
+      "sha256": "8cf3d127eb38a2534e488747ee60168dac0fcfd36b9c24d81812a9f1447fccd7"
+    },
+    {
+      "bytes": 32664,
+      "path": "QuakeBSPWorldLightmapSamples0.bin",
+      "sha256": "e1a541fd0a43d2b9f90123c83e6137d67ece7c1b2ec114cbb683cd2972855e34"
+    },
+    {
+      "bytes": 32532,
+      "path": "QuakeBSPWorldLightmapSamples1.bin",
+      "sha256": "a7360313b3d0da7e9d351bdf8cba7fa2e83234e2b16d3d6b26764d06778363cc"
+    },
+    {
+      "bytes": 32658,
+      "path": "QuakeBSPWorldLightmapSamples2.bin",
+      "sha256": "4d2240069d78246c536f3b37538ed0a3e71bb647d2a16dc6d651b2394ea89d9a"
+    },
+    {
+      "bytes": 11087,
+      "path": "QuakeBSPWorldLightmapSamples3.bin",
+      "sha256": "89340478facadbf7d90b3abf6b0e10dac9330a218a594abd1582c18e0698df9d"
+    },
+    {
+      "bytes": 10530,
+      "path": "QuakeBSPWorldMarksurfaces.bin",
+      "sha256": "4427b1a0eb8c27e9f537d8c74d113698452434b01bb8bbd8db23d78151f4fe19"
+    },
+    {
+      "bytes": 5752,
+      "path": "QuakeBSPWorldNodeParents.bin",
+      "sha256": "214828ad8103a7b9ca08de644e875e62836a263910b0bb00ca19e95972b8d69d"
+    },
+    {
+      "bytes": 28760,
+      "path": "QuakeBSPWorldNodes.bin",
+      "sha256": "cfda4126a1c629cb91ee68121d9bd63e89ac5182ffa5d38b9709178732d2d11c"
+    },
+    {
+      "bytes": 32750,
+      "path": "QuakeBSPWorldPVS0.bin",
+      "sha256": "e230f4ad0fb27c915c3e5e7163f0a2c5e1a81dccea1553d57947cce2832dbb6d"
+    },
+    {
+      "bytes": 32684,
+      "path": "QuakeBSPWorldPVS1.bin",
+      "sha256": "35ee88ec10221c61fbba6ab4cb92f856e3c62fc0d55485f1208852fad6296ee7"
+    },
+    {
+      "bytes": 21063,
+      "path": "QuakeBSPWorldPVS2.bin",
+      "sha256": "8ff7bbb5c655df8f57e7d63966b62a0eef69d42f8ff9b979798de2a78b47d37b"
+    },
+    {
+      "bytes": 0,
+      "path": "QuakeBSPWorldPVS3.bin",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 9160,
+      "path": "QuakeBSPWorldPVSDirectory.bin",
+      "sha256": "47cefdad14fd84d5e4641eae102d9cbc4ab435b48990e39975da7cf10e3b3445"
+    },
+    {
+      "bytes": 12,
+      "path": "QuakeBSPWorldPVSGuards.bin",
+      "sha256": "3a8f2bbe6289180b09eaadd31c54431b7a1dea7d651da46bb08c52577ab2d8dd"
+    },
+    {
+      "bytes": 10630,
+      "path": "QuakeBSPWorldPlanes.bin",
+      "sha256": "b603b29f931c22723e3dd1f7269b2236ba1655998cffddc8fd0cc71acb12e736"
+    },
+    {
+      "bytes": 16156,
+      "path": "QuakeBSPWorldShading.bin",
+      "sha256": "c2b50ac138a86d9420cc8782fbab6707f0548004f10631014fda13e570eb40d1"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldTextureCoordinates0.bin",
+      "sha256": "f292a6db45209cef08a44ce8199dd6fd72bce0476c820d329ec51a10e1bfbfe7"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldTextureCoordinates1.bin",
+      "sha256": "43832ee7f4977f630fba9ffa4831692724e1525a5490588ec77caa9df9c1f7bc"
+    },
+    {
+      "bytes": 8700,
+      "path": "QuakeBSPWorldTextureCoordinates2.bin",
+      "sha256": "9fe7ef476ef74e5b9437c8623ca0c581583afc075848c4fce398dba4b51f0b3e"
+    },
+    {
+      "bytes": 224,
+      "path": "QuakeBSPWorldTextureDirectory.bin",
+      "sha256": "8985967d49f71bcaa8ee10191d84981b5f1a8e7aa5fe21eb206ccc297686fb84"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldTexturePixels0.bin",
+      "sha256": "2227d22ed4580aac43d955dc164dd06182956db563e8bbc70e2988d032c0ca5d"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldTexturePixels1.bin",
+      "sha256": "cefa9da4c6b23085b5575e2d079d25e8264822b69f67a39d140847fda2eefdb4"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldTexturePixels2.bin",
+      "sha256": "40d6d0aad0622e29dedfcbfbca4f7c3794e7ec188cd62190a4ac522332a96b2b"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldTexturePixels3.bin",
+      "sha256": "fe7577733a689324e707020db997cbf7794de387125d4608932987f362bf82b1"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldTexturePixels4.bin",
+      "sha256": "ee317d1b59ccffc4b1c071098bcea04b0abf490050bb827d56041e7b74c35a34"
+    },
+    {
+      "bytes": 32768,
+      "path": "QuakeBSPWorldTexturePixels5.bin",
+      "sha256": "6eaebafecd03a6ee04bf70006adaba39226024fb5c5e97860b2436f7ef815210"
+    },
+    {
+      "bytes": 24060,
+      "path": "QuakeBSPWorldVertices.bin",
+      "sha256": "ab174d6c17d3e44b3ffd016f11d41c318f293920d0d16d0e8594625c0e09f02f"
+    },
+    {
+      "bytes": 32365,
+      "path": "QuakeBSPWorldVisibility0.bin",
+      "sha256": "3007ef3415ba251700dd759d6cd56ecf22d5a1955e9a409e11502baee081c21f"
+    },
+    {
+      "bytes": 0,
+      "path": "QuakeBSPWorldVisibility1.bin",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "mesenMapping": {
+    "actualMaximumGsuRomBank": 110,
+    "configuredAliasHalfbankCount": 17,
+    "maximumGsuRomBank": 111,
+    "schema": "quake-mesence-mapping-v1",
+    "selectedTarget": "mesence-nightly",
+    "targets": {
+      "mesence-nightly": {
+        "emulator": {
+          "commit": "091ff784182c13712deef068c94dc54020b7caf2",
+          "repository": "https://github.com/nesdev-org/MesenCE.git"
+        },
+        "maxAliasHalfbankCount": 17,
+        "maxGsuRomBank": 111,
+        "ordinary": true
+      }
+    }
+  },
+  "packetContract": {
+    "capacities": {
+      "facePlanes": 405,
+      "faces": 405,
+      "indices": 2048,
+      "vertices": 768
+    },
+    "faces": {
+      "format": "<HBBB",
+      "recordBytes": 5,
+      "storage": "canonical contiguous bytes"
+    },
+    "firstIndexAccess": "adjacent bytewise little-endian",
+    "oracleSchema": 3
+  },
+  "qualifiedInputs": [
+    "QuakeBSPAliasVisibility.i",
+    "QuakeBSPAliasVisibility.json",
+    "QuakeBSPAliasVisibility.s",
+    "QuakeBSPAliasVisibilityDisabled.bin",
+    "QuakeBSPAliasVisibilityEnabled.bin",
+    "QuakeBSPReferenceSoundReplay.bin"
+  ],
+  "schema": "quake-bsp-public-generated-assets-v1",
+  "sourceRevision": "450ef0d24d1f406b6235dfd014fc5eb00ee16a9a",
+  "summary": {
+    "bytes": 5013243,
+    "count": 170
+  }
+}

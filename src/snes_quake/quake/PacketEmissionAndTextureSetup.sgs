@@ -1,5 +1,6 @@
 
 GSU_CACHE_KERNEL_BEGIN PacketAdmissionCopyLoop
+PacketAdmissionCopyLoopCached:
         jal     PacketLoadWorldIndex
         nop
         lm      R0, (PACKET_SOURCE_INDEX)
@@ -40,12 +41,11 @@ PacketAdmissionProjectionReady:
 PacketAdmissionCopyNew:
         sm      (PACKET_CACHE_ENTRY), R1
         GSU_ABSOLUTE_GOTO PacketAdmissionCopyNewVertex
-GSU_CACHE_KERNEL_END PacketAdmissionCopyLoop
 
 ; Convert one tagged projection-cache entry into an accepted packet vertex.
 ; The compact Q2 world record is retained for the cold sub-world near clipper;
 ; ordinary rendering consumes the already-computed projected/state arrays.
-GSU_CACHE_KERNEL_BEGIN PacketAdmissionCopyNewVertex
+PacketAdmissionCopyNewVertex:
         lm      R1, (PACKET_VERTEX_COUNT)
         sm      (PACKET_LOCAL_VERTEX), R1
         lm      R0, (PACKET_SOURCE_INDEX)
@@ -149,9 +149,8 @@ PacketAdmissionStateReady:
         inc     R1
         sm      (PACKET_VERTEX_COUNT), R1
         GSU_ABSOLUTE_GOTO PacketAdmissionEmitIndex
-GSU_CACHE_KERNEL_END PacketAdmissionCopyNewVertex
 
-GSU_CACHE_KERNEL_BEGIN PacketAdmissionEmitIndex
+PacketAdmissionEmitIndex:
         lm      R1, (PACKET_LOCAL_VERTEX)
         lm      R10, (PACKET_INDEX_POINTER)
         movew   (R10), R1
@@ -173,10 +172,10 @@ GSU_CACHE_KERNEL_BEGIN PacketAdmissionEmitIndex
         cmp     R1
         beq     PacketAdmissionCopyDone
         nop
-        GSU_ABSOLUTE_GOTO PacketAdmissionCopyLoop
+        GSU_ABSOLUTE_GOTO PacketAdmissionCopyLoopCached
 PacketAdmissionCopyDone:
         GSU_ABSOLUTE_GOTO PacketAdmissionFinish
-GSU_CACHE_KERNEL_END PacketAdmissionEmitIndex
+GSU_CACHE_KERNEL_END PacketAdmissionCopyLoop
 
 GSU_CACHE_KERNEL_BEGIN PacketAdmissionFinish
         ; Set the accepted world-face bit without modifying the retained PVS.
@@ -611,15 +610,26 @@ PacketPainterNodeDone:
         GSU_ABSOLUTE_GOTO PacketPainterNextFrameBody
 GSU_CACHE_KERNEL_END PacketPainterEmitNode
 
+; Five-byte packet records alternate first-index alignment. Store the canonical
+; adjacent little-endian bytes in the existing gap before the copy kernel, then
+; tail-jump back so the pinned kernel and every following entry remain fixed.
+StorePacketFaceFirstIndex:
+        moveb   (R10), R5
+        inc     R10
+        with    R5
+        hib
+        moveb   (R10), R5
+        inc     R10
+        GSU_ABSOLUTE_GOTO PacketPainterCopyFaceAfterFirstIndex
+
 GSU_CACHE_KERNEL_BEGIN PacketPainterCopyFace
 PacketPainterCopyFaceBody:
         lm      R3, (PACKET_SOURCE_INDEX)
         lm      R5, (PACKET_FACE_FIRST)
         lm      R10, (PACKET_FACE_OUTPUT)
-        movew   (R10), R5
-        inc     R10
-        inc     R10
-        ; Source face bytes 2..5 follow its unused world first-index word.
+        GSU_ABSOLUTE_GOTO StorePacketFaceFirstIndex
+PacketPainterCopyFaceAfterFirstIndex:
+        ; Source vertex count follows its unused world first-index word.
         move    R1, R3
         with    R1
         add     R1
@@ -639,10 +649,6 @@ PacketPainterCopyFaceBody:
         BSP_ROM_LOAD_BYTE R0
         moveb   (R10), R0
         inc     R10
-        BSP_ROM_LOAD_BYTE R0
-        BSP_ROM_LOAD_BYTE R0
-        BSP_ROM_LOAD_BYTE R0
-        sm      (PACKET_FACE_FLAGS), R0
         sm      (PACKET_FACE_OUTPUT), R10
 
 PacketShadeFaceBody:
@@ -758,9 +764,6 @@ PacketShadeDistanceReady:
         moveb   (R10), R0
         inc     R10
         BSP_ROM_LOAD_BYTE R0
-        moveb   (R10), R0
-        inc     R10
-        lm      R0, (PACKET_FACE_FLAGS)
         moveb   (R10), R0
         inc     R10
         sm      (PACKET_FACE_OUTPUT), R10
@@ -888,6 +891,21 @@ PacketGuardDone:
         nop
 GSU_CACHE_KERNEL_END PacketFinalize
 
+; Load the canonical adjacent little-endian first-index bytes from one compact
+; five-byte packet face. R10 advances to the vertex-count byte; R0 is the
+; uint16 result. R6 and R11 are scratch. This 14-byte helper occupies the
+; alignment gap before GSU_Code, so pinned cache-kernel addresses do not move.
+LoadPacketFaceFirstIndex:
+        moveb   R0, (R10)
+        lob
+        inc     R10
+        move    R6, R0
+        moveb   R0, (R10)
+        swap
+        or      R6
+        jmp     R11
+        inc     R10
+
 GSU_CACHE_KERNEL_BEGIN GSU_Code
         ; Closed BSP views overwrite every logical sample. Production keeps the
         ; prior framebuffer intact until geometry replaces it; only the
@@ -954,27 +972,10 @@ GSU_CACHE_KERNEL_BEGIN GSU_TextureCode
         nop
 GSU_CACHE_KERNEL_END GSU_TextureCode
 
-; Standalone exact-index depth experiment. Geometry and texel sampling remain
-; independent of the unshaded kernel; the final index passes through Quake's
-; colormap using a shade interpolated from camera-space depth across each span.
-GSU_CACHE_KERNEL_BEGIN GSU_TextureShadeCode
-        move    R0, #1
-        ramb
-        move    R0, #$11
-        cmode
-        move    R0, #0
-        sm      (TEXTURE_RENDER_MODE), R0
-        jal     LoadProjectedPacketState
-        nop
-        jal     TextureRenderFacesShaded
-        nop
-        GSU_FLUSH_PLOT 0, 0
-        iwt     R10, #TELEMETRY
-        iwt     R0, #$B529
-        movew   (R10), R0
-        stop
-        nop
-GSU_CACHE_KERNEL_END GSU_TextureShadeCode
+; Preserve the qualified technique-4 overlay addresses while the retired
+; standalone shade kernel's former cache line remains intentionally vacant.
+.align $10
+.res $30
 
 ; Static BSP29 lightmap experiment. Q12 perspective edges and eight-pixel span
 ; blocks produce absolute signed-Q4 coordinates; a face-local 16-unit grid
@@ -1015,17 +1016,15 @@ TextureFacesPresent:
 
 TextureFaceLoop:
         lm      R10, (FACE_POINTER)
-        movew   R6, (R10)
-        inc     R10
-        inc     R10
+        jal     LoadPacketFaceFirstIndex
         move    R1, #0
         moveb   R1, (R10)
         sm      (CONVEX_FACE_VERTICES), R1
-        with    R6
-        add     R6
+        with    R0
+        add     R0
         iwt     R10, #INDICES
         with    R10
-        add     R6
+        add     R0
         sm      (CONVEX_INDEX_PTR), R10
 
         lm      R10, (TEXTURE_SOURCE_FACE_PTR)
@@ -1052,6 +1051,15 @@ TextureFaceLoop:
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_WORD R0
         sm      (TEXTURE_WORLD_INDEX), R0
+
+        ; The cold helper performs technique gating, lookup, and rendering.
+        jal     TextureTryRenderComposedFace
+        nop
+        moves   R0, R0
+        beq     TextureFaceComposedMiss
+        nop
+        GSU_ABSOLUTE_GOTO TextureFaceAdvance
+TextureFaceComposedMiss:
 
         ; One byte per source world face selects a packed exact miptex.
         lm      R3, (PACKET_SOURCE_INDEX)
@@ -1171,17 +1179,15 @@ FacesPresent:
 
 FaceLoop:
         lm      R10, (FACE_POINTER)
-        movew   R6, (R10)
-        inc     R10
-        inc     R10
+        jal     LoadPacketFaceFirstIndex
         move    R1, #0
         moveb   R1, (R10)
         sm      (CONVEX_FACE_VERTICES), R1
-        with    R6
-        add     R6
+        with    R0
+        add     R0
         iwt     R10, #INDICES
         with    R10
-        add     R6
+        add     R0
         sm      (CONVEX_INDEX_PTR), R10
 
         lm      R10, (TEXTURE_SOURCE_FACE_PTR)
@@ -1291,14 +1297,15 @@ FacesDone:
         nop
 .endmacro
 
-; Retained affine technique 5 keeps its original face instruction stream.
-DEFINE_TEXTURE_SHADE_FACE_WALKER TextureRenderFacesShaded, TextureRenderConvexFaceShaded, 0
-
 ; Load the seven-byte source-face lightmap directory record. A bank byte of
 ; $ff denotes an intentionally unlightmapped surface. Vanilla Quake starts
 ; an ordinary surface at ambient light; the default ambient of zero selects
 ; the darkest colormap row. The otherwise-unused address word stores that
-; encoded row, while sky/turbulent surfaces retain row-zero special rendering.
+; encoded row. Textured modes retain row-zero sky/turbulent special rendering;
+; technique 7 deliberately visualizes the encoded missing-lightmap row instead.
+; Preserve the technique-4 overlay ABI across a retired face-walker window.
+.res $F9
+
 TextureLoadFaceLightmap:
         sm      (LIGHTMAP_LOAD_RETURN), R11
         lm      R3, (PACKET_SOURCE_INDEX)
@@ -1317,9 +1324,12 @@ TextureLoadFaceLightmap:
         move    R0, #BSP_WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_BANK
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
-        ; Signed loading maps the $ff "no lightmap" sentinel to -1, allowing
-        ; the per-pixel sampler to test its sign without materializing $00ff.
+        ; Signed loading maps the $ff "no lightmap" sentinel to -1. Valid bank
+        ; bits 7:6 carry the first packed sample's phase; retain them in R7
+        ; until the byte count has been calculated, then publish the masked
+        ; physical bank for the established sampler sign tests.
         BSP_ROM_LOAD_SIGNED_BYTE R0
+        move    R7, R0
         sm      (LIGHTMAP_ROM_BANK), R0
         BSP_ROM_LOAD_WORD R0
         sm      (LIGHTMAP_ROM_ADDRESS), R0
@@ -1331,11 +1341,12 @@ TextureLoadFaceLightmap:
         sm      (LIGHTMAP_MIN_BLOCK_S), R0
         BSP_ROM_LOAD_SIGNED_BYTE R0
         sm      (LIGHTMAP_MIN_BLOCK_T), R0
-        lm      R0, (LIGHTMAP_ROM_BANK)
-        moves   R0, R0
-        bmi     TextureLoadFaceLightmapDone
+        move    R0, R7
+        inc     R0
+        bne     :+
         nop
-        romb
+        GSU_ABSOLUTE_GOTO TextureLoadFaceLightmapDone
+:
         lm      R4, (LIGHTMAP_ROM_ADDRESS)
         GSU_SET_ROM_BUFFER_ADDRESS R4
         lm      R0, (LIGHTMAP_WIDTH)
@@ -1345,15 +1356,7 @@ TextureLoadFaceLightmap:
         move    R12, R0
         iwt     R10, #GSU_LIGHTMAP_CACHE_OFFSET
         sm      (LIGHTMAP_ROM_ADDRESS), R10
-        iwt     R5, #$00C0
-        iwt     R13, #TextureLoadFaceLightmapCacheLoop
-TextureLoadFaceLightmapCacheLoop:
-        BSP_ROM_LOAD_BYTE R0
-        with    R0
-        add     R5
-        moveb   (R10), R0
-        inc     R10
-        loop
+        jal     TextureLoadFaceLightmapCache
         nop
         ; Recover the world loader link before its state word becomes the
         ; adjusted address used by every positive-bank interior sample.
@@ -1368,6 +1371,19 @@ TextureLoadFaceLightmapDone:
         lm      R11, (LIGHTMAP_LOAD_RETURN)
         ret
         nop
+
+; Both world and brush callers enter in RAM bank $70. Preserve JAL's return in
+; R13, which the former raw-copy loop already treated as scratch, then cross to
+; the cache-resident decoder in ROM36's packed-lightmap tail. It returns directly
+; to R13 after restoring bank $70, leaving caller-owned R8 and R9 untouched.
+GSU_CACHE_KERNEL_BEGIN TextureLoadFaceLightmapCache
+        move    R13, R11
+        move    R11, #$24
+        iwt     R0, #.loword(TextureUnpackLightmapSamplesROM)
+        from    R0
+        ljmp    R11
+        nop
+GSU_CACHE_KERNEL_END TextureLoadFaceLightmapCache
 
 ; E1M3 face-coordinate runs never cross an 8K-record ROM bank. Establish the
 ; sequential stream once per face, then consume its signed Q4 s,t words.

@@ -1,0 +1,832 @@
+; Eight-voice real-time BRR mixer for the configured Quake replay.
+
+.include "libSFX.i"
+.include "Data/QuakeBSPSoundtrack.i"
+
+.if BSP_SOUND_ENABLED
+SOUND_COMMAND_UPLOAD_STREAM = $01
+SOUND_COMMAND_UPLOAD_CACHE  = $02
+SOUND_COMMAND_BEGIN         = $03
+SOUND_COMMAND_STOP_ALL      = $04
+SOUND_COMMAND_SYNC          = $05
+SOUND_COMMAND_CANCEL_STREAM = $06
+SOUND_COMMAND_SET_BASE      = $20
+SOUND_COMMAND_START_BASE    = $40
+SOUND_COMMAND_STOP_BASE     = $60
+SOUND_COMMAND_VOLUME_BASE   = $80
+SOUND_COMMAND_VOICE_MASK    = $07
+SOUND_COMMAND_CLASS_MASK    = $F8
+SOUND_STATUS_READY          = $08
+SOUND_STATUS_PLAYING        = $10
+SOUND_STATUS_ERROR          = $20
+SOUND_REQUEST_NONE          = $FF
+SOUND_SAMPLE_FLAG_LOOP      = $01
+
+.export QuakeSoundDriver
+
+.segment "SMPCODE"
+.align 256
+QuakeSoundDirectory:
+        .repeat BSP_SOUND_VOICE_COUNT
+        .word   QuakeSoundStreamBuffers, QuakeSoundStreamBuffers
+        .endrepeat
+
+QuakeSoundDriver:
+        DSP_set FLG,   #$20
+        DSP_set KON,   #$00
+        DSP_set KOF,   #$FF
+        DSP_set DIR,   #>QuakeSoundDirectory
+        DSP_set NON,   #$00
+        DSP_set EON,   #$00
+        DSP_set MVOLL, #$7F
+        DSP_set MVOLR, #$7F
+        DSP_set EVOLL, #$00
+        DSP_set EVOLR, #$00
+        mov     voice_index,#$00
+@InitVoice:
+        mov     a,voice_index
+        xcn     a
+        mov     dsp_register,a
+        or      a,#V0VOLL
+        mov     DSPADDR,a
+        mov     DSPDATA,#$00
+        mov     a,dsp_register
+        or      a,#V0VOLR
+        mov     DSPADDR,a
+        mov     DSPDATA,#$00
+        mov     a,dsp_register
+        or      a,#V0PITCHL
+        mov     DSPADDR,a
+        mov     DSPDATA,#<BSP_SOUND_DSP_PITCH
+        mov     a,dsp_register
+        or      a,#V0PITCHH
+        mov     DSPADDR,a
+        mov     DSPDATA,#>BSP_SOUND_DSP_PITCH
+        mov     a,dsp_register
+        or      a,#V0SRCN
+        mov     DSPADDR,a
+        mov     DSPDATA,voice_index
+        mov     a,dsp_register
+        or      a,#V0GAIN
+        mov     DSPADDR,a
+        mov     DSPDATA,#$7F
+        inc     voice_index
+        cmp     voice_index,#BSP_SOUND_VOICE_COUNT
+        bne     @InitVoice
+        mov     x,#BSP_SOUND_VOICE_COUNT-1
+        mov     a,#$00
+@ClearVoices:
+        mov     voice_active+x,a
+        mov     voice_cached+x,a
+        mov     voice_current_chunk+x,a
+        mov     voice_chunk_count+x,a
+        mov     voice_sound_slot+x,a
+        mov     voice_loop_chunk+x,a
+        mov     voice_cache_first+x,a
+        mov     voice_stream_slot+x,a
+        dec     x
+        bpl     @ClearVoices
+        mov     x,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT-1
+@ClearStreams:
+        mov     !stream_ready+x,a
+        mov     !stream_request+x,a
+        dec     x
+        bpl     @ClearStreams
+        mov     driver_flags,#SOUND_STATUS_READY
+        mov     active_voice_mask,#$00
+        mov     published_request,#SOUND_REQUEST_NONE
+        mov     command_counter,#$00
+        mov     transfer_counter,#$00
+        mov     stream_request_counter,#$00
+        mov     stream_end_counter,#$00
+        mov     natural_end_counter,#$00
+        mov     request_scan_start,#$00
+        mov     cache_ready_count,#$00
+        mov     invalid_command_counter,#$00
+        mov     invalid_command,#$FF
+        mov     invalid_argument1,#$FF
+        mov     invalid_argument2,#$FF
+        mov     underrun_counter,#$00
+        mov     underrun_voice,#$FF
+        mov     underrun_chunk,#$FF
+        mov     underrun_sound_slot,#$FF
+        mov     underrun_stream_end_counter,#$FF
+        mov     transfer_active,#$00
+        mov     a,CPUIO3
+        mov     command_token,a
+        ; libSFX's loader can leave the CPU->SPC and SPC->CPU port-3 latches
+        ; different. Publish the latch we actually sampled before readiness so
+        ; the first CPU command always advances from the same token.
+        mov     CPUIO3,command_token
+        call    !PublishStatus
+
+DriverLoop:
+        call    !HandleVoiceEnds
+        mov     a,CPUIO3
+        cmp     a,command_token
+        beq     DriverLoop
+        mov     command_token,a
+        mov     a,CPUIO0
+        mov     pending_command,a
+        cmp     a,#SOUND_COMMAND_UPLOAD_STREAM
+        bne     :+
+        jmp     !CommandUploadStream
+:
+        cmp     a,#SOUND_COMMAND_UPLOAD_CACHE
+        bne     :+
+        jmp     !CommandUploadCache
+:
+        cmp     a,#SOUND_COMMAND_BEGIN
+        bne     :+
+        jmp     !CommandBegin
+:
+        cmp     a,#SOUND_COMMAND_STOP_ALL
+        bne     :+
+        jmp     !CommandStopAll
+:
+        cmp     a,#SOUND_COMMAND_SYNC
+        bne     :+
+        jmp     !CommandSync
+:
+        cmp     a,#SOUND_COMMAND_CANCEL_STREAM
+        bne     :+
+        jmp     !CommandCancelStream
+:
+        and     a,#SOUND_COMMAND_CLASS_MASK
+        cmp     a,#SOUND_COMMAND_SET_BASE
+        bne     :+
+        jmp     !CommandSetVoice
+:
+        cmp     a,#SOUND_COMMAND_START_BASE
+        bne     :+
+        jmp     !CommandStartVoice
+:
+        cmp     a,#SOUND_COMMAND_STOP_BASE
+        bne     :+
+        jmp     !CommandStopVoice
+:
+        cmp     a,#SOUND_COMMAND_VOLUME_BASE
+        bne     :+
+        jmp     !CommandVolumeVoice
+:
+        or      driver_flags,#SOUND_STATUS_ERROR
+        inc     invalid_command_counter
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandUploadStream:
+        mov     a,CPUIO1
+        cmp     a,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
+        bcc     :+
+        jmp     !CommandInvalid
+:
+        mov     upload_descriptor,a
+        call    !LoadStreamPointer
+        call    !ReceiveChunk
+        mov     x,transfer_descriptor
+        mov     a,#$01
+        mov     !stream_ready+x,a
+        mov     a,#$00
+        mov     !stream_request+x,a
+        inc     transfer_counter
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandUploadCache:
+        mov     a,CPUIO1
+        cmp     a,#BSP_SOUND_CACHE_CHUNK_COUNT
+        bcc     :+
+        jmp     !CommandInvalid
+:
+        mov     upload_descriptor,a
+        call    !LoadCachePointer
+        call    !ReceiveChunk
+        inc     cache_ready_count
+        inc     transfer_counter
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandBegin:
+        cmp     cache_ready_count,#BSP_SOUND_CACHE_CHUNK_COUNT
+        beq     :+
+        jmp     !CommandInvalid
+:
+        and     driver_flags,#($FF-SOUND_STATUS_ERROR)
+        or      driver_flags,#SOUND_STATUS_PLAYING
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandStopAll:
+        DSP_set KOF, #$FF
+        mov     driver_flags,#SOUND_STATUS_READY
+        mov     active_voice_mask,#$00
+        mov     x,#BSP_SOUND_VOICE_COUNT-1
+        mov     a,#$00
+@ClearActive:
+        mov     voice_active+x,a
+        dec     x
+        bpl     @ClearActive
+        mov     x,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT-1
+        mov     request_scan_start,a
+@ClearRequests:
+        mov     !stream_ready+x,a
+        mov     !stream_request+x,a
+        dec     x
+        bpl     @ClearRequests
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandSync:
+        ; Close a packet transfer only after its final status fields are
+        ; published; this keeps packet payload bytes out of CPU status reads.
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandCancelStream:
+        mov     a,CPUIO1
+        cmp     a,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
+        bcc     :+
+        jmp     !CommandInvalid
+:
+        mov     x,a
+        mov     a,#$00
+        mov     !stream_ready+x,a
+        mov     !stream_request+x,a
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandSetVoice:
+        mov     a,pending_command
+        and     a,#SOUND_COMMAND_VOICE_MASK
+        mov     voice_index,a
+        mov     a,CPUIO1
+        cmp     a,#BSP_SOUND_SAMPLE_COUNT
+        bcc     :+
+        jmp     !CommandInvalid
+:
+        mov     sound_slot,a
+        call    !LoadSampleState
+        mov     x,voice_index
+        mov     a,CPUIO2
+        cmp     a,voice_chunk_count+x
+        bcc     :+
+        jmp     !CommandInvalid
+:
+        mov     voice_current_chunk+x,a
+        call    !ConfigureVoiceSource
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandStartVoice:
+        mov     a,pending_command
+        and     a,#SOUND_COMMAND_VOICE_MASK
+        mov     voice_index,a
+        mov     left_volume,CPUIO1
+        mov     right_volume,CPUIO2
+        call    !WriteVoiceVolumes
+        mov     x,voice_index
+        mov     a,#$01
+        mov     voice_active+x,a
+        mov     a,!QuakeSoundVoiceMasks+x
+        mov     end_flags,a
+        or      a,active_voice_mask
+        mov     active_voice_mask,a
+        mov     a,end_flags
+        DSP_set KOF, a
+        DSP_set ENDX, a
+        DSP_set KOF, #$00
+        DSP_set KON, a
+        inc     command_counter
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandStopVoice:
+        mov     a,pending_command
+        and     a,#SOUND_COMMAND_VOICE_MASK
+        mov     voice_index,a
+        call    !StopVoiceState
+        inc     command_counter
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandVolumeVoice:
+        mov     a,pending_command
+        and     a,#SOUND_COMMAND_VOICE_MASK
+        mov     voice_index,a
+        mov     left_volume,CPUIO1
+        mov     right_volume,CPUIO2
+        call    !WriteVoiceVolumes
+        inc     command_counter
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+CommandInvalid:
+        mov     a,pending_command
+        mov     invalid_command,a
+        mov     a,CPUIO1
+        mov     invalid_argument1,a
+        mov     a,CPUIO2
+        mov     invalid_argument2,a
+        or      driver_flags,#SOUND_STATUS_ERROR
+        inc     invalid_command_counter
+        call    !FinishCommand
+        jmp     !DriverLoop
+
+; Initial command acknowledgement enters a fixed packet transfer. While the
+; S-CPU is between bounded slices, keep advancing ended voices without
+; publishing payload status. The final token is acknowledged only after the
+; caller has made the completed cache/stream chunk visible.
+ReceiveChunk:
+        mov     CPUIO3,command_token
+        mov     transfer_active,#$01
+        mov     a,upload_descriptor
+        mov     transfer_descriptor,a
+        mov     a,upload_pointer
+        mov     transfer_pointer,a
+        mov     a,upload_pointer+1
+        mov     transfer_pointer+1,a
+        mov     y,#$00
+        mov     transfer_packets,#<BSP_SOUND_STREAM_CHUNK_PACKETS
+        mov     transfer_packets+1,#>BSP_SOUND_STREAM_CHUNK_PACKETS
+@WaitPacket:
+        mov     a,CPUIO3
+        cmp     a,command_token
+        bne     @PacketReady
+        mov     transfer_offset,y
+        call    !HandleVoiceEnds
+        mov     y,transfer_offset
+        bra     @WaitPacket
+@PacketReady:
+        mov     command_token,a
+        mov     a,CPUIO0
+        mov     [transfer_pointer]+y,a
+        inc     y
+        bne     :+
+        inc     transfer_pointer+1
+:
+        mov     a,CPUIO1
+        mov     [transfer_pointer]+y,a
+        inc     y
+        bne     :+
+        inc     transfer_pointer+1
+:
+        mov     a,CPUIO2
+        mov     [transfer_pointer]+y,a
+        inc     y
+        bne     :+
+        inc     transfer_pointer+1
+:
+        decw    transfer_packets
+        mov     a,transfer_packets
+        or      a,transfer_packets+1
+        beq     @Done
+        mov     CPUIO3,command_token
+        bra     @WaitPacket
+@Done:
+        mov     transfer_active,#$00
+        ret
+
+LoadSampleState:
+        mov     y,sound_slot
+        mov     x,voice_index
+        mov     a,sound_slot
+        mov     voice_sound_slot+x,a
+        mov     a,!QuakeSoundSampleChunkCounts+y
+        mov     voice_chunk_count+x,a
+        mov     a,!QuakeSoundSampleCacheFirst+y
+        mov     voice_cache_first+x,a
+        cmp     a,#$FF
+        beq     :+
+        mov     a,#$01
+        mov     voice_cached+x,a
+        bra     :++
+:
+        mov     a,#$00
+        mov     voice_cached+x,a
+:
+        mov     a,!QuakeSoundSampleFlags+y
+        mov     voice_sample_flags+x,a
+        mov     a,!QuakeSoundSampleLoopChunks+y
+        mov     voice_loop_chunk+x,a
+        mov     a,#$00
+        mov     voice_stream_slot+x,a
+        ret
+
+ConfigureVoiceSource:
+        mov     x,voice_index
+        mov     a,voice_cached+x
+        beq     @Stream
+        mov     a,voice_cache_first+x
+        clrc
+        adc     a,voice_current_chunk+x
+        call    !LoadCachePointer
+        call    !WriteDirectoryStart
+        call    !FollowingRelativeChunk
+        bcs     @CacheFollowing
+        mov     x,voice_index
+        mov     a,voice_current_chunk+x
+@CacheFollowing:
+        mov     x,voice_index
+        clrc
+        adc     a,voice_cache_first+x
+        call    !LoadCachePointer
+        call    !WriteDirectoryLoop
+        bra     @SourceReady
+@Stream:
+        mov     a,voice_index
+        call    !VoiceFirstStreamDescriptor
+        call    !LoadStreamPointer
+        call    !WriteDirectoryStart
+        mov     a,voice_index
+        call    !VoiceFirstStreamDescriptor
+        inc     a
+        call    !LoadStreamPointer
+        call    !WriteDirectoryLoop
+@SourceReady:
+        mov     a,voice_index
+        xcn     a
+        or      a,#V0SRCN
+        mov     DSPADDR,a
+        mov     a,voice_index
+        mov     DSPDATA,a
+        ret
+
+WriteVoiceVolumes:
+        mov     a,voice_index
+        xcn     a
+        mov     dsp_register,a
+        or      a,#V0VOLL
+        mov     DSPADDR,a
+        mov     DSPDATA,left_volume
+        mov     a,dsp_register
+        or      a,#V0VOLR
+        mov     DSPADDR,a
+        mov     DSPDATA,right_volume
+        ret
+
+StopVoiceState:
+        mov     x,voice_index
+        mov     a,!QuakeSoundVoiceMasks+x
+        DSP_set KOF, a
+        eor     a,#$FF
+        and     a,active_voice_mask
+        mov     active_voice_mask,a
+        mov     a,#$00
+        mov     voice_active+x,a
+        mov     a,voice_index
+        call    !VoiceFirstStreamDescriptor
+        mov     upload_descriptor,a
+        mov     y,#BSP_SOUND_STREAM_BUFFER_COUNT
+@ClearVoiceStreams:
+        mov     x,upload_descriptor
+        mov     a,#$00
+        mov     !stream_ready+x,a
+        mov     !stream_request+x,a
+        inc     upload_descriptor
+        dec     y
+        bne     @ClearVoiceStreams
+        ret
+
+HandleVoiceEnds:
+        DSP_get ENDX, a
+        mov     end_flags,a
+        beq     @Return
+        DSP_set ENDX, a
+        mov     voice_index,#$00
+@VoiceLoop:
+        mov     x,voice_index
+        mov     a,!QuakeSoundVoiceMasks+x
+        and     a,end_flags
+        beq     @Next
+        mov     a,voice_active+x
+        beq     @Next
+        call    !AdvanceVoiceChunk
+@Next:
+        inc     voice_index
+        cmp     voice_index,#BSP_SOUND_VOICE_COUNT
+        bne     @VoiceLoop
+        mov     a,transfer_active
+        bne     @Return
+        call    !PublishStatus
+@Return:
+        ret
+
+AdvanceVoiceChunk:
+        inc     stream_end_counter
+        mov     x,voice_index
+        mov     a,voice_current_chunk+x
+        inc     a
+        cmp     a,voice_chunk_count+x
+        bcc     @ChunkReady
+        mov     a,voice_sample_flags+x
+        and     a,#SOUND_SAMPLE_FLAG_LOOP
+        bne     :+
+        jmp     !@NaturalEnd
+:
+        mov     a,voice_loop_chunk+x
+@ChunkReady:
+        mov     voice_current_chunk+x,a
+        mov     a,voice_cached+x
+        beq     @AdvanceStream
+        mov     a,voice_cache_first+x
+        clrc
+        adc     a,voice_current_chunk+x
+        call    !LoadCachePointer
+        ; The DSP already followed this pointer. Publish the following chunk
+        ; before the current 128 ms chunk reaches its END+LOOP block.
+        call    !FollowingRelativeChunk
+        bcc     @CachedNoFollowing
+        mov     x,voice_index
+        clrc
+        adc     a,voice_cache_first+x
+        call    !LoadCachePointer
+        call    !WriteDirectoryLoop
+@CachedNoFollowing:
+        ret
+@AdvanceStream:
+        mov     a,voice_stream_slot+x
+        mov     previous_slot,a
+        inc     a
+        cmp     a,#BSP_SOUND_STREAM_BUFFER_COUNT
+        bcc     :+
+        mov     a,#$00
+:
+        mov     voice_stream_slot+x,a
+        ; The DSP has just followed into this slot. Only now is readiness a
+        ; real underrun condition; the following slot still has one complete
+        ; 128 ms chunk in which the CPU may satisfy its queued refill.
+        mov     current_slot,a
+        mov     a,voice_index
+        call    !VoiceFirstStreamDescriptor
+        clrc
+        adc     a,current_slot
+        mov     x,a
+        mov     a,!stream_ready+x
+        bne     :+
+        or      driver_flags,#SOUND_STATUS_ERROR
+        mov     a,underrun_counter
+        bne     @UnderrunRecorded
+        mov     a,voice_index
+        mov     underrun_voice,a
+        mov     x,voice_index
+        mov     a,voice_current_chunk+x
+        mov     underrun_chunk,a
+        mov     a,voice_sound_slot+x
+        mov     underrun_sound_slot,a
+        mov     a,stream_end_counter
+        mov     underrun_stream_end_counter,a
+@UnderrunRecorded:
+        inc     underrun_counter
+:
+        call    !FollowingRelativeChunk
+        bcc     @StreamFinal
+        mov     x,voice_index
+        mov     a,voice_stream_slot+x
+        inc     a
+        cmp     a,#BSP_SOUND_STREAM_BUFFER_COUNT
+        bcc     :+
+        mov     a,#$00
+:
+        mov     following_slot,a
+        mov     a,voice_index
+        call    !VoiceFirstStreamDescriptor
+        clrc
+        adc     a,following_slot
+        call    !LoadStreamPointer
+        call    !WriteDirectoryLoop
+        mov     a,voice_index
+        call    !VoiceFirstStreamDescriptor
+        clrc
+        adc     a,previous_slot
+        mov     upload_descriptor,a
+        ; Refill this freed ring slot only when the source can reach it again.
+        ; For a one-shot, current+(ring size-1) is the chunk that would occupy
+        ; the slot; suppressing terminal requests avoids permanent stale work.
+        mov     x,voice_index
+        mov     a,voice_sample_flags+x
+        and     a,#SOUND_SAMPLE_FLAG_LOOP
+        bne     @RequestFreedSlot
+        mov     a,voice_current_chunk+x
+        clrc
+        adc     a,#BSP_SOUND_STREAM_BUFFER_COUNT-1
+        cmp     a,voice_chunk_count+x
+        bcs     @StreamFinal
+@RequestFreedSlot:
+        mov     x,upload_descriptor
+        mov     a,#$00
+        mov     !stream_ready+x,a
+        mov     a,#$01
+        mov     !stream_request+x,a
+        inc     stream_request_counter
+@StreamFinal:
+        ret
+@NaturalEnd:
+        inc     natural_end_counter
+        call    !StopVoiceState
+        ret
+
+; Return C=1 and A=following relative chunk, or C=0 for a terminal one-shot.
+FollowingRelativeChunk:
+        mov     x,voice_index
+        mov     a,voice_current_chunk+x
+        inc     a
+        cmp     a,voice_chunk_count+x
+        bcc     @Yes
+        mov     a,voice_sample_flags+x
+        and     a,#SOUND_SAMPLE_FLAG_LOOP
+        beq     @No
+        mov     a,voice_loop_chunk+x
+@Yes:
+        setc
+        ret
+@No:
+        clrc
+        ret
+
+VoiceFirstStreamDescriptor:
+        ; A=voice, return its first descriptor in the generated ring geometry.
+        mov     x,a
+        mov     a,!QuakeSoundVoiceFirstDescriptors+x
+        ret
+
+LoadStreamPointer:
+        asl     a
+        mov     y,a
+        mov     a,!QuakeSoundStreamPointers+y
+        mov     upload_pointer,a
+        inc     y
+        mov     a,!QuakeSoundStreamPointers+y
+        mov     upload_pointer+1,a
+        ret
+
+LoadCachePointer:
+        asl     a
+        mov     y,a
+        mov     a,!QuakeSoundCachePointers+y
+        mov     upload_pointer,a
+        inc     y
+        mov     a,!QuakeSoundCachePointers+y
+        mov     upload_pointer+1,a
+        ret
+
+WriteDirectoryStart:
+        mov     a,voice_index
+        asl     a
+        asl     a
+        mov     y,a
+        mov     a,upload_pointer
+        mov     !QuakeSoundDirectory+y,a
+        inc     y
+        mov     a,upload_pointer+1
+        mov     !QuakeSoundDirectory+y,a
+        ret
+
+WriteDirectoryLoop:
+        mov     a,voice_index
+        asl     a
+        asl     a
+        clrc
+        adc     a,#$02
+        mov     y,a
+        mov     a,upload_pointer
+        mov     !QuakeSoundDirectory+y,a
+        inc     y
+        mov     a,upload_pointer+1
+        mov     !QuakeSoundDirectory+y,a
+        ret
+
+FinishCommand:
+        call    !PublishStatus
+        mov     CPUIO3,command_token
+        ret
+
+PublishStatus:
+        mov     published_request,#SOUND_REQUEST_NONE
+        mov     x,request_scan_start
+        mov     request_scan_count,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
+@FindRequest:
+        mov     a,!stream_request+x
+        beq     @NextRequest
+        mov     published_request,x
+        inc     x
+        cmp     x,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
+        bcc     :+
+        mov     x,#$00
+:
+        mov     request_scan_start,x
+        bra     @RequestReady
+@NextRequest:
+        inc     x
+        cmp     x,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
+        bcc     :+
+        mov     x,#$00
+:
+        dec     request_scan_count
+        bne     @FindRequest
+@RequestReady:
+        mov     a,driver_flags
+        or      a,#BSP_SOUND_PROTOCOL_SIGNATURE
+        mov     CPUIO0,a
+        mov     CPUIO1,published_request
+        mov     CPUIO2,command_counter
+        ret
+
+QuakeSoundVoiceMasks:
+        .byte   $01, $02, $04, $08, $10, $20, $40, $80
+
+QuakeSoundVoiceFirstDescriptors:
+        .repeat BSP_SOUND_VOICE_COUNT, Voice
+        .byte   Voice * BSP_SOUND_STREAM_BUFFER_COUNT
+        .endrepeat
+
+; Field-wise tables keep every hot lookup within one 8-bit index and omit the
+; ROM-only first-chunk word. This is both smaller and faster than multiplying a
+; sound slot by the eight-byte CPU record on the SPC700.
+QuakeSoundSampleChunkCounts:
+        .repeat BSP_SOUND_SAMPLE_COUNT, Index
+        .incbin "Data/QuakeBSPSoundtrackSampleDirectory.bin", Index*8+2, 1
+        .endrepeat
+QuakeSoundSampleCacheFirst:
+        .repeat BSP_SOUND_SAMPLE_COUNT, Index
+        .incbin "Data/QuakeBSPSoundtrackSampleDirectory.bin", Index*8+4, 1
+        .endrepeat
+QuakeSoundSampleFlags:
+        .repeat BSP_SOUND_SAMPLE_COUNT, Index
+        .incbin "Data/QuakeBSPSoundtrackSampleDirectory.bin", Index*8+5, 1
+        .endrepeat
+QuakeSoundSampleLoopChunks:
+        .repeat BSP_SOUND_SAMPLE_COUNT, Index
+        .incbin "Data/QuakeBSPSoundtrackSampleDirectory.bin", Index*8+6, 1
+        .endrepeat
+
+QuakeSoundStreamPointers:
+        .repeat BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT, Index
+        .word   QuakeSoundStreamBuffers + Index*BSP_SOUND_STREAM_CHUNK_BYTES
+        .endrepeat
+
+QuakeSoundCachePointers:
+        .repeat BSP_SOUND_CACHE_CHUNK_COUNT, Index
+        .word   QuakeSoundCache + Index*BSP_SOUND_STREAM_CHUNK_BYTES
+        .endrepeat
+
+.segment "ZEROPAGE"
+command_token:        .res 1
+transfer_active:      .res 1
+transfer_offset:      .res 1
+transfer_descriptor:  .res 1
+pending_command:      .res 1
+driver_flags:         .res 1
+active_voice_mask:    .res 1
+published_request:    .res 1
+command_counter:      .res 1
+transfer_counter:     .res 1
+stream_request_counter: .res 1
+stream_end_counter:   .res 1
+natural_end_counter:  .res 1
+request_scan_start:   .res 1
+request_scan_count:   .res 1
+cache_ready_count:    .res 1
+invalid_command_counter: .res 1
+invalid_command:       .res 1
+invalid_argument1:     .res 1
+invalid_argument2:     .res 1
+underrun_counter:     .res 1
+underrun_voice:       .res 1
+underrun_chunk:       .res 1
+underrun_sound_slot:  .res 1
+underrun_stream_end_counter: .res 1
+voice_index:          .res 1
+sound_slot:           .res 1
+left_volume:          .res 1
+right_volume:         .res 1
+dsp_register:         .res 1
+end_flags:            .res 1
+upload_descriptor:    .res 1
+previous_slot:        .res 1
+following_slot:       .res 1
+current_slot:         .res 1
+upload_pointer:       .res 2
+transfer_pointer:     .res 2
+transfer_packets:     .res 2
+voice_active:         .res BSP_SOUND_VOICE_COUNT
+voice_cached:         .res BSP_SOUND_VOICE_COUNT
+voice_current_chunk:  .res BSP_SOUND_VOICE_COUNT
+voice_chunk_count:    .res BSP_SOUND_VOICE_COUNT
+voice_sound_slot:     .res BSP_SOUND_VOICE_COUNT
+voice_loop_chunk:     .res BSP_SOUND_VOICE_COUNT
+voice_cache_first:    .res BSP_SOUND_VOICE_COUNT
+voice_sample_flags:   .res BSP_SOUND_VOICE_COUNT
+voice_stream_slot:    .res BSP_SOUND_VOICE_COUNT
+
+.segment "SMPRAM"
+stream_ready:
+        .res BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
+stream_request:
+        .res BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
+QuakeSoundStreamBuffers:
+        .res BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT*BSP_SOUND_STREAM_CHUNK_BYTES
+QuakeSoundCache:
+        .res BSP_SOUND_CACHE_CHUNK_COUNT*BSP_SOUND_STREAM_CHUNK_BYTES
+QuakeSoundARAMEnd:
+.assert QuakeSoundARAMEnd <= $FFC0, lderror, "Quake real-time mixer overlaps the SMP IPL ROM"
+.endif

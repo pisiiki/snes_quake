@@ -3,5 +3,5 @@
 *.mp4 binary
 *.png binary
 *.zip binary
-quake106/SLICNSE.TXT binary
-quake106/README.TXT binary
+third_party/quake106/SLICNSE.TXT binary
+third_party/quake106/README.TXT binary

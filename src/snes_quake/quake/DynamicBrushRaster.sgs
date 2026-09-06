@@ -2,7 +2,7 @@
 ; standalone walk deliberately, leaving the state-zero hot kernels untouched.
 
 BRUSH_RASTER_STATE             = BRUSH_STATE + $0040
-BRUSH_RASTER_RETURN            = BRUSH_RASTER_STATE + $00
+BRUSH_RASTER_RETURN            = GSU_BRUSH_RASTER_RETURN_OFFSET
 BRUSH_TOKEN_RETURN             = BRUSH_RASTER_STATE + $02
 BRUSH_TEXTURE_LOAD_RETURN      = BRUSH_RASTER_STATE + $04
 BRUSH_TOKEN_CURSOR             = BRUSH_RASTER_STATE + $06
@@ -35,9 +35,13 @@ BRUSH_FRAGMENT_LOAD_RETURN     = BRUSH_STATE + $88
 BRUSH_CLIP_RETURN              = BRUSH_COORD_RETURN
 
 .assert BRUSH_RASTER_STATE + $40 <= BRUSH_SLOT_TABLE, error, "Brush raster state overlaps slot table"
+.assert BRUSH_RASTER_RETURN = BRUSH_RASTER_STATE, error, "Sky owner probe moved away from the brush raster return"
 
 BrushRenderMixedTokens:
         sm      (BRUSH_RASTER_RETURN), R11
+        ; StageSkyCommand clears this word before every command. Publishing
+        ; the ordinary mixed-walker return therefore doubles as sky ownership
+        ; without another call or flag update in no-sky frames.
         move    R0, #0
         sm      (BRUSH_TOKEN_CURSOR), R0
         iwt     R0, #FACES
@@ -65,12 +69,18 @@ BrushMixedTokenPresent:
         bmi     BrushMixedFragment
         nop
         move    R2, R0
+        iwt     R1, #BRUSH_TOKEN_ALIAS_TAG
+        with    R2
+        and     R1
+        bne     BrushMixedAlias
+        nop
+        move    R2, R0
         iwt     R1, #BRUSH_TOKEN_LEAF_TAG
         with    R2
         and     R1
         bne     BrushMixedLeafMarker
         nop
-        jal     BrushRenderWorldFace
+        jal     BrushTryRenderComposedWorldFace
         nop
         bra     BrushMixedTokenAdvance
         nop
@@ -84,8 +94,21 @@ BrushMixedLeafMarker:
         iwt     R0, #$FFFF
         sm      (BRUSH_WORLD_ACTIVE_TEXTURE), R0
         GSU_ABSOLUTE_GOTO BrushMixedTokenLoop
+BrushMixedAlias:
+        lm      R0, (BRUSH_OVERLAY_FLAGS)
+        move    R1, #BSP_OVERLAY_SKY_DEFER
+        with    R0
+        and     R1
+        bne     BrushMixedTokenAdvance
+        nop
+        jal     AliasRenderBillboard
+        nop
+        iwt     R0, #$FFFF
+        sm      (BRUSH_WORLD_ACTIVE_TEXTURE), R0
+        bra     BrushMixedTokenAdvance
+        nop
 BrushMixedFragment:
-        iwt     R1, #$03FF
+        iwt     R1, #$01FF
         with    R0
         and     R1
         sm      (BRUSH_CURRENT_LINK), R0
@@ -155,32 +178,21 @@ BrushLoadCurrentFragment:
         inc     R10
         inc     R10
         movew   R2, (R10)
-  .repeat 10
+  .repeat 9
         with    R2
         lsr
   .endrepeat
         sm      (BRUSH_CURRENT_SLOT), R2
-        move    R3, R2
-  .repeat 1
-        with    R3
-        add     R3
-  .endrepeat
   .repeat 3
         with    R2
         add     R2
   .endrepeat
-        with    R2
-        add     R3                       ; 10s.
+                                        ; 8s.
         iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ENTITY
         with    R10
         add     R2
         movew   R0, (R10)
         sm      (BRUSH_CURRENT_ENTITY), R0
-        inc     R10
-        inc     R10
-        move    R0, #0
-        moveb   R0, (R10)
-        sm      (BRUSH_CURRENT_INLINE_MODEL), R0
 
         ; Descriptor records are eight-byte aligned and cannot cross banks.
         lm      R0, (BRUSH_CURRENT_FRAGMENT_ID)
@@ -244,17 +256,11 @@ BrushFaceFrontFacing:
         BSP_ROM_LOAD_WORD R10
 
         lm      R2, (BRUSH_CURRENT_SLOT)
-        move    R3, R2
-  .repeat 1
-        with    R3
-        add     R3
-  .endrepeat
   .repeat 3
         with    R2
         add     R2
   .endrepeat
-        with    R2
-        add     R3                       ; 10s.
+                                        ; 8s.
         iwt     R3, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_X_Q3
         with    R3
         add     R2
@@ -356,17 +362,15 @@ BrushRenderWorldFace:
         ; standalone walker does, while leaf/fragment tags leave this cursor
         ; untouched.
         lm      R10, (BRUSH_WORLD_FACE_POINTER)
-        movew   R6, (R10)
-        inc     R10
-        inc     R10
+        jal     LoadPacketFaceFirstIndex
         move    R1, #0
         moveb   R1, (R10)
         sm      (CONVEX_FACE_VERTICES), R1
-        with    R6
-        add     R6
+        with    R0
+        add     R0
         iwt     R10, #INDICES
         with    R10
-        add     R6
+        add     R0
         sm      (CONVEX_INDEX_PTR), R10
         lm      R0, (BRUSH_WORLD_FACE_POINTER)
         with    R0
@@ -425,24 +429,12 @@ BrushWorldTextureReady:
         jal     TextureRenderConvexFaceShaded
         GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
 BrushWorldNotLightmapped:
-        dec     R0
-        beq     BrushWorldAlbedo
-        nop
-        ; After the two decrements, mode 3 is positive while retained affine
-        ; mode 0 is negative. Protected modes 1/2 have already branched away.
-        moves   R0, R0
-        bmi     BrushWorldAffineShaded
-        nop
-        jal     TextureRenderConvexFaceDistance
-        nop
-        GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
-BrushWorldAffineShaded:
-        jal     TextureRenderConvexFaceShaded
-        nop
-        GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
-BrushWorldAlbedo:
         jal     TextureRenderConvexFaceAlbedo
         nop
+        GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
+  .repeat $23 - (* - BrushWorldNotLightmapped)
+        nop
+  .endrepeat
 BrushRenderWorldFaceDone:
         lm      R11, (BRUSH_TOKEN_RETURN)
         ret
@@ -520,20 +512,14 @@ BrushLoadTextureDirectoryReady:
 ; arbiter's register-fed coordinate builder leaves these words intact, which
 ; lets uncontested brush spans tail into the shared direct lightmap kernel.
 BrushSelectTextureSampleRoutine:
-        lm      R2, (TEXTURE_RENDER_MODE)
-        move    R1, #4
-        with    R2
-        cmp     R1
-        bne     BrushSelectTextureSampleRoutineTextured
-        nop
-        iwt     R1, #BrushArbiterSpanUntexturedDistance
-        sm      (TEXTURE_SAMPLE_ROUTINE), R1
-        ret
-        nop
-BrushSelectTextureSampleRoutineTextured:
         ; The ordinary selector has the same flag ABI and publishes the direct
         ; lightmap routes. Tail-call it so both renderers share one contract.
         GSU_ABSOLUTE_GOTO TextureSelectSampleRoutine
+  .repeat GSU_T4_BRUSH_SAMPLE_CAPACITY - (* - BrushSelectTextureSampleRoutine)
+        nop
+  .endrepeat
+BrushSelectTextureSampleRoutineTextured:
+        .res    1
 
 BrushLoadFaceMaterial:
         sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
@@ -545,7 +531,7 @@ BrushLoadFaceMaterial:
         iwt     R4, #BSP_BRUSH_FRAGMENT_FACES_ADDRESS
         with    R4
         add     R0
-        move    R0, #BSP_BRUSH_FRAGMENT_FIRST_BANK
+        move    R0, #BSP_BRUSH_FRAGMENT_FACES_BANK
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_WORD R0
@@ -570,8 +556,9 @@ BrushLoadFaceMaterial:
         ret
         nop
 
-; At most eight visual-state overrides exist, so exact slot/local-face lookup
-; is cheaper than maintaining another per-frame table.
+
+; Inline overrides precede external-BSP overrides. Ordinary brushes stop at
+; that suffix so pickup animation does not lengthen their material lookup.
 BrushResolveTextureOverride:
         sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
         move    R0, #0
@@ -601,6 +588,17 @@ BrushTextureOverridePresent:
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_BYTE R0
         lm      R1, (BRUSH_CURRENT_SLOT)
+        iwt     R2, #BSP_EXTERNAL_BSP_ENTITY_SLOT_FIRST
+        with    R1
+        cmp     R2
+        bcs     BrushTextureOverrideCompareSlot
+        nop
+        move    R3, R0
+        with    R3
+        cmp     R2
+        bcs     BrushResolveTextureOverrideDone
+        nop
+BrushTextureOverrideCompareSlot:
         with    R0
         cmp     R1
         bne     BrushTextureOverrideAdvance
@@ -652,6 +650,7 @@ BrushLoadFaceLightmapDirectory:
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_SIGNED_BYTE R0
+        move    R7, R0
         sm      (LIGHTMAP_ROM_BANK), R0
         BSP_ROM_LOAD_WORD R0
         sm      (LIGHTMAP_ROM_ADDRESS), R0
@@ -663,11 +662,12 @@ BrushLoadFaceLightmapDirectory:
         sm      (LIGHTMAP_MIN_BLOCK_S), R0
         BSP_ROM_LOAD_SIGNED_BYTE R0
         sm      (LIGHTMAP_MIN_BLOCK_T), R0
-        lm      R0, (LIGHTMAP_ROM_BANK)
-        moves   R0, R0
-        bmi     BrushLoadFaceLightmapDone
+        move    R0, R7
+        inc     R0
+        bne     :+
         nop
-        romb
+        GSU_ABSOLUTE_GOTO BrushLoadFaceLightmapDone
+:
         lm      R4, (LIGHTMAP_ROM_ADDRESS)
         GSU_SET_ROM_BUFFER_ADDRESS R4
         lm      R0, (LIGHTMAP_WIDTH)
@@ -697,15 +697,8 @@ BrushLoadLightmapFixedDestination:
         iwt     R10, #GSU_LIGHTMAP_CACHE_OFFSET
 BrushLoadLightmapDestinationReady:
         sm      (LIGHTMAP_ROM_ADDRESS), R10
-        iwt     R5, #$00C0
-        iwt     R13, #BrushLoadLightmapLoop
 BrushLoadLightmapLoop:
-        BSP_ROM_LOAD_BYTE R0
-        with    R0
-        add     R5
-        moveb   (R10), R0
-        inc     R10
-        loop
+        jal     TextureLoadFaceLightmapCache
         nop
         jal     LightmapPublishAdjustedAddress
         nop
@@ -931,49 +924,31 @@ BrushCoordinateZ:
         GSU_ABSOLUTE_GOTO BrushCoordinateSlotPointerZ
 
 BrushCoordinateSlotPointer:
-        move    R3, R2
-  .repeat 1
-        with    R3
-        add     R3
-  .endrepeat
   .repeat 3
         with    R2
         add     R2
   .endrepeat
-        with    R2
-        add     R3                       ; 10s.
+                                        ; 8s.
         iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_X_Q3
         with    R10
         add     R2
         GSU_ABSOLUTE_GOTO BrushCoordinateOriginReady
 BrushCoordinateSlotPointerY:
-        move    R3, R2
-  .repeat 1
-        with    R3
-        add     R3
-  .endrepeat
   .repeat 3
         with    R2
         add     R2
   .endrepeat
-        with    R2
-        add     R3                       ; 10s.
+                                        ; 8s.
         iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_Y_Q3
         with    R10
         add     R2
         GSU_ABSOLUTE_GOTO BrushCoordinateOriginReady
 BrushCoordinateSlotPointerZ:
-        move    R3, R2
-  .repeat 1
-        with    R3
-        add     R3
-  .endrepeat
   .repeat 3
         with    R2
         add     R2
   .endrepeat
-        with    R2
-        add     R3                       ; 10s.
+                                        ; 8s.
         iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_Z_Q3
         with    R10
         add     R2
@@ -1085,32 +1060,22 @@ BrushRasterPreparedPolygon:
         beq     BrushRasterPreparedDone
         nop
         lm      R0, (TEXTURE_RENDER_MODE)
+BrushRasterPreparedLightmap:
         move    R1, #2
         with    R0
         cmp     R1
         beq     BrushRasterPreparedAlbedo
         nop
-        move    R1, #4
-        with    R0
-        cmp     R1
-        beq     BrushRasterPreparedUntexturedDistance
-        nop
-        move    R1, #3
-        with    R0
-        cmp     R1
-        beq     BrushRasterPreparedDistance
-        nop
         jal     TextureRasterPolygonShaded
         nop
         GSU_ABSOLUTE_GOTO BrushRasterPreparedDone
-BrushRasterPreparedDistance:
-        jal     TextureRasterPolygonDistance
+  .repeat GSU_T4_BRUSH_RASTER_CAPACITY - (* - BrushRasterPreparedLightmap)
         nop
-        GSU_ABSOLUTE_GOTO BrushRasterPreparedDone
-BrushRasterPreparedUntexturedDistance:
-        jal     TextureRasterPolygonUntexturedDistance
+  .endrepeat
+BrushRasterPreparedLightmapEnd:
+  .repeat $14
         nop
-        GSU_ABSOLUTE_GOTO BrushRasterPreparedDone
+  .endrepeat
 BrushRasterPreparedAlbedo:
         jal     TextureRasterPolygon
         nop
