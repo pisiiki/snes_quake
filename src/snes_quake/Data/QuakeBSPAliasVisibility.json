@@ -1,0 +1,122 @@
+{
+  "contract": {
+    "deduplication": "exact row payloads use first-occurrence dictionary IDs; source-row lookup remains direct",
+    "depth": "alias origin Q6 depth is strictly nearer than final packed opaque Q6 depth; opaque wins ties",
+    "fastPath": "fully visible tokens have no record; fully hidden tokens skip projection; only partial tokens consume bitmasks",
+    "ordering": "QBA1 far-to-near token order; masks retain that token's opaque destination-texel order",
+    "predecessorReuse": "a hash-bound canonical ORDER 20HZ bitset proves exact equality with the circular preceding presentation",
+    "temporalIdentity": "first-occurrence IDs intern exact painter groups, raster-reachable QBA1 states, and QAV2 row payloads; unreachable dynamic states are excluded"
+  },
+  "disabled": {
+    "brushesEnabled": false,
+    "candidatePixelsInNonvisibleTokens": 133765,
+    "dictionaryBytes": 716,
+    "dictionaryRows": 358,
+    "hiddenTokens": 136,
+    "maskBytes": 16843,
+    "maximumMaskBytesPerRow": 358,
+    "maximumRecordsPerRow": 9,
+    "partialTokens": 1368,
+    "payloadBytes": 11828,
+    "sha256": "9f91d8ec1df4fc6953b7fc3b0f652220cad91a8e70e8be52d6a62558cce7d09f",
+    "temporalIdentity": {
+      "offset": 28672,
+      "recordBytes": 2,
+      "rowCount": 1484,
+      "sha256": "72b8c0f541ce782254647fd1699a44cc2d58f8ec1d13ca31f4178f46b344cee2",
+      "uniqueCount": 519
+    },
+    "usedBytes": 31930,
+    "visiblePixelsInNonvisibleTokens": 90024
+  },
+  "enabled": {
+    "brushesEnabled": true,
+    "candidatePixelsInNonvisibleTokens": 143614,
+    "dictionaryBytes": 736,
+    "dictionaryRows": 368,
+    "hiddenTokens": 284,
+    "maskBytes": 16806,
+    "maximumMaskBytesPerRow": 358,
+    "maximumRecordsPerRow": 10,
+    "partialTokens": 1390,
+    "payloadBytes": 12117,
+    "sha256": "6afad0fd3b29c3a5f5b317e13e765f55691e0609b33b73ff822734f7a553a9bb",
+    "temporalIdentity": {
+      "offset": 28672,
+      "recordBytes": 2,
+      "rowCount": 1484,
+      "sha256": "0838c1964feaecc0776a693830e417a33e000e0b8b50660e8bd4930b1d71c1e4",
+      "uniqueCount": 520
+    },
+    "usedBytes": 31930,
+    "visiblePixelsInNonvisibleTokens": 85588
+  },
+  "format": {
+    "disabledPhysicalHalfbank": 95,
+    "enabledPhysicalHalfbank": 94,
+    "halfbankBytes": 32768,
+    "headerBytes": 56,
+    "hiddenKind": 2,
+    "partialKind": 1,
+    "predecessorReuseOffset": 31744,
+    "predecessorReuseWordBytes": 2,
+    "rowRecordBits": 4,
+    "rowRecordBytes": 2,
+    "temporalIdentityOffset": 28672,
+    "temporalIdentityRecordBytes": 2,
+    "tokenRecordBytes": 4
+  },
+  "identity": {
+    "aliasChunks": [
+      "QuakeBSPAliasRuntime0.bin",
+      "QuakeBSPAliasRuntime1.bin",
+      "QuakeBSPAliasRuntime2.bin",
+      "QuakeBSPAliasRuntime3.bin",
+      "QuakeBSPAliasRuntime4.bin",
+      "QuakeBSPAliasRuntime5.bin",
+      "QuakeBSPAliasRuntime6.bin",
+      "QuakeBSPAliasRuntime7.bin",
+      "QuakeBSPAliasRuntime8.bin",
+      "QuakeBSPAliasRuntime9.bin",
+      "QuakeBSPAliasRuntime10.bin",
+      "QuakeBSPAliasRuntime11.bin",
+      "QuakeBSPAliasRuntime12.bin",
+      "QuakeBSPAliasRuntime13.bin",
+      "QuakeBSPAliasRuntime14.bin",
+      "QuakeBSPAliasRuntime15.bin"
+    ],
+    "aliasPackageFnv1a64": "c15f627e1156d006",
+    "aliasPackageSha256": "536fe454bb241cd3d5576ece4ecdef130e32763535336c0f40f856a9c38f066c",
+    "brushReplaySha256": "b9e501c72cf0473f8d333b562b2c71dca3f8fd83772a2999fee191ba8c190f9d",
+    "cameraFnv1a64": "95da66ea2d68d29a",
+    "fullRateReplaySha256": "cca846e389e2b901e119f0790182422a0aa3005c6a11ca11d33aa11800b50fec",
+    "mapEntry": "maps/e1m3.bsp",
+    "orderedReplaySha256": "d54018cfa36b389d7f3d3dcf4ee25d9e91b69f75377677a7ce5f63e4d0502ba3"
+  },
+  "predecessorReuse": {
+    "bytes": 186,
+    "contract": "circular-previous-pose-logical-indexed8-sha256-v1",
+    "contractSha256": "b80725aa5766bcf7b445285b7493905ee5dbbcf088eca24e19e63ad5edfbbded",
+    "logicalSequenceSha256": "fe8d98c10d29f92e8048cb35754913b633a43210549544504ad920e9ee554976",
+    "offset": 31744,
+    "oracleReportSha256": "1586122a5dc673a35ebbca95d42d9ff4f3a7900ebed3c40409ae2f90b3b9aa20",
+    "poseCount": 1484,
+    "reusablePoseCount": 515,
+    "sha256": "e11e109b033717df4681767712fda81df9127ded98ab5bb6532cfca660b1138d",
+    "wordBytes": 2,
+    "wordCount": 93
+  },
+  "schedule": {
+    "orderedRows": 1484,
+    "poseStride": 1,
+    "sourceRateHz": 20,
+    "sourceRows": 1484,
+    "stepRateHz": 20
+  },
+  "schema": "quake-bsp-alias-visibility-v2",
+  "variant": {
+    "dynamicBrushReplaySupported": true,
+    "enabledCorpus": "reference-brush-aware"
+  },
+  "version": 2
+}

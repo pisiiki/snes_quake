@@ -1,0 +1,166 @@
+; Cold alias-billboard helpers stored in the two hidden 8bpp tile rows.
+;
+; Flat expansion overwrites this tail and the S-CPU restores it together with
+; the textured Q12 phase overlay. Opaque renderers intentionally do not clear
+; the preceding visible framebuffer: closed world coverage is a hard contract.
+
+.segment "GSU_TEXTURE_TAIL_CODE"
+
+; R1=projected half-Q7 edge, R2=source extent, R3=projected half-Q7 span.
+; Return the first pixel-center source index in R4 and its residual in R0.
+; Halving the former even numerator and denominator leaves every DDA decision
+; unchanged while making the largest generated sprite span fit unsigned-16.
+AliasInitializeAxis:
+        move    R0, #32
+        with    R0
+        sub     R1
+        move    R5, #$3F
+        with    R0
+        and     R5
+        with    R0
+        umult   R2
+        move    R4, #0
+AliasInitializeAxisReduce:
+        with    R0
+        cmp     R3
+        bcc     AliasInitializeAxisClamp
+        nop
+        with    R0
+        sub     R3
+        inc     R4
+        bra     AliasInitializeAxisReduce
+        nop
+AliasInitializeAxisClamp:
+        GSU_ABSOLUTE_GOTO AliasInitializeAxisClampCold
+
+; Convert the signed quotient left by ConvexProjectComponent to a full raw
+; pixel bound. R2=+31 for a first bound or -32 for a last bound and R10 names
+; the X/Y axis record. Decompose q=64*a+r before multiplying, so neither the
+; individual 3*q half-Q7 edge nor its rounding addition can overflow signed16:
+; floor((3*q+round)/64) = 3*a + floor((3*r+round)/64).
+AliasEndpointCoordinate:
+        move    R0, R3
+        move    R4, #$3F
+        with    R0
+        and     R4
+        move    R4, R0
+        with    R0
+        add     R0
+        with    R0
+        add     R4
+        with    R0
+        add     R2
+  .repeat 6
+        asr
+  .endrepeat
+        move    R4, R0
+        move    R0, R3
+  .repeat 6
+        asr
+  .endrepeat
+        move    R3, R0
+        with    R0
+        add     R0
+        with    R0
+        add     R3
+        with    R0
+        add     R4
+        iwt     R1, #(ALIAS_X_AXIS + 64)
+        with    R1
+        sub     R10
+        with    R0
+        add     R1
+        ret
+        nop
+
+; Large denominators miss the RAM reciprocal mirror infrequently. Keep their
+; exact bank selection and ROM load cold so the repeated endpoint advance can
+; remain resident in the private math window. These additions follow the
+; existing tail helpers so their instruction-fetch layout remains stable.
+TextureEndpointDivideHotMirrorMissCold:
+        dec     R2
+        move    R0, #GSU_DIVIDE_Q12_RECIPROCAL_FIRST_ROM_BANK
+        move    R1, R2
+        iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ENTRIES_PER_BANK
+TextureEndpointDivideSelectBank:
+        with    R1
+        cmp     R4
+        bcc     TextureEndpointDivideBankReady
+        nop
+        with    R1
+        sub     R4
+        inc     R0
+        bra     TextureEndpointDivideSelectBank
+        nop
+TextureEndpointDivideBankReady:
+        romb
+        move    R2, R1
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS
+        with    R4
+        add     R2
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R12
+        BSP_ROM_LOAD_WORD R13
+        jmp     R10
+        nop
+
+; Cold exits reclaimed from the shared shaded-edge cache. Ordinary fly and
+; specialized playback both enter the same cache-local quotient multiply;
+; only their distinct unity-output ABIs remain separate here.
+TextureDivideQ12EdgeCachedWindowMissCold:
+        iwt     R10, #TextureDivideQ12EdgeLocalCacheFill
+        lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
+        jmp     R13
+        nop
+TextureDivideQ12EdgeLocalCacheFill:
+        movew   (R7), R9
+        inc     R7
+        inc     R7
+        movew   (R7), R12
+        inc     R7
+        inc     R7
+        movew   (R7), R13
+        move    R6, R12
+        GSU_ABSOLUTE_GOTO TextureDivideQ12EdgeLoadedCached
+
+TexturePerspectiveFactorUnityProductsCold:
+        move    R12, R5
+        lm      R7, (TEXTURE_DELTA_DEPTH)
+        move    R1, R7
+        GSU_ABSOLUTE_GOTO TexturePerspectiveFactorProductsReady
+
+TextureShadeIntersectUnityAttributesCold:
+        with    R5
+        add     R7
+        sm      (TEXTURE_EDGE_SHADE), R5
+        lm      R5, (TEXTURE_BASE_S)
+        lm      R0, (TEXTURE_DELTA_S)
+        with    R5
+        add     R0
+        sm      (TEXTURE_EDGE_S), R5
+        lm      R5, (TEXTURE_BASE_T)
+        lm      R0, (TEXTURE_DELTA_T)
+        with    R5
+        add     R0
+        sm      (TEXTURE_EDGE_T), R5
+        GSU_ABSOLUTE_GOTO TextureShadeIntersectScreenX
+
+T4TextureShadeIntersectUnityOutputsCold:
+        with    R5
+        add     R7
+        move    R12, R5
+        lm      R8, (TEXTURE_BASE_S)
+        lm      R0, (TEXTURE_DELTA_S)
+        with    R8
+        add     R0
+        lm      R9, (TEXTURE_BASE_T)
+        lm      R0, (TEXTURE_DELTA_T)
+        with    R9
+        add     R0
+        GSU_ABSOLUTE_GOTO TextureShadeIntersectScreenX
+
+.assert * - AliasInitializeAxis <= GSU_TEXTURE_TAIL_CODE_CAPACITY, error, "Texture-tail GSU helpers exceed hidden scanlines"

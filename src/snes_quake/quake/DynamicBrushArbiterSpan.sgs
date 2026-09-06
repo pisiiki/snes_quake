@@ -359,13 +359,12 @@ BrushArbiterSpanDepthReady:
         bcc     BrushArbiterSpanWinner
         nop
         beq     BrushArbiterSpanDepthTie
-        nop
+        movew   R0, (R2)
         GSU_ABSOLUTE_GOTO BrushArbiterSpanAdvance
 
 BrushArbiterSpanDepthTie:
         ; Near-ordering is only a work heuristic. Equal depth retains the
         ; original metadata authority exactly, independent of visit order.
-        movew   R0, (R2)
         lm      R1, (BRUSH_ARB_CANDIDATE_CURSOR)
         with    R1
         cmp     R0
@@ -396,38 +395,11 @@ BrushArbiterSpanAlbedo:
         color
         GSU_ABSOLUTE_GOTO BrushArbiterSpanPlot
 
-BrushArbiterSpanDistance:
-        ; Technique 3: arbitration already evaluated exact perspective Q6
-        ; depth at this pixel. Map it to a compact Quake colormap row, then
-        ; remap the winning texture index without another perspective divide.
-        ; Reloading the just-written row entry confines this work to mode 3,
-        ; leaving the protected albedo/lightmap winner stream unchanged.
-        move    R12, R0
-        lm      R4, (TEXTURE_SPAN_X)
-        with    R4
-        add     R4
-        iwt     R10, #GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET
-        with    R10
-        add     R4
-        movew   R4, (R10)
-        with    R4
-        hib
-        iwt     R10, #GSU_TEXTURE_DEPTH_SHADE_OFFSET
-        with    R10
-        add     R4
-        move    R0, #0
-        moveb   R0, (R10)
-        with    R0
-        swap
-        with    R0
-        add     R12
-        iwt     R10, #GSU_TEXTURE_COLORMAP_OFFSET
-        with    R10
-        add     R0
-        move    R0, #0
-        moveb   R0, (R10)
-        color
-        GSU_ABSOLUTE_GOTO BrushArbiterSpanPlot
+; Keep later technique-4 overlay windows stable after deleting an obsolete
+; winner-compositor slot.
+.repeat $2B
+        nop
+.endrepeat
 
 BrushArbiterSpanLightmapped:
         ; Technique 4: reconstruct the exact lightmap result from the same
@@ -458,7 +430,6 @@ BrushArbiterSpanAdvance:
         with    R0
         cmp     R1
         beq     BrushArbiterSpanDone
-        nop
         inc     R0
         sm      (TEXTURE_SPAN_X), R0
 

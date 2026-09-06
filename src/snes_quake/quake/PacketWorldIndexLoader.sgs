@@ -1,0 +1,32 @@
+; Admission passes only need the source index. This cache-setting decoder is
+; placed in the spare tail of the face-loop window so the hotter projection
+; path can keep its split-stream decode straight-line.
+        .align  GSU_CACHE_LINE_BYTES
+PacketLoadWorldIndex:
+        cache
+        lm      R1, (PACKET_INDEX_CURSOR)
+        iwt     R2, #$4000
+        move    R0, R1
+        with    R0
+        cmp     R2
+        bcc     PacketPublicIndexBank0
+        nop
+        with    R1
+        sub     R2
+        move    R0, #WORLD_INDICES1_ROM_BANK
+        bra     PacketPublicIndexBankReady
+        nop
+PacketPublicIndexBank0:
+        move    R0, #WORLD_INDICES0_ROM_BANK
+PacketPublicIndexBankReady:
+        romb
+        with    R1
+        add     R1
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (PACKET_SOURCE_INDEX), R0
+        ret
+        nop

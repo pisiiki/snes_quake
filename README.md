@@ -1,124 +1,119 @@
-# SNES Quake
+# SNES Quake 0.0.2
 
-This repository builds SNES Quake, a BSP software renderer for
-[Super FX 3](https://github.com/LimitedRunGames-Tech/snes-fx3). It contains the
-renderer source, its reproducible asset pipeline, and the tools required to
-build the ROM. It is a renderer demonstration, not a complete Quake port.
+Explore Quake's **E1M3: The Necropolis** through a software renderer for
+[Super FX 3](https://github.com/LimitedRunGames-Tech/snes-fx3). Replay the
+shareware demo, explore with the fly camera, and switch between textures,
+lightmaps, or both from the runtime menu.
 
-[License](LICENSE) | [Third-party notices](THIRD_PARTY.md)
+This is a renderer demonstration, not a complete Quake game port.
+[Build the ROM from source](docs/BUILDING.md) on Windows or Linux.
 
-## Renderer
-
-- Preprocesses BSP geometry, visibility, textures, and lightmaps.
-- Uses the BSP tree and precomputed visibility to select the visible world.
-- Rasterizes span-based textured polygons and lightmaps on Super FX 3.
-- Renders dynamic brush models such as doors and buttons.
-- Presents a 128x112 8bpp framebuffer as crisp 2x pixels at 256x224.
-- Provides real-time replay and an interactive fly camera with a settings menu.
-
-## Performance
-
-The resulting ROM sustains **1.904 fresh FPS** with textures, lightmaps,
-and dynamic brushes enabled across the complete 149-view fixed-step benchmark:
-148 new presentations in 4,671 emulated NTSC PPU frames. All 2,136,064 output
-pixels match the independent C++ reference renderer.
-
-In a separate equal-duration, 480-PPU-frame realtime window:
-
-| Dynamic brushes | Fresh presentations | Fresh FPS |
-| :--- | ---: | ---: |
-| On | 15 | **1.878** |
-| Off (world only) | 19 | **2.379** |
-
-Fresh FPS counts newly completed framebuffers per emulated SNES second;
-repeated display frames do not count. Emulator fast-forward changes wall-clock
-test time, not these emulated results. The benchmark's 2 Hz sampling selects
-camera poses; it is not the renderer frame rate.
-
-## Screenshots
-
-| ![SNES Quake runtime settings menu over the rendered scene](media/snes-quake-menu.png) | ![SNES Quake rendering textures and lightmaps](media/snes-quake-textures-lightmaps.png) |
-| :---: | :---: |
-| **Runtime menu** | **Textures + lightmaps** |
-| ![SNES Quake rendering the per-pixel distance gradient without textures](media/snes-quake-distance-only.png) | ![SNES Quake rendering the neutral lightmap gradient without textures](media/snes-quake-lightmaps-only.png) |
-| **Distance shading only** | **Lightmaps only** |
-
-## Agentic development
-
-This codebase was generated and refined through agentic programming with
-Codex 5.6 Sol. A human directed the goals, reviewed the results, and selected
-the next experiments. Rather than producing the project in one pass, Codex
-inspected the repository, edited code and tooling, built ROMs, ran repeatable
-tests, measured the results, and committed small validated changes.
-
-A custom-instrumented Mesen provides programmatic emulator control,
-deterministic replay, framebuffer capture, memory inspection, and performance
-telemetry. A C++ reference renderer supplies the ground truth for deterministic
-demo frames and rendering behavior. Optimizations are developed iteratively
-and retained only when they improve measured performance while preserving
-reference-renderer parity; they must also remain useful to the interactive fly
-camera rather than serving only the fixed-step benchmark.
-
-## Build the ROM
-
-The ROM is not included in this repository; generate it locally with either
-build script. Both scripts initialize the pinned libSFX and cc65 submodules,
-extract `ID1/PAK0.PAK`, generate the ROM assets, and assemble the program.
-Python 3.10+ and Git are required on both platforms.
-
-On Ubuntu, install the native compiler, GNU Make, and libarchive `bsdtar`, then
-run the Linux entry point:
-
-```sh
-sudo apt update
-sudo apt install build-essential git libarchive-tools python3
-git clone <repository-url>
-cd <repository-directory>
-sh ./build.sh
-```
-
-On Windows 10/11, install MSYS2 UCRT64 with GNU Make and a C compiler, then run:
-
-```powershell
-git clone <repository-url>
-cd <repository-directory>
-./build.ps1
-```
-
-The finished ROM is `src/snes_quake/quake.sfc`. Verify an existing build
-without rebuilding it with `sh ./build.sh --check` on Linux or
-`./build.ps1 -Check` on Windows.
-
-## Run the ROM
-
-FX3 requires a recent
-[MesenCE development build](https://github.com/nesdev-org/MesenCE#development-builds),
-based on commit
-[`c49fbb0`](https://github.com/nesdev-org/MesenCE/commit/c49fbb0461f87881789ca4252cbb374b8957a2e1)
-or newer. Stable MesenCE 2.2.1 predates reliable FX3 support and is not
-compatible with this ROM.
-
-## Controls
-
-- **Start** opens the settings menu; Up/Down selects an option, Left/Right or
-  A changes it, and B or Start applies the settings and closes the menu.
-- Select `PLAYBACK FLY` for the interactive camera. The D-pad looks around,
-  X/B moves forward/back, and Y/A strafes left/right.
-- **L/R** moves to the previous/next monster viewpoint. With the menu closed,
-  **Select** cycles the rendering technique.
+[Build](docs/BUILDING.md) · [Video](#video) ·
+[Screenshots](#screenshots) · [Run](#run-the-rom) · [Controls](#controls) ·
+[Limitations](#known-limitations) · [License](LICENSE)
 
 ## Video
 
-https://github.com/user-attachments/assets/30bd3a2d-66cb-4b12-97ed-a99220570a58
+https://github.com/user-attachments/assets/f81515b4-ee59-49ed-8862-65d98dfe2881
 
-[Download the repository copy (MP4)](media/quake-bsp-realtime-3x.mp4).
+## Screenshots
+
+Three views of E1M3: the hall, an interior encounter, and the ending area with
+sky and fiends. Each row shows the same scene in three rendering modes.
+Native Mesen captures show 128×112 rendering presented at 256×224.
+
+| Textures + lightmaps | Textures only | Lightmaps only |
+| :---: | :---: | :---: |
+| ![SNES Quake e1m3 hall, textures + lightmaps](docs/media/snes-quake-hall-textures-lightmaps.png) | ![SNES Quake e1m3 hall, textures only](docs/media/snes-quake-hall-textures-only.png) | ![SNES Quake e1m3 hall, lightmaps only](docs/media/snes-quake-hall-lightmaps-only.png) |
+| **E1M3 hall: Textures + lightmaps** | **E1M3 hall: Textures only** | **E1M3 hall: Lightmaps only** |
+| ![SNES Quake rendering textures and lightmaps](docs/media/snes-quake-textures-lightmaps.png) | ![SNES Quake rendering textures without lightmaps](docs/media/snes-quake-textures-only.png) | ![SNES Quake rendering the neutral lightmap gradient without textures](docs/media/snes-quake-lightmaps-only.png) |
+| **Textures + lightmaps** | **Textures only** | **Lightmaps only** |
+| ![SNES Quake e1m3 ending with sky and fiends, textures + lightmaps](docs/media/snes-quake-ending-textures-lightmaps.png) | ![SNES Quake e1m3 ending with sky and fiends, textures only](docs/media/snes-quake-ending-textures-only.png) | ![SNES Quake e1m3 ending with sky and fiends, lightmaps only](docs/media/snes-quake-ending-lightmaps-only.png) |
+| **E1M3 ending with sky and fiends: Textures + lightmaps** | **E1M3 ending with sky and fiends: Textures only** | **E1M3 ending with sky and fiends: Lightmaps only** |
+
+| Runtime menu |
+| :---: |
+| ![SNES Quake runtime settings menu over the rendered scene](docs/media/snes-quake-menu.png) |
+| **Runtime menu** |
+
+## Reference renderer
+
+The desktop reference tool displays the source geometry and lighting, with
+playback, rendering, sound and timeline controls. These captures show the same
+hall and interior moments as the SNES gallery, with textures, lighting, moving
+level objects, monsters and items enabled.
+
+**C++ reference: E1M3 hall**
+
+![C++ reference: E1M3 hall, with playback and rendering controls](docs/media/reference-quake-hall.png)
+
+**C++ reference: E1M3 interior**
+
+![C++ reference: E1M3 interior, with playback and rendering controls](docs/media/reference-quake-interior.png)
+
+[Build and use the reference renderer](docs/REFERENCE_RENDERER.md).
+
+## Current renderer
+
+- Quake's original colors, textures and lighting
+- Animated skies and liquids, plus moving doors, lifts and other level objects in demo and fly modes
+- Detailed monster and item images, rotating weapon pickups, and sprite effects
+- During demo playback, monsters, pickups and sprite effects are hidden correctly behind walls and moving doors
+- Native SNES sound synchronized with realtime demo playback
+- Realtime demo playback, step-by-step playback for comparisons, and a fly camera for exploring the level
+- A runtime menu for rendering, playback, level objects, monsters and items, colors, and sound
+
+## Performance
+
+**Default realtime demo playback: 2.374 fresh FPS.**
+This counts newly rendered images with textures, lighting, moving level objects,
+monsters, items and sound enabled. Playback stays on time by skipping scene
+updates when rendering cannot keep up.
+[Measurements and benchmark details](docs/PERFORMANCE.md).
+
+## Run the ROM
+
+[Build from source](docs/BUILDING.md) to produce `out/snes_quake/quake.sfc`.
+
+Requires the current **MesenCE development build**. Download it for
+[Windows, Linux or macOS](https://github.com/nesdev-org/MesenCE#development-builds),
+then open `quake.sfc` in the emulator.
+
+## Controls
+
+| Input | Action |
+| --- | --- |
+| **Start** | Open the runtime menu; apply changes and close it. |
+| **Up/Down** in the menu | Select a setting. |
+| **Left/Right** or **A** in the menu | Change the selected setting. |
+| **B** in the menu | Apply settings and close the menu. |
+| **Select**, menu closed | Cycle the three rendering modes. |
+| **D-pad**, `PLAYBACK FLY` | Look around. |
+| **X/B**, fly mode | Move forward/back. |
+| **Y/A**, fly mode | Strafe left/right. |
+| **L/R**, fly mode | Previous/next monster viewpoint. |
+
+## Known limitations
+
+- This is a renderer demonstration, not a complete Quake game port.
+- The included content path is the shareware demo1.dem on maps/e1m3.bsp; gameplay, AI, save games, networking, and the Quake console are not implemented.
+- Rendering is 128x112 indexed color presented at 256x224, so detail and frame rate vary substantially with scene complexity.
+- Interactive fly mode is a development camera and does not provide Quake movement or collision semantics.
+- In fly mode, sprites can appear through doors and other inline brush models.
+
+## Development
+
+The project is developed with human direction and Codex-assisted programming.
+An instrumented Mesen and the C++ reference renderer provide repeatable rendering
+checks and performance measurements. See [release notes](docs/RELEASE_NOTES.md)
+and [build information](docs/BUILD_INFO.json).
 
 ## License
 
-The independently authored source code, tooling, and documentation are
-available under the [MIT License](LICENSE). Third-party software and material
-retain their own terms; see [THIRD_PARTY.md](THIRD_PARTY.md) for the precise
-scope and attributions.
+Original source code, tooling and documentation use the [MIT License](LICENSE).
+Quake assets, images, video and third-party dependencies retain their own terms;
+see [third-party notices](docs/THIRD_PARTY.md). This unofficial project is not
+affiliated with or endorsed by id Software.
 
 ## Support
 

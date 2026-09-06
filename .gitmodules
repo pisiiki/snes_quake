@@ -1,3 +1,12 @@
-[submodule "libSFX"]
-	path = libSFX
+[submodule "third_party/libSFX"]
+	path = third_party/libSFX
 	url = https://github.com/Optiroc/libSFX.git
+[submodule "third_party/ericw-tools"]
+	path = third_party/ericw-tools
+	url = https://github.com/ericwa/ericw-tools.git
+[submodule "third_party/quake-map-source"]
+	path = third_party/quake-map-source
+	url = https://github.com/Jason2Brownlee/QuakeOfficialArchive.git
+[submodule "third_party/vcpkg"]
+	path = third_party/vcpkg
+	url = https://github.com/microsoft/vcpkg.git

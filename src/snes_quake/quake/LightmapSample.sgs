@@ -1,0 +1,242 @@
+; Lightmap sample kernel extracted to keep each authored source below the
+; repository's 2,048-line hard limit. It is included at its original address.
+
+; Bilinearly sample the current face's precombined 6-bit light grid. Absolute
+; Q4 texture coordinates provide a signed block byte plus a four-bit fraction.
+; Return the compact cartridge-RAM colormap row in R0. A negative fast mode
+; proves the complete projective block stays inside the lightmap bounds.
+LightmapSample:
+        ; R7 is not needed until the lower sample address is formed. Preserve
+        ; the call return there instead of spilling it to cartridge RAM.
+        move    R7, R11
+        lm      R0, (LIGHTMAP_BLOCK_FAST)
+        moves   R0, R0
+        beq     LightmapSampleGenericChecked
+        nop
+        bmi     LightmapSampleGenericInterior
+        nop
+        dec     R0
+        beq     LightmapSampleBlockBilinear
+        nop
+        GSU_ABSOLUTE_GOTO LightmapSampleCachedDegenerate
+TexturePrimeLightmapCache:
+        cache
+        ret
+        nop
+LightmapSampleGenericChecked:
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bpl     LightmapSampleGenericClamped
+        nop
+        GSU_ABSOLUTE_GOTO LightmapSampleMissing
+LightmapSampleGenericInterior:
+        GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect, shared_delay
+        with    R8
+        nop
+LightmapSampleBlockBilinear:
+        move    R3, R8
+        iwt     R1, #$00F0
+        GSU_ABSOLUTE_GOTO LightmapSampleBlockBilinearCached
+  .repeat $11 - (* - LightmapSampleBlockBilinear)
+        nop
+  .endrepeat
+LightmapSampleGenericClamped:
+        move    R6, #0
+LightmapSampleGenericDecode:
+        move    R5, R8
+        move    R0, R5
+        with    R0
+        hib
+        with    R0
+        sex
+        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
+        with    R0
+        sub     R1
+        move    R8, R0
+        moves   R6, R6
+        bne     LightmapSampleSInterior
+        nop
+        moves   R0, R0
+        bmi     LightmapSampleSLow
+        nop
+        lm      R1, (LIGHTMAP_WIDTH)
+        dec     R1
+        move    R2, R0
+        with    R2
+        sub     R1
+        bmi     LightmapSampleSInterior
+        nop
+        move    R8, R1
+        move    R3, #0
+        bra     LightmapSampleT
+        nop
+LightmapSampleSLow:
+        move    R8, #0
+        move    R3, #0
+        bra     LightmapSampleT
+        nop
+LightmapSampleSInterior:
+        move    R3, R5
+        iwt     R1, #$00F0
+        with    R3
+        and     R1
+LightmapSampleT:
+        move    R5, R9
+        move    R0, R5
+        with    R0
+        hib
+        with    R0
+        sex
+        ; Preserve the S-fraction mask in R1 for the proven-interior route.
+        ; Checked coordinates reload R1 below before their clamp comparison.
+        lm      R4, (LIGHTMAP_MIN_BLOCK_T)
+        with    R0
+        sub     R4
+        moves   R6, R6
+        bne     LightmapSampleTFastInterior
+        with    R5
+        moves   R0, R0
+        bmi     LightmapSampleTLow
+        nop
+        lm      R1, (LIGHTMAP_HEIGHT)
+        dec     R1
+        move    R2, R0
+        with    R2
+        sub     R1
+        bmi     LightmapSampleTInterior
+        nop
+        move    R0, R1
+        move    R5, #0
+        bra     LightmapSampleOffsets
+        nop
+LightmapSampleTLow:
+        move    R0, #0
+        move    R5, #0
+        bra     LightmapSampleOffsets
+        nop
+LightmapSampleTInterior:
+        iwt     R1, #$00F0
+        with    R5
+LightmapSampleTFastInterior:
+        and     R1
+LightmapSampleOffsets:
+        lm      R1, (LIGHTMAP_WIDTH)
+        with    R0
+        umult   R1
+        with    R0
+        add     R8
+        move    R6, R0                  ; upper-left byte offset
+LightmapSampleHorizontalReady:
+        cache
+        lm      R4, (LIGHTMAP_ROM_ADDRESS)
+        bra     LightmapSampleBaseReady
+        nop
+LightmapSampleAdjustedHorizontalReady:
+        lm      R4, (LIGHTMAP_ADJUSTED_ADDRESS)
+LightmapSampleBaseReady:
+        with    R4
+        add     R6
+        move    R8, #0
+        moveb   R8, (R4)
+        moves   R3, R3
+        beq     LightmapSampleUpperRightSame
+        inc     R4
+        move    R9, #0
+        moveb   R9, (R4)
+        bra     LightmapSampleUpperReady
+        dec     R4
+LightmapSampleUpperRightSame:
+        dec     R4
+        move    R9, R8
+LightmapSampleUpperReady:
+        ; R6 can become the lower-row offset once both upper samples are
+        ; consumed. This leaves R7 untouched as the register-held return.
+        moves   R5, R5
+        beq     LightmapSampleLowerSame
+        with    R4
+        add     R1
+        move    R6, #0
+        moveb   R6, (R4)
+        moves   R3, R3
+        beq     LightmapSampleLowerRightSame
+        inc     R4
+        move    R11, #0
+        moveb   R11, (R4)
+        bra     LightmapSampleLowerReady
+        nop
+LightmapSampleLowerRightSame:
+        move    R11, R6
+        bra     LightmapSampleLowerReady
+        nop
+LightmapSampleLowerSame:
+        move    R6, R8
+        move    R11, R9
+LightmapSampleLowerReady:
+        ; Keep the Q4 fractions as Q8 weights: F=f*16.  For F!=0, -F's
+        ; unsigned low byte is exactly 256-F.  HIB then performs the same
+        ; rounded /256 as the former weighted /16 interpolation.
+        iwt     R2, #128
+        moves   R3, R3
+        beq     LightmapSampleHorizontalZero
+        nop
+        move    R1, #0
+        with    R1
+        sub     R3
+        move    R4, R8
+        with    R4
+        umult   R1
+        move    R0, R9
+        with    R0
+        umult   R3
+        with    R4
+        add     R0
+        with    R4
+        add     R2
+        with    R4
+        hib
+        with    R6
+        umult   R1
+        move    R0, R11
+        with    R0
+        umult   R3
+        with    R6
+        add     R0
+        with    R6
+        add     R2
+        with    R6
+        hib
+        bra     LightmapSampleHorizontalInterpolated
+        with    R5
+LightmapSampleHorizontalZero:
+        move    R4, R8
+        with    R5
+LightmapSampleHorizontalInterpolated:
+        from    R5
+        beq     LightmapSampleMap
+        nop
+        move    R1, #0
+        with    R1
+        sub     R5
+        move    R0, R4
+        with    R0
+        umult   R1
+        move    R4, R6
+        with    R4
+        umult   R5
+        with    R4
+        add     R0
+        with    R4
+        add     R2
+        with    R4
+        hib
+LightmapSampleMap:
+        bra     LightmapSampleDone
+        with    R7
+LightmapSampleMissing:
+        lm      R4, (LIGHTMAP_ROM_ADDRESS)
+        with    R7
+LightmapSampleDone:
+        to      R11
+        ret
+        nop
+        nop

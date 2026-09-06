@@ -2,32 +2,30 @@
 set -eu
 
 usage() {
-    echo "usage: sh ./build.sh [--check] [--assets-only] [--python COMMAND]" >&2
+    echo "usage: sh ./build.sh [--check] [--assets-only] [--qualified-assets] [--python COMMAND]" >&2
 }
 
 check=false
 assets_only=false
+qualified_assets=false
 python="${PYTHON:-python3}"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --check) check=true; shift ;;
         --assets-only) assets_only=true; shift ;;
-        --python)
-            [ "$#" -ge 2 ] || { usage; exit 2; }
-            python=$2
-            shift 2
-            ;;
+        --qualified-assets) qualified_assets=true; shift ;;
+        --python) [ "$#" -ge 2 ] || { usage; exit 2; }; python=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) usage; exit 2 ;;
     esac
 done
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-lib_sfx="$root/libSFX"
+lib_sfx="$root/third_party/libSFX"
 cc65="$lib_sfx/tools/cc65"
-release_tool="$root/src/snes_quake/tools/build_quake_release.py"
+release_tool="$root/tools/commands/snes_quake/build_quake_release.py"
 
-for command in git make "$python"; do
+for command in git make cmake ninja "$python"; do
     command -v "$command" >/dev/null 2>&1 || {
         echo "error: required command not found: $command" >&2
         exit 2
@@ -40,7 +38,7 @@ if [ -z "$bsdtar" ]; then
 fi
 
 if [ -e "$root/.git" ]; then
-    git -C "$root" submodule update --init libSFX
+    git -C "$root" submodule update --init third_party/libSFX third_party/ericw-tools third_party/quake-map-source third_party/vcpkg
 fi
 git -C "$lib_sfx" submodule update --init tools/cc65
 
@@ -59,4 +57,5 @@ fi
 set -- "$release_tool" --release-root "$root" --tar "$bsdtar"
 [ "$check" = false ] || set -- "$@" --check
 [ "$assets_only" = false ] || set -- "$@" --assets-only
+[ "$qualified_assets" = false ] || set -- "$@" --qualified-assets
 "$python" "$@"

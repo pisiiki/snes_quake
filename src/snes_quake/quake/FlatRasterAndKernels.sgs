@@ -1,7 +1,8 @@
 ; Keep the dominant interior decoder inside the lightmap interpolation cache
 ; window. The technique-0/1 flat loop occupies this routine's former cold slot.
 LightmapSampleInteriorDirect:
-        move    R3, R8
+        ; Both entries establish this source prefix in their jump slot.
+        to      R3
         with    R8
         hib
         with    R8
@@ -24,8 +25,11 @@ LightmapSampleInteriorDirect:
         with    R8
         add     R9
         move    R6, R8
-        GSU_ABSOLUTE_GOTO LightmapSampleAdjustedHorizontalReady
-  .repeat 2
+        ; This is the adjusted sampler's sole entry. R15 already names the
+        ; target while its delay executes, so CACHE sees the same cache line.
+        GSU_ABSOLUTE_GOTO LightmapSampleAdjustedHorizontalReady, shared_delay
+        cache
+  .repeat 3
         nop
   .endrepeat
 
@@ -47,18 +51,17 @@ TextureSampleAbsolutePowerOfTwoSingleBankRegisters:
         and     R1
         lm      R12, (TEXTURE_STEP_SHADE_Q8)
         jmp     R12
-        nop
+        with    R6
 TextureSamplePowerOfTwoRowShift3:
-        with    R6
         add     R6
+        with    R6
 TextureSamplePowerOfTwoRowShift2:
-        with    R6
         add     R6
+        with    R6
 TextureSamplePowerOfTwoRowShift1:
-        with    R6
         add     R6
-TextureSamplePowerOfTwoRowReady:
         with    R6
+TextureSamplePowerOfTwoRowReady:
         add     R5
         lm      R4, (TEXTURE_ROM_ADDRESS)
         with    R4
@@ -70,27 +73,27 @@ TextureSamplePowerOfTwoRowReady:
         getb
         ret
         nop
+        nop
 
 TextureLightmapInteriorSpanLoop:
         move    R8, R5
         move    R9, R6
         jal     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
         move    R12, R0
-        GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect
+        GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect, shared_delay
+        with    R8
 
 ; Put the repeated coordinate DDA first so its complete loop fits in the
 ; lightmap sampler's active cache window.
-TextureBuildCoordinateLoop:
         with    R5
+TextureBuildCoordinateLoop:
         add     R7
         with    R1
         add     R9
-        move    R0, R1
-        with    R0
-        sub     R3
         bmi     TextureBuildCoordinateSReady
-        nop
-        move    R1, R0
+        inc     R10
+        with    R1
+        sub     R3
         with    R5
         add     R4
 TextureBuildCoordinateSReady:
@@ -98,12 +101,10 @@ TextureBuildCoordinateSReady:
         add     R8
         with    R2
         add     R13
-        move    R0, R2
-        with    R0
-        sub     R3
         bmi     TextureBuildCoordinateTReady
-        nop
-        move    R2, R0
+        inc     R10
+        with    R2
+        sub     R3
         with    R6
         add     R11
 TextureBuildCoordinateTReady:
@@ -111,16 +112,17 @@ TextureBuildCoordinateTReady:
         inc     R10
         inc     R10
         movew   (R10), R6
-        inc     R10
-        inc     R10
         dec     R12
         bne     TextureBuildCoordinateLoop
-        nop
+        with    R5
+        inc     R10
+        inc     R10
 TextureBuildCoordinateDone:
         iwt     R0, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
         sm      (TEXTURE_COORD_PTR), R0
         lm      R11, (TEXTURE_COORD_RETURN)
         ret
+        nop
         nop
 
 ; The setup entries below used this 100-byte cold slot. Relocating them to
@@ -134,7 +136,7 @@ TextureDivideQ12HotMirrorStart:
         ; R2 is the one-based denominator. Comparing against one past the
         ; mirror and biasing its base by one entry avoids forming d-1 on every
         ; hit; only the uncommon ROM fallback needs the zero-based index.
-        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_ENTRIES+1
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES+1
         with    R2
         cmp     R4
         bcs     TextureDivideQ12HotMirrorMissCached
@@ -342,10 +344,8 @@ ConvexDistanceAxisReady:
         lm      R0, (CONVEX_PLANE)
         moves   R0, R0
         beq     ConvexDistanceAdd
-        nop
         dec     R0
         beq     ConvexDistanceSubtract
-        nop
         dec     R0
         beq     ConvexDistanceSubtract
         nop
@@ -752,8 +752,13 @@ ConvexProjectReturn:
 GSU_CACHE_KERNEL_END ConvexProjectPolygon
 
 ; R1=signed Q6 component, R2=positive Q6 depth. Return signed Q7 screen
-; delta in R0. Eleven quotient bits make focal*Q7 exactly quotient*6.
+; delta in R0 and its signed quotient in R3. The ordinary entry preserves the
+; historic +/-depth saturation used by convex faces. Coherent alias endpoints
+; set R4 nonzero and enter after that mode initializer; their rectangle-level
+; same-side classification makes the unsaturated quotient safe and necessary.
 ConvexProjectComponent:
+        move    R4, #0
+ConvexProjectComponentUnsaturated:
         move    R0, #0
         sm      (CONVEX_CUR_INSIDE), R0
         moves   R1, R1
@@ -766,24 +771,19 @@ ConvexProjectComponent:
         move    R0, #1
         sm      (CONVEX_CUR_INSIDE), R0
 ConvexProjectMagnitudeReady:
-        moves   R2, R2
-        bpl     ConvexProjectDepthPositive
+        ; Every caller supplies a post-near-clip positive depth. R4 selects
+        ; only whether the already-classified alias endpoint bypasses the
+        ; ordinary component clamp.
+        moves   R4, R4
+        bne     ConvexProjectDivide
         nop
-        move    R2, #1
-        bra     ConvexProjectDepthReady
-        nop
-ConvexProjectDepthPositive:
-        bne     ConvexProjectDepthReady
-        nop
-        move    R2, #1
-ConvexProjectDepthReady:
         move    R0, R1
         with    R0
         cmp     R2
         bcc     ConvexProjectDivide
         nop
         iwt     R3, #2048
-        bra     ConvexProjectScale
+        bra     ConvexProjectSignedQuotient
         nop
 ConvexProjectDivide:
         move    R0, R1
@@ -798,6 +798,15 @@ ConvexProjectDivide:
         move    R11, R7
         with    R3
         lsr
+ConvexProjectSignedQuotient:
+        lm      R1, (CONVEX_CUR_INSIDE)
+        moves   R1, R1
+        beq     ConvexProjectScale
+        nop
+        move    R1, #0
+        with    R1
+        sub     R3
+        move    R3, R1
 ConvexProjectScale:
         move    R0, R3
         with    R0
@@ -809,14 +818,6 @@ ConvexProjectScale:
         add     R1                       ; 4q
         with    R0
         add     R1                       ; 6q
-        lm      R1, (CONVEX_CUR_INSIDE)
-        moves   R1, R1
-        beq     ConvexProjectComponentDone
-        nop
-        move    R1, #0
-        with    R1
-        sub     R0
-        move    R0, R1
 ConvexProjectComponentDone:
         ret
         nop
@@ -953,9 +954,9 @@ ConvexRasterXOrderReady:
         sm      (CONVEX_MAX_X), R0
 ConvexRasterXBoundsReady:
         lm      R1, (CONVEX_MIN_X)
-        iwt     R0, #62
+        iwt     R0, #59
         with    R1
-        add     R0                     ; ceil((min - 65) / 128)
+        add     R0                     ; ceil((min - 68) / 128)
   .repeat 7
         with    R1
         asr
@@ -966,9 +967,9 @@ ConvexRasterXBoundsReady:
         move    R1, #0
 ConvexRasterFirstReady:
         lm      R3, (CONVEX_MAX_X)
-        iwt     R0, #63
+        iwt     R0, #60
         with    R3
-        sub     R0                     ; floor((max - 63) / 128)
+        sub     R0                     ; floor((max - 60) / 128)
   .repeat 7
         with    R3
         asr
@@ -995,7 +996,6 @@ ConvexRasterNextRow:
         with    R0
         cmp     R1
         beq     ConvexRasterDone
-        nop
         inc     R0
         sm      (CONVEX_RASTER_Y), R0
         GSU_ABSOLUTE_GOTO ConvexRasterRowLoop
@@ -1189,6 +1189,7 @@ ExpandColumnLoop:
 ; by eight bytes; the caller skips the first tile's remaining high-plane bytes
 ; after the second call.
 ExpandFourRows:
+        sm      (EXPAND_FOUR_RETURN), R11
         move    R6, R7
         move    R0, #16
         with    R6
@@ -1204,27 +1205,8 @@ ExpandLowPlaneRowsLoop:
         moveb   R5, (R7)
         inc     R7
 
-        iwt     R10, #GSU_EXPAND_LEFT_OFFSET
-        with    R10
-        add     R4
-        move    R0, #0
-        moveb   R0, (R10)
-        iwt     R10, #GSU_EXPAND_RIGHT_OFFSET
-        with    R10
-        add     R4
-        move    R2, #0
-        moveb   R2, (R10)
-
-        iwt     R10, #GSU_EXPAND_LEFT_OFFSET
-        with    R10
-        add     R5
-        move    R1, #0
-        moveb   R1, (R10)
-        iwt     R10, #GSU_EXPAND_RIGHT_OFFSET
-        with    R10
-        add     R5
-        move    R3, #0
-        moveb   R3, (R10)
+        jal     ExpandPlanePair
+        nop
 
         moveb   (R8), R0
         inc     R8
@@ -1256,27 +1238,8 @@ ExpandHighPlaneRowsLoop:
         moveb   R5, (R6)
         inc     R6
 
-        iwt     R10, #GSU_EXPAND_LEFT_OFFSET
-        with    R10
-        add     R4
-        move    R0, #0
-        moveb   R0, (R10)
-        iwt     R10, #GSU_EXPAND_RIGHT_OFFSET
-        with    R10
-        add     R4
-        move    R2, #0
-        moveb   R2, (R10)
-
-        iwt     R10, #GSU_EXPAND_LEFT_OFFSET
-        with    R10
-        add     R5
-        move    R1, #0
-        moveb   R1, (R10)
-        iwt     R10, #GSU_EXPAND_RIGHT_OFFSET
-        with    R10
-        add     R5
-        move    R3, #0
-        moveb   R3, (R10)
+        jal     ExpandPlanePair
+        nop
 
         moveb   (R8), R0
         inc     R8
@@ -1298,6 +1261,49 @@ ExpandHighPlaneRowsLoop:
         loop
         nop
 
+        lm      R11, (EXPAND_FOUR_RETURN)
+        ret
+        nop
+
+; Expand the high and low nibbles of two plane bytes. Sharing this cache-local
+; helper across the low/high plane loops keeps the compact 16-byte lookup from
+; duplicating its nibble extraction code.
+ExpandPlanePair:
+        move    R0, R4
+  .repeat 4
+        with    R0
+        lsr
+  .endrepeat
+        iwt     R10, #GSU_EXPAND_NIBBLE_OFFSET
+        with    R10
+        add     R0
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R4
+        and     #$0F
+        iwt     R10, #GSU_EXPAND_NIBBLE_OFFSET
+        with    R10
+        add     R4
+        move    R2, #0
+        moveb   R2, (R10)
+
+        move    R1, R5
+  .repeat 4
+        with    R1
+        lsr
+  .endrepeat
+        iwt     R10, #GSU_EXPAND_NIBBLE_OFFSET
+        with    R10
+        add     R1
+        move    R1, #0
+        moveb   R1, (R10)
+        with    R5
+        and     #$0F
+        iwt     R10, #GSU_EXPAND_NIBBLE_OFFSET
+        with    R10
+        add     R5
+        move    R3, #0
+        moveb   R3, (R10)
         ret
         nop
 GSU_CACHE_KERNEL_END ExpandFrame
@@ -1328,13 +1334,17 @@ Next:
 ; reciprocals: the latter denominator varies for every perspective sample.
 TexturePrepareDivideQ12:
         iwt     R10, #TexturePrepareDivideQ12Ready
-        GSU_ABSOLUTE_GOTO TextureDivideQ12Lookup
+        lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
+        jmp     R13
+        nop
 
 TextureDivideQ12:
         move    R8, R0                  ; numerator
         move    R9, R2                  ; denominator
-        iwt     R10, #TextureDivideQ12LoadedCached
-        GSU_ABSOLUTE_GOTO TextureDivideQ12Lookup
+        lm      R10, (TEXTURE_Q12_LOADED_ROUTINE)
+        lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
+        jmp     R13
+        nop
   .repeat $32 - (* - TexturePrepareDivideQ12)
         nop
   .endrepeat
@@ -1373,17 +1383,27 @@ TexturePrepareDivideQ12Ready:
         ret
         nop
 
-        ; The prepared route now occupies a cold gap immediately before the
-        ; cached multiply prefix. Preserve the correction and every later
-        ; cache-kernel address after removing its former 15-byte trampoline.
-  .repeat 18
+        ; Face-granular composed routing consumes this retired trampoline gap;
+        ; cache kernels below remain independently line-aligned.
+  .repeat 0
         nop
   .endrepeat
-        ; The exact correction now runs beside the cached reciprocal multiply.
-        ; Preserve TextureDivideUnsigned and every later cache-kernel address.
-  .repeat 22
+        ; Keep the sky ROM thunk in this unreachable reserve. Turbulence uses
+        ; the bounded bank-$70 raster-phase overlay directly, avoiding two
+        ; cross-bank jumps per liquid pixel.
+SkyMarkerSampler:
+        ; LJMP's bank operand is restricted to R8-R13. All admitted sampler
+        ; callers either document R12 as volatile or replace it immediately;
+        ; mode 4 is rejected before publishing this route.
+        iwt     R4, #.loword(SkyMarkerSamplerROM)
+        move    R12, #$02
+        from    R4
+        ljmp    R12
+        nop
+  .repeat 14 - (* - SkyMarkerSampler)
         nop
   .endrepeat
+.assert * - SkyMarkerSampler = 14, error, "Sky marker thunk changed the retired reserve footprint"
 
 .macro TEXTURE_DIVIDE_UNSIGNED_STEP
         .local Next
@@ -1627,19 +1647,8 @@ LightmapPrepareStartTInterior:
 ; Technique 2 streams Q4 S/T in R5/R6. Translate the face-selected sampler
 ; once, then tail-call the unchanged convex renderer with its original return.
 TextureRenderConvexFaceAlbedo:
-        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
-        iwt     R1, #TextureSampleAbsolutePowerOfTwoSingleBankRegisters
-        with    R0
-        cmp     R1
-        bne     TextureRenderConvexFaceAlbedoGeneric
-        nop
-        iwt     R0, #TextureSampleAbsolutePowerOfTwoSingleBankRegisters
-        bra     TextureRenderConvexFaceAlbedoSamplerReady
-        nop
 TextureRenderConvexFaceAlbedoGeneric:
-        iwt     R0, #TextureSampleAbsoluteRegisters
 TextureRenderConvexFaceAlbedoSamplerReady:
-        sm      (TEXTURE_SAMPLE_ROUTINE), R0
         iwt     R13, #TextureRenderConvexFace
         jmp     R13
         nop
@@ -1661,13 +1670,13 @@ TextureSelectSampleRoutine:
         move    R2, #BSP_WORLD_TEXTURE_FLAG_POWER_OF_TWO_AXES | BSP_WORLD_TEXTURE_FLAG_SINGLE_BANK
         with    R0
         cmp     R2
-        bne     TextureSelectSampleRoutineDone
+        bne     TextureSelectSampleRoutineWidthMismatch
         nop
         lm      R0, (TEXTURE_WIDTH)
         lm      R1, (TEXTURE_HEIGHT)
         with    R0
         cmp     R1
-        bne     TextureSelectSampleRoutineDone
+        bne     TextureSelectSampleRoutineWidthMismatch
         nop
         iwt     R2, #256
         with    R0
@@ -1726,11 +1735,27 @@ TextureSelectSampleRowRoutineReady:
         jmp     R10
         nop
 
-; Preserve the independent flat/albedo renderer layout after relocating hot
-; technique-4 helpers.
-        .repeat 13
+; Generated special flags and the unequal-axis sky route through one cold ROM
+; selector. Ordinary square textures retain the bank-$70 fast path above.
+TextureSelectSampleRoutineWidthMismatch:
+        move    R9, #$02
+        iwt     R8, #.loword(SkySelectSampleRoutineROM)
+        from    R8
+        ljmp    R9
+        nop
+
+; Both possible outer owners use one stable thunk.  The ROM handler tests the
+; command-cleared/mixed-published brush return to select the exact saved path.
+SkyOwnerReturn:
+        move    R9, #$02
+        iwt     R8, #.loword(SkyOwnerReturnROM)
+        from    R8
+        ljmp    R9
+        nop
+        .repeat 13 - (* - SkyOwnerReturn)
         nop
         .endrepeat
+.assert * - SkyOwnerReturn = 13, error, "Sky owner thunk changed the retired reserve footprint"
 
 ; Technique-0/1 flat rendering is cold while the lightmapped path runs.
 RenderFaces:
@@ -1759,11 +1784,9 @@ FacesPresent:
 FaceLoop:
 FaceVisible:
         lm      R10, (FACE_POINTER)
-        movew   R0, (R10)               ; First index, in uint16 elements.
-        move    R6, R0
-        with    R10
-        add     #2
+        jal     LoadPacketFaceFirstIndex ; First index, in uint16 elements.
         move    R1, #0
+        move    R6, R0
         moveb   R1, (R10)
         sm      (CONVEX_FACE_VERTICES), R1
 

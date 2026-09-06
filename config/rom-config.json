@@ -1,0 +1,82 @@
+{
+  "schema": "quake-snes-rom-build-v1",
+  "bspBuild": {
+    "source": "ericw-map",
+    "mapEntry": "maps/e1m3.bsp",
+    "mapSource": {
+      "repository": "https://github.com/Jason2Brownlee/QuakeOfficialArchive.git",
+      "commit": "30c29bd5907fd999b0bb8e52c941ef770b4d3ba8",
+      "archive": "bin/quake_map_source.zip",
+      "member": "e1m3.map"
+    },
+    "tools": {
+      "repository": "https://github.com/ericwa/ericw-tools.git",
+      "commit": "8b70fce25558f2662ebee0855c12d35fe21e7beb",
+      "patch": "patches/vendor/ericw-tools/deterministic-lightmap-subdivision.patch",
+      "profile": "ericw-nosubdivide-world-area512-model-area256-chop-tjunc-rotate-notranswater",
+      "qbspFlags": [
+        "-quiet",
+        "-nolog",
+        "-leaktest",
+        "-nosubdivide",
+        "-subdividearea",
+        "512",
+        "-subdivideareamodel",
+        "256",
+        "-tjunc",
+        "rotate",
+        "-chop",
+        "-notranswater"
+      ],
+      "visFlags": [
+        "-quiet",
+        "-nostate"
+      ],
+      "lightFlags": [
+        "-quiet"
+      ],
+      "mapThreads": 1
+    },
+    "limits": {
+      "worldLightmapSamples": 512,
+      "inlineModelLightmapSamples": 256
+    },
+    "vcpkg": {
+      "repository": "https://github.com/microsoft/vcpkg.git",
+      "commit": "9e593bb18ea69cc5095e012465dcd675a822ed0d",
+      "packages": [
+        "embree",
+        "tbb"
+      ],
+      "requiredCmakeConfigs": [
+        "share/embree/embree-config.cmake",
+        "share/tbb/TBBConfig.cmake"
+      ]
+    }
+  },
+  "mesenTarget": "mesence-nightly",
+  "demo": {
+    "source": "pak",
+    "path": "demo1.dem"
+  },
+  "playback": {
+    "sampleRateHz": 20
+  },
+  "aliasSprites": {
+    "halfbankCount": 17,
+    "mdlWorldUnitsPerTexel": 1.7
+  },
+  "externalBsp": {
+    "enabled": true,
+    "visibilityProfile": "profiles/external-bsp-visibility.json",
+    "directSafetyProfile": "profiles/brush-direct-safety.json"
+  },
+  "sound": {
+    "enabled": true,
+    "sampleRateHz": 8000,
+    "volume": 0.7
+  },
+  "sky": {
+    "enabled": true
+  }
+}

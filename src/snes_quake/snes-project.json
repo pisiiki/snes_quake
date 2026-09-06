@@ -1,0 +1,8 @@
+{
+  "assetGenerator": "../../tools/commands/snes_quake/generate_snes_example_assets.py",
+  "buildDirectory": "../../out/snes_quake/build",
+  "cacheKernelManifest": "../../config/GSUCacheKernels.json",
+  "libsfxBuildDirectory": "../../out/snes_quake/build_libsfx",
+  "outputDirectory": "../../out/snes_quake",
+  "schema": "snes-example-project-v1"
+}

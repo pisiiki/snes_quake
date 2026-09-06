@@ -9,16 +9,16 @@ RUNTIME_MENU_ROW_PLAYBACK = 1
 RUNTIME_MENU_ROW_TEXTURES = 2
 RUNTIME_MENU_ROW_LIGHTING = 3
 RUNTIME_MENU_ROW_BRUSHES  = 4
-RUNTIME_MENU_ROW_TEMPORAL = 5
+RUNTIME_MENU_ROW_ENTITIES = 5
 RUNTIME_MENU_ROW_RESTART  = 6
 RUNTIME_MENU_ROW_COUNT    = 7
-RUNTIME_MENU_COLUMNS      = 18
-RUNTIME_MENU_VALUE_COLUMN = 10
-RUNTIME_MENU_VALUE_BYTES  = 8
-RUNTIME_MENU_VALUE_X_SHIFT = 8
-RUNTIME_MENU_BRUSH_VALUE_COLUMN = 11
-RUNTIME_MENU_BRUSH_VALUE_BYTES = RUNTIME_MENU_COLUMNS - RUNTIME_MENU_BRUSH_VALUE_COLUMN
-RUNTIME_MENU_X            = 56
+RUNTIME_MENU_COLUMNS      = 14
+RUNTIME_MENU_VALUE_COLUMN = 8
+RUNTIME_MENU_VALUE_BYTES  = 6
+RUNTIME_MENU_PLAYBACK_VALUE_COLUMN = 4
+RUNTIME_MENU_PLAYBACK_VALUE_BYTES  = 10
+RUNTIME_MENU_PLAYBACK_RECORD_BYTES = 16
+RUNTIME_MENU_X            = 72
 RUNTIME_MENU_Y            = 72
 RUNTIME_MENU_ENTRY_BYTES  = 4
 RUNTIME_MENU_ROW_BYTES    = RUNTIME_MENU_COLUMNS * RUNTIME_MENU_ENTRY_BYTES
@@ -29,37 +29,42 @@ RUNTIME_MENU_COLOR_WINDOW_OPEN   = $00 ; permit fixed-black math everywhere
 RUNTIME_MENU_COLOR_WINDOW_CLOSED = $30 ; LibSFX idle state: prevent math
 RUNTIME_MENU_TILE_SPACE   = .lobyte(RUNTIME_MENU_TILE_BASE)
 RUNTIME_MENU_TILE_CURSOR  = .lobyte(RUNTIME_MENU_TILE_BASE + (62 - RUNTIME_MENU_ASCII_FIRST))
-RUNTIME_MENU_PLAYBACK_ORDERED  = 0
-RUNTIME_MENU_PLAYBACK_REALTIME = 1
-RUNTIME_MENU_PLAYBACK_FLY      = 2
-RUNTIME_MENU_PLAYBACK_HALF     = 3
-RUNTIME_MENU_PLAYBACK_QUARTER  = 4
-RUNTIME_MENU_PLAYBACK_COUNT    = 5
+RUNTIME_MENU_PLAYBACK_ORDERED_2HZ  = 0
+RUNTIME_MENU_PLAYBACK_REALTIME     = 1
+RUNTIME_MENU_PLAYBACK_FLY          = 2
+RUNTIME_MENU_PLAYBACK_HALF         = 3
+RUNTIME_MENU_PLAYBACK_QUARTER      = 4
+RUNTIME_MENU_PLAYBACK_ORDERED_20HZ = 5
+RUNTIME_MENU_PLAYBACK_COUNT        = 6
 DEMO_PLAYBACK_RATE_REALTIME    = 0
 DEMO_PLAYBACK_RATE_HALF        = 1
 DEMO_PLAYBACK_RATE_QUARTER     = 2
 RUNTIME_MENU_LIGHTING_NONE     = 0
-RUNTIME_MENU_LIGHTING_DISTANCE = 1
-RUNTIME_MENU_LIGHTING_LIGHTMAP = 2
-RUNTIME_MENU_TEXTURED_BASE     = 2
-RUNTIME_MENU_UNTEXTURED_BASE   = 5
-RUNTIME_MENU_TECHNIQUE_COUNT   = 8
+RUNTIME_MENU_LIGHTING_LIGHTMAP = 1
+RUNTIME_MENU_TEXTURES_OFF       = 0
+RUNTIME_MENU_TEXTURES_ON        = 1
+RUNTIME_MENU_TEXTURES_COUNT     = 2
+RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE = 2
+RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP = BSP_TECHNIQUE_TEXTURED_LIGHTMAP
+RUNTIME_MENU_TECHNIQUE_UNTEXTURED_LIGHTMAP = BSP_TECHNIQUE_UNTEXTURED_LIGHTMAP
 CAMERA_PITCH_MIN               = $FFF8 ; -8 * 11.25 degrees = -90
 CAMERA_PITCH_MAX               = $0008 ; +8 * 11.25 degrees = +90
 CAMERA_FORWARD_SCALE_ROUND     = $0010
 
-BOOT_PARAMETERS_VERSION       = $0002
-BOOT_PARAMETERS_SIZE          = $0012
+BOOT_PARAMETERS_VERSION       = $0004
+BOOT_PARAMETERS_SIZE          = $0018
 BOOT_PARAMETERS_REQUEST_LO    = $4251 ; "QB"
-BOOT_PARAMETERS_REQUEST_HI    = $3250 ; "P2"
-BOOT_PARAMETERS_ACK_HI        = $3241 ; "A2"
-BOOT_PARAMETERS_ERROR_HI      = $3245 ; "E2"
+BOOT_PARAMETERS_REQUEST_HI    = $3450 ; "P4"
+BOOT_PARAMETERS_ACK_HI        = $3441 ; "A4"
+BOOT_PARAMETERS_ERROR_HI      = $3445 ; "E4"
 BOOT_PARAMETERS_PRESENT_PLAYBACK = $0001
 BOOT_PARAMETERS_PRESENT_TECHNIQUE = $0002
 BOOT_PARAMETERS_PRESENT_BRUSHES = $0004
 BOOT_PARAMETERS_PRESENT_FIXED_STEP_SAMPLE = $0008
 BOOT_PARAMETERS_PRESENT_COVERAGE = $0010
-BOOT_PARAMETERS_PRESENT_ALL   = $001F
+BOOT_PARAMETERS_PRESENT_ORDERED_SOURCE_POSE = $0020
+BOOT_PARAMETERS_PRESENT_ORDERED_STRIDE = $0040
+BOOT_PARAMETERS_PRESENT_ALL   = $007F
 BOOT_PARAMETERS_STATUS_APPLIED = $01
 BOOT_PARAMETERS_ERROR_HEADER  = $E1
 BOOT_PARAMETERS_ERROR_MASK    = $E2
@@ -68,17 +73,21 @@ BOOT_PARAMETERS_ERROR_TECHNIQUE = $E4
 BOOT_PARAMETERS_ERROR_BRUSHES = $E5
 BOOT_PARAMETERS_ERROR_FIXED_STEP_SAMPLE = $E6
 BOOT_PARAMETERS_ERROR_COVERAGE = $E7
+BOOT_PARAMETERS_ERROR_ORDERED_SOURCE_POSE = $E8
+BOOT_PARAMETERS_ERROR_ORDERED_STRIDE = $E9
 
 .assert RUNTIME_MENU_USED_ENTRIES <= 128, error, "Runtime menu exceeds SNES OAM capacity"
 .assert RUNTIME_MENU_COLUMNS <= 32, error, "Runtime menu exceeds the per-scanline OBJ limit"
-.assert RUNTIME_MENU_BRUSH_VALUE_COLUMN + RUNTIME_MENU_BRUSH_VALUE_BYTES = RUNTIME_MENU_COLUMNS, error, "Dynamic-brush value must end at the menu edge"
+.assert RUNTIME_MENU_VALUE_COLUMN + RUNTIME_MENU_VALUE_BYTES = RUNTIME_MENU_COLUMNS, error, "Runtime-menu values must end at the menu edge"
+.assert RUNTIME_MENU_PLAYBACK_VALUE_COLUMN + RUNTIME_MENU_PLAYBACK_VALUE_BYTES = RUNTIME_MENU_COLUMNS, error, "Runtime-menu playback value must end at the menu edge"
+.assert RUNTIME_MENU_PLAYBACK_RECORD_BYTES = 16, error, "Runtime-menu playback records must retain shift indexing"
 .assert BOOT_PARAMETERS_SIZE = GSU_BOOT_PARAMETERS_BYTES, error, "Boot parameter ABI size disagrees with cartridge RAM"
 
 ; Consume an optional one-shot host request before the first render. The host
-; writes offsets 4..17 while Mesen is paused at power-on and commits the magic
+; writes offsets 4..23 while Mesen is paused at power-on and commits the magic
 ; at offsets 0..3 last. Validation is a separate pass, so malformed requests
 ; leave the normal startup defaults untouched. Status is published before the
-; high acknowledgement word changes the request into "QBA2" or "QBE2".
+; high acknowledgement word changes the request into "QBA4" or "QBE4".
 ApplyBootParameters:
         RW_forced a16i16
         lda     f:GSU_BOOT_PARAMETERS+0
@@ -102,7 +111,7 @@ ApplyBootParameters:
         jmp     BootParametersErrorHeader
 :
         lda     f:GSU_BOOT_PARAMETERS+10
-        and     #$FFE0
+        and     #$FF80
         beq     :+
         jmp     BootParametersErrorMask
 :
@@ -122,8 +131,12 @@ BootParametersValidateTechnique:
         beq     BootParametersValidateBrushes
         lda     f:GSU_BOOT_PARAMETERS+13
         and     #$00FF
-        cmp     #RUNTIME_MENU_TECHNIQUE_COUNT
-        bcc     :+
+        cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE
+        beq     :+
+        cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP
+        beq     :+
+        cmp     #RUNTIME_MENU_TECHNIQUE_UNTEXTURED_LIGHTMAP
+        beq     :+
         jmp     BootParametersErrorTechnique
 :
 BootParametersValidateBrushes:
@@ -146,6 +159,8 @@ BootParametersValidateFixedStepSample:
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
         beq     :+
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        beq     :+
         jmp     BootParametersErrorFixedStepSample
 :
         lda     f:GSU_BOOT_PARAMETERS+15
@@ -157,12 +172,68 @@ BootParametersValidateFixedStepSample:
 BootParametersValidateCoverage:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_COVERAGE
-        beq     BootParametersApplyPlayback
+        beq     BootParametersValidateOrderedSourcePose
         lda     f:GSU_BOOT_PARAMETERS+16
         and     #$00FF
         cmp     #$0003
-        bcc     BootParametersApplyPlayback
+        bcc     BootParametersValidateOrderedSourcePose
         jmp     BootParametersErrorCoverage
+
+BootParametersValidateOrderedSourcePose:
+        lda     f:GSU_BOOT_PARAMETERS+10
+        and     #BOOT_PARAMETERS_PRESENT_ORDERED_SOURCE_POSE
+        beq     BootParametersValidateOrderedStride
+        lda     f:GSU_BOOT_PARAMETERS+10
+        and     #BOOT_PARAMETERS_PRESENT_FIXED_STEP_SAMPLE
+        beq     @ValidateSourcePlayback
+        jmp     BootParametersErrorOrderedSourcePose
+@ValidateSourcePlayback:
+        lda     f:GSU_BOOT_PARAMETERS+10
+        and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
+        beq     @ValidateSourceRange
+        lda     f:GSU_BOOT_PARAMETERS+12
+        and     #$00FF
+        beq     @ValidateSourceRange
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        beq     @ValidateSourceRange
+        jmp     BootParametersErrorOrderedSourcePose
+@ValidateSourceRange:
+        lda     f:GSU_BOOT_PARAMETERS+18
+        cmp     #BSP_DEMO_PRECISE_TRACK_POSE_COUNT
+        bcc     BootParametersValidateOrderedStride
+        jmp     BootParametersErrorOrderedSourcePose
+
+BootParametersValidateOrderedStride:
+        lda     f:GSU_BOOT_PARAMETERS+10
+        and     #BOOT_PARAMETERS_PRESENT_ORDERED_STRIDE
+        beq     BootParametersApplyPlayback
+        lda     f:GSU_BOOT_PARAMETERS+10
+        and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
+        beq     @ValidateStrideValue
+        lda     f:GSU_BOOT_PARAMETERS+12
+        and     #$00FF
+        beq     @ValidateStrideValue
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        beq     @ValidateStrideValue
+        jmp     BootParametersErrorOrderedStride
+@ValidateStrideValue:
+        lda     f:GSU_BOOT_PARAMETERS+17
+        and     #$00FF
+        cmp     #$0001
+        beq     BootParametersApplyPlayback
+        cmp     #BSP_DEMO_ORDERED_POSE_STRIDE
+        beq     :+
+        jmp     BootParametersErrorOrderedStride
+:
+        ; The explicit 20 Hz mode cannot be contradicted by a 2 Hz stride.
+        lda     f:GSU_BOOT_PARAMETERS+10
+        and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
+        beq     BootParametersApplyPlayback
+        lda     f:GSU_BOOT_PARAMETERS+12
+        and     #$00FF
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        bne     BootParametersApplyPlayback
+        jmp     BootParametersErrorOrderedStride
 
 BootParametersApplyPlayback:
         lda     f:GSU_BOOT_PARAMETERS+10
@@ -171,6 +242,8 @@ BootParametersApplyPlayback:
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
         sta     runtime_menu_draft_playback
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        beq     BootParametersPlaybackOrdered20Hz
         cmp     #RUNTIME_MENU_PLAYBACK_REALTIME
         beq     BootParametersPlaybackRealtime
         cmp     #RUNTIME_MENU_PLAYBACK_FLY
@@ -179,6 +252,13 @@ BootParametersApplyPlayback:
         beq     BootParametersPlaybackHalf
         cmp     #RUNTIME_MENU_PLAYBACK_QUARTER
         beq     BootParametersPlaybackQuarter
+        lda     #BSP_DEMO_ORDERED_POSE_STRIDE
+        sta     demo_ordered_pose_stride
+        bra     BootParametersPlaybackOrdered
+BootParametersPlaybackOrdered20Hz:
+        lda     #$0001
+        sta     demo_ordered_pose_stride
+BootParametersPlaybackOrdered:
         lda     #$0001
         sta     demo_mode
         stz     demo_schedule
@@ -191,6 +271,7 @@ BootParametersPlaybackRealtime:
         stz     demo_playback_rate_shift
         bra     BootParametersApplyTechnique
 BootParametersPlaybackFly:
+        jsr     EnsureFlyAliasCode
         stz     demo_mode
         stz     demo_schedule
         stz     demo_playback_rate_shift
@@ -222,6 +303,7 @@ BootParametersApplyBrushes:
         beq     BootParametersApplyFixedStepSample
         lda     f:GSU_BOOT_PARAMETERS+14
         and     #$00FF
+        and     #BSP_BRUSH_DYNAMIC_REPLAY_SUPPORTED
         sta     dynamic_brushes_enabled
         sta     runtime_menu_draft_brushes
 
@@ -237,16 +319,31 @@ BootParametersApplyFixedStepSample:
 BootParametersApplyCoverage:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_COVERAGE
-        beq     BootParametersPublishApplied
+        beq     BootParametersApplyOrderedSourcePose
         lda     f:GSU_BOOT_PARAMETERS+16
         and     #$00FF
         sta     coverage_debug
 
+BootParametersApplyOrderedSourcePose:
+        lda     f:GSU_BOOT_PARAMETERS+10
+        and     #BOOT_PARAMETERS_PRESENT_ORDERED_SOURCE_POSE
+        beq     BootParametersApplyOrderedStride
+        lda     f:GSU_BOOT_PARAMETERS+18
+        inc
+        sta     boot_ordered_source_pose
+
+BootParametersApplyOrderedStride:
+        lda     f:GSU_BOOT_PARAMETERS+10
+        and     #BOOT_PARAMETERS_PRESENT_ORDERED_STRIDE
+        beq     BootParametersPublishApplied
+        lda     f:GSU_BOOT_PARAMETERS+17
+        and     #$00FF
+        sta     demo_ordered_pose_stride
+
 BootParametersPublishApplied:
-        jsr     SyncRuntimeMenuDrafts
         RW      a8
         lda     #BOOT_PARAMETERS_STATUS_APPLIED
-        sta     f:GSU_BOOT_PARAMETERS+17
+        sta     f:GSU_BOOT_PARAMETERS+23
         RW      a16
         lda     #BOOT_PARAMETERS_ACK_HI
         sta     f:GSU_BOOT_PARAMETERS+2
@@ -272,9 +369,16 @@ BootParametersErrorFixedStepSample:
         bra     BootParametersPublishError
 BootParametersErrorCoverage:
         lda     #BOOT_PARAMETERS_ERROR_COVERAGE
+        bra     BootParametersPublishError
+BootParametersErrorOrderedSourcePose:
+        lda     #BOOT_PARAMETERS_ERROR_ORDERED_SOURCE_POSE
+        bra     BootParametersPublishError
+BootParametersErrorOrderedStride:
+        lda     #BOOT_PARAMETERS_ERROR_ORDERED_STRIDE
+        bra     BootParametersPublishError
 BootParametersPublishError:
         RW      a8
-        sta     f:GSU_BOOT_PARAMETERS+17
+        sta     f:GSU_BOOT_PARAMETERS+23
         RW      a16
         lda     #BOOT_PARAMETERS_ERROR_HI
         sta     f:GSU_BOOT_PARAMETERS+2
@@ -282,22 +386,43 @@ BootParametersDone:
         RW_forced a16i16
         rts
 
-; Seed an ordered 2 Hz restart at a host-selected sample. The one-based field
-; distinguishes sample zero from an omitted request and is consumed once.
-ApplyBootFixedStepSample:
+; Seed an ordered restart at either an exact source row or a 2 Hz sample. The
+; one-based fields distinguish row/sample zero from an omitted request and are
+; consumed once.
+ApplyBootDemoCursor:
         RW_assume a16i16
+        lda     boot_ordered_source_pose
+        beq     ApplyBootFixedStepSample
+        dec
+        sta     demo_next_pose
+        asl
+        sta     demo_timing_offset
+        lda     demo_next_pose
+        asl
+        sta     demo_offset
+        asl
+        asl
+        clc
+        adc     demo_offset
+        sta     demo_offset
+        rts
+ApplyBootFixedStepSample:
         lda     boot_fixed_step_sample
         beq     ApplyBootFixedStepSampleDone
         stz     boot_fixed_step_sample
         dec
+        tax
+        stz     demo_next_pose
+ApplyBootFixedStepSamplePoseLoop:
+        cpx     #0
+        beq     ApplyBootFixedStepSamplePoseReady
+        lda     demo_next_pose
+        clc
+        adc     #BSP_DEMO_ORDERED_POSE_STRIDE
         sta     demo_next_pose
-        asl
-        asl
-        asl
-        asl
-        sec
-        sbc     demo_next_pose
-        sta     demo_next_pose
+        dex
+        bra     ApplyBootFixedStepSamplePoseLoop
+ApplyBootFixedStepSamplePoseReady:
         asl
         sta     demo_timing_offset
         lda     demo_next_pose
@@ -387,6 +512,7 @@ RuntimeMenuUpdateDone:
 
 OpenRuntimeMenu:
         RW_assume a16i16
+        jsr     InvalidateScheduledFrameIdentity
         jsr     SyncRuntimeMenuDrafts
         stz     runtime_menu_selection
         stz     runtime_menu_restart_action
@@ -423,10 +549,7 @@ CloseRuntimeMenu:
         RW_forced a16i16
         rts
 
-; Synchronize the draft fields before displaying the menu. Techniques 0 and 1
-; remain reachable through the closed-menu Select shortcut. They display the
-; canonical textured/None matrix state, but runtime_menu_draft_technique keeps
-; the legacy value unless the user explicitly edits a matrix row.
+; Synchronize the supported renderer draft fields before displaying the menu.
 SyncRuntimeMenuDrafts:
         RW_assume a16i16
         lda     demo_mode
@@ -447,7 +570,13 @@ SyncRuntimeMenuDrafts:
         lda     #RUNTIME_MENU_PLAYBACK_QUARTER
         bra     @PlaybackReady
 @Ordered:
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED
+        lda     demo_ordered_pose_stride
+        cmp     #$0001
+        beq     @Ordered20Hz
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
+        bra     @PlaybackReady
+@Ordered20Hz:
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
         bra     @PlaybackReady
 @Fly:
         lda     #RUNTIME_MENU_PLAYBACK_FLY
@@ -455,61 +584,60 @@ SyncRuntimeMenuDrafts:
         sta     runtime_menu_draft_playback
         lda     technique
         sta     runtime_menu_draft_technique
-        cmp     #RUNTIME_MENU_TEXTURED_BASE
-        bcc     @LegacyRenderer
-        cmp     #RUNTIME_MENU_UNTEXTURED_BASE
-        bcc     @TexturedRenderer
+        cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE
+        beq     @TexturedNone
+        cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP
+        beq     @TexturedLightmap
         stz     runtime_menu_draft_textures
-        sec
-        sbc     #RUNTIME_MENU_UNTEXTURED_BASE
+        lda     #RUNTIME_MENU_LIGHTING_LIGHTMAP
         sta     runtime_menu_draft_lighting
         bra     @RendererReady
-@TexturedRenderer:
-        sec
-        sbc     #RUNTIME_MENU_TEXTURED_BASE
-        sta     runtime_menu_draft_lighting
-        lda     #$0001
-        sta     runtime_menu_draft_textures
-        bra     @RendererReady
-@LegacyRenderer:
-        lda     #$0001
-        sta     runtime_menu_draft_textures
+@TexturedNone:
         stz     runtime_menu_draft_lighting
+        lda     #RUNTIME_MENU_TEXTURES_ON
+        sta     runtime_menu_draft_textures
+        bra     @RendererReady
+@TexturedLightmap:
+        lda     #RUNTIME_MENU_LIGHTING_LIGHTMAP
+        sta     runtime_menu_draft_lighting
+        lda     #RUNTIME_MENU_TEXTURES_ON
+        sta     runtime_menu_draft_textures
 @RendererReady:
         lda     dynamic_brushes_enabled
         sta     runtime_menu_draft_brushes
-        lda     temporal_color_dither_enabled
-        sta     runtime_menu_draft_temporal_dither
+        lda     mdl_entities_enabled
+        sta     runtime_menu_draft_entities
         rts
 
-; Compose the independent matrix drafts into the retained numeric technique
-; field. This is called only after a matrix row changes, so opening and closing
-; the menu without edits preserves legacy techniques 0 and 1.
+; Compose the supported texture/lighting drafts into techniques 2, 4, or 7.
 ComposeRuntimeMenuTechnique:
         RW_assume a16i16
         lda     runtime_menu_draft_textures
-        and     #$0001
-        beq     @Untextured
+        beq     @UntexturedLightmap
         lda     runtime_menu_draft_lighting
-        clc
-        adc     #RUNTIME_MENU_TEXTURED_BASE
+        beq     @TexturedNone
+        lda     #RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP
         bra     @Store
-@Untextured:
-        lda     runtime_menu_draft_lighting
-        clc
-        adc     #RUNTIME_MENU_UNTEXTURED_BASE
+@TexturedNone:
+        lda     #RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE
+        bra     @Store
+@UntexturedLightmap:
+        lda     #RUNTIME_MENU_LIGHTING_LIGHTMAP
+        sta     runtime_menu_draft_lighting
+        lda     #RUNTIME_MENU_TECHNIQUE_UNTEXTURED_LIGHTMAP
 @Store:
         sta     runtime_menu_draft_technique
         rts
 
 ; Public state application path for both the UI and host tooling:
-;   runtime_menu_draft_playback: 0 ordered, 1 real-time, 2 fly,
-;                                3 half real-time, 4 quarter real-time
-;   runtime_menu_draft_technique: compatible numeric technique 0..7
+;   runtime_menu_draft_playback: 0 ordered 2 Hz, 1 real-time, 2 fly,
+;                                3 half real-time, 4 quarter real-time,
+;                                5 ordered 20 Hz
+;   runtime_menu_draft_technique: supported numeric technique 2, 4, or 7
 ;   runtime_menu_draft_textures: 0 off, 1 on
-;   runtime_menu_draft_lighting: 0 None, 1 Distance, 2 LightMap
+;   runtime_menu_draft_lighting: 0 None, 1 LightMap
 ;   runtime_menu_draft_brushes: 0 off, 1 on
-;   runtime_menu_draft_temporal_dither: 0 static, 1 temporal
+;   runtime_menu_draft_entities: 0 off, 1 on
 ; Set runtime_menu_restart_action for restart/recenter semantics.
 ApplyRuntimeMenuSelection:
         RW_forced a16i16
@@ -523,8 +651,21 @@ ApplyRuntimeMenuSelection:
         beq     @ApplyHalf
         cmp     #RUNTIME_MENU_PLAYBACK_QUARTER
         beq     @ApplyQuarter
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        beq     @ApplyOrdered20Hz
 
 @ApplyOrdered:
+        ldx     #BSP_DEMO_ORDERED_POSE_STRIDE
+        bra     @ApplyOrderedStride
+@ApplyOrdered20Hz:
+        ldx     #$0001
+@ApplyOrderedStride:
+        txa
+        cmp     demo_ordered_pose_stride
+        beq     @CheckOrderedPlayback
+        sta     demo_ordered_pose_stride
+        inc     runtime_menu_apply_flags
+@CheckOrderedPlayback:
         lda     demo_mode
         cmp     #$0001
         bne     @OrderedChanged
@@ -571,6 +712,10 @@ ApplyRuntimeMenuSelection:
         lda     demo_mode
         beq     @PlaybackApplied
 @FlyChanged:
+        jsr     SeedFlySkyClockFromDemo
+        jsr     SeedFlyAliasClockFromDemo
+        jsr     SeedFlyTurbulenceClockFromDemo
+        jsr     EnsureFlyAliasCode
         stz     demo_mode
         inc     runtime_menu_apply_flags
 
@@ -585,7 +730,7 @@ ApplyRuntimeMenuSelection:
         bra     @ApplyRenderer
 @EnteredFly:
         inc     control_revision
-        stz     scheduled_frame_valid
+        jsr     InvalidateScheduledFrameIdentity
         bra     @ApplyRenderer
 
 @PreserveRealtimeClock:
@@ -620,7 +765,7 @@ ApplyRuntimeMenuSelection:
         lda     #$FFFF
         sta     monster_camera_index
         inc     control_revision
-        stz     scheduled_frame_valid
+        jsr     InvalidateScheduledFrameIdentity
 
 @ApplyRenderer:
         lda     runtime_menu_draft_technique
@@ -628,31 +773,41 @@ ApplyRuntimeMenuSelection:
         beq     @ApplyBrushes
         sta     technique
         inc     control_revision
-        stz     scheduled_frame_valid
+        jsr     InvalidateScheduledFrameIdentity
 
 @ApplyBrushes:
         lda     runtime_menu_draft_brushes
-        and     #$0001
+        and     #BSP_BRUSH_DYNAMIC_REPLAY_SUPPORTED
         cmp     dynamic_brushes_enabled
-        beq     @ApplyTemporalDither
+        beq     @ApplyEntities
         sta     dynamic_brushes_enabled
         jsr     InvalidateDynamicBrushRenderState
-@ApplyTemporalDither:
-        lda     runtime_menu_draft_temporal_dither
-        and     #$0001
-        sta     temporal_color_dither_enabled
+@ApplyEntities:
+        lda     runtime_menu_draft_entities
+        and     #BSP_ALIAS_ENTITY_SUPPORTED
+        cmp     mdl_entities_enabled
+        beq     @ApplyDone
+        sta     mdl_entities_enabled
+        ; The brush-capable renderer phase-overlays selector face-plane state.
+        ; Force one selector rebuild before a world-only renderer can consume
+        ; the packet after an entity-path transition.
+        stz     active_packet_guard_status
+        inc     control_revision
+        jsr     InvalidateScheduledFrameIdentity
 @ApplyDone:
         RW_forced a16i16
         rts
 
 ; Public force-render hook. Call after changing the enabled state or advancing
-; the resolved brush replay row. Brush fragments merge after world selection,
-; so the immutable world packet remains valid across this state change.
+; the resolved brush replay row. The brush-capable renderer phase-overlays
+; selector state, so feature-path transitions also invalidate the CPU's packet
+; guard mirror and force one selector rebuild.
 InvalidateDynamicBrushRenderState:
         RW_forced a16i16
         inc     dynamic_brush_revision
         inc     control_revision
-        stz     scheduled_frame_valid
+        stz     active_packet_guard_status
+        jsr     InvalidateScheduledFrameIdentity
         rts
 
 RuntimeMenuPreviousValue:
@@ -666,14 +821,14 @@ RuntimeMenuPreviousValue:
         beq     @Lighting
         cmp     #RUNTIME_MENU_ROW_BRUSHES
         beq     @Brushes
-        cmp     #RUNTIME_MENU_ROW_TEMPORAL
-        beq     @Temporal
+        cmp     #RUNTIME_MENU_ROW_ENTITIES
+        beq     @Entities
         rts
 @Playback:
         lda     runtime_menu_draft_playback
         cmp     #RUNTIME_MENU_PLAYBACK_COUNT
         bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
 :
         asl
         tax
@@ -682,11 +837,20 @@ RuntimeMenuPreviousValue:
         bra     @Refresh
 @Textures:
         lda     runtime_menu_draft_textures
-        eor     #$0001
+        bne     :+
+        lda     #RUNTIME_MENU_TEXTURES_COUNT
+:
+        dec
         sta     runtime_menu_draft_textures
+        bne     :+
+        lda     #RUNTIME_MENU_LIGHTING_LIGHTMAP
+        sta     runtime_menu_draft_lighting
+:
         jsr     ComposeRuntimeMenuTechnique
         bra     @Refresh
 @Lighting:
+        lda     runtime_menu_draft_textures
+        beq     @Refresh
         lda     runtime_menu_draft_lighting
         bne     :+
         lda     #RUNTIME_MENU_LIGHTING_LIGHTMAP+1
@@ -698,12 +862,15 @@ RuntimeMenuPreviousValue:
 @Brushes:
         lda     runtime_menu_draft_brushes
         eor     #$0001
+        and     #BSP_BRUSH_DYNAMIC_REPLAY_SUPPORTED
         sta     runtime_menu_draft_brushes
         bra     @Refresh
-@Temporal:
-        lda     runtime_menu_draft_temporal_dither
+@Entities:
+        lda     runtime_menu_draft_entities
         eor     #$0001
-        sta     runtime_menu_draft_temporal_dither
+        and     #BSP_ALIAS_ENTITY_SUPPORTED
+        sta     runtime_menu_draft_entities
+        bra     @Refresh
 @Refresh:
         jsr     RefreshRuntimeMenuOAM
         rts
@@ -719,14 +886,14 @@ RuntimeMenuNextValue:
         beq     @NextLighting
         cmp     #RUNTIME_MENU_ROW_BRUSHES
         beq     @NextBrushes
-        cmp     #RUNTIME_MENU_ROW_TEMPORAL
-        beq     @NextTemporal
+        cmp     #RUNTIME_MENU_ROW_ENTITIES
+        beq     @NextEntities
         rts
 @NextPlayback:
         lda     runtime_menu_draft_playback
         cmp     #RUNTIME_MENU_PLAYBACK_COUNT
         bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
 :
         asl
         tax
@@ -735,11 +902,21 @@ RuntimeMenuNextValue:
         bra     @NextRefresh
 @NextTextures:
         lda     runtime_menu_draft_textures
-        eor     #$0001
+        inc
+        cmp     #RUNTIME_MENU_TEXTURES_COUNT
+        bcc     :+
+        lda     #RUNTIME_MENU_TEXTURES_OFF
+:
         sta     runtime_menu_draft_textures
+        bne     :+
+        lda     #RUNTIME_MENU_LIGHTING_LIGHTMAP
+        sta     runtime_menu_draft_lighting
+:
         jsr     ComposeRuntimeMenuTechnique
         bra     @NextRefresh
 @NextLighting:
+        lda     runtime_menu_draft_textures
+        beq     @NextRefresh
         lda     runtime_menu_draft_lighting
         inc
         cmp     #RUNTIME_MENU_LIGHTING_LIGHTMAP+1
@@ -752,12 +929,15 @@ RuntimeMenuNextValue:
 @NextBrushes:
         lda     runtime_menu_draft_brushes
         eor     #$0001
+        and     #BSP_BRUSH_DYNAMIC_REPLAY_SUPPORTED
         sta     runtime_menu_draft_brushes
         bra     @NextRefresh
-@NextTemporal:
-        lda     runtime_menu_draft_temporal_dither
+@NextEntities:
+        lda     runtime_menu_draft_entities
         eor     #$0001
-        sta     runtime_menu_draft_temporal_dither
+        and     #BSP_ALIAS_ENTITY_SUPPORTED
+        sta     runtime_menu_draft_entities
+        bra     @NextRefresh
 @NextRefresh:
         jsr     RefreshRuntimeMenuOAM
         rts
@@ -783,24 +963,7 @@ BuildRuntimeMenuOAM:
         lda     #RUNTIME_MENU_COLUMNS
         sta     RuntimeMenuBuildColumns
 @Column:
-        ; Reuse slots 10..17 but place editable values at screen columns
-        ; 11..18. D-BRUSHES already uses slots/columns 11..17.
-        lda     RuntimeMenuBuildColumns
-        cmp     #(RUNTIME_MENU_VALUE_BYTES + 1)
-        bcs     @ColumnBaseX
-        lda     RuntimeMenuBuildRow
-        beq     @ColumnBaseX
-        cmp     #RUNTIME_MENU_ROW_BRUSHES
-        beq     @ColumnBaseX
-        cmp     #RUNTIME_MENU_ROW_RESTART
-        beq     @ColumnBaseX
         lda     RuntimeMenuBuildX
-        clc
-        adc     #RUNTIME_MENU_VALUE_X_SHIFT
-        bra     @ColumnXReady
-@ColumnBaseX:
-        lda     RuntimeMenuBuildX
-@ColumnXReady:
         sta     a:RuntimeMenuOAM+0,y
         lda     RuntimeMenuBuildY
         sta     a:RuntimeMenuOAM+1,y
@@ -858,8 +1021,8 @@ PatchRuntimeMenuOAM:
         beq     @CursorLighting
         cmp     #RUNTIME_MENU_ROW_BRUSHES
         beq     @CursorBrushes
-        cmp     #RUNTIME_MENU_ROW_TEMPORAL
-        beq     @CursorTemporal
+        cmp     #RUNTIME_MENU_ROW_ENTITIES
+        beq     @CursorEntities
         cmp     #RUNTIME_MENU_ROW_RESTART
         beq     @CursorRestart
         ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_RESUME) + 2
@@ -876,8 +1039,8 @@ PatchRuntimeMenuOAM:
 @CursorBrushes:
         ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_BRUSHES) + 2
         bra     @CursorReady
-@CursorTemporal:
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_TEMPORAL) + 2
+@CursorEntities:
+        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_ENTITIES) + 2
         bra     @CursorReady
 @CursorRestart:
         ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_RESTART) + 2
@@ -890,15 +1053,16 @@ PatchRuntimeMenuOAM:
         lda     runtime_menu_draft_playback
         cmp     #RUNTIME_MENU_PLAYBACK_COUNT
         bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
 :
         asl
         asl
         asl
+        asl
         tax
-        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_PLAYBACK) + (RUNTIME_MENU_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
+        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_PLAYBACK) + (RUNTIME_MENU_PLAYBACK_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
         RW      a8
-        lda     #RUNTIME_MENU_VALUE_BYTES
+        lda     #RUNTIME_MENU_PLAYBACK_VALUE_BYTES
         sta     RuntimeMenuBuildColumns
 @PlaybackValue:
         lda     f:RuntimeMenuPlaybackValues,x
@@ -917,7 +1081,10 @@ PatchRuntimeMenuOAM:
 
         RW      a16
         lda     runtime_menu_draft_textures
-        and     #$0001
+        cmp     #RUNTIME_MENU_TEXTURES_COUNT
+        bcc     :+
+        lda     #RUNTIME_MENU_TEXTURES_OFF
+:
         asl
         asl
         asl
@@ -927,7 +1094,7 @@ PatchRuntimeMenuOAM:
         lda     #RUNTIME_MENU_VALUE_BYTES
         sta     RuntimeMenuBuildColumns
 @TexturesValue:
-        lda     f:RuntimeMenuToggleValues,x
+        lda     f:RuntimeMenuTextureValues,x
         sec
         sbc     #RUNTIME_MENU_ASCII_FIRST
         clc
@@ -943,7 +1110,7 @@ PatchRuntimeMenuOAM:
 
         RW      a16
         lda     runtime_menu_draft_lighting
-        and     #$0003
+        and     #$0007
         asl
         asl
         asl
@@ -974,9 +1141,9 @@ PatchRuntimeMenuOAM:
         asl
         asl
         tax
-        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_BRUSHES) + (RUNTIME_MENU_BRUSH_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
+        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_BRUSHES) + (RUNTIME_MENU_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
         RW      a8
-        lda     #RUNTIME_MENU_BRUSH_VALUE_BYTES
+        lda     #RUNTIME_MENU_VALUE_BYTES
         sta     RuntimeMenuBuildColumns
 @BrushesValue:
         lda     f:RuntimeMenuToggleValues,x
@@ -994,17 +1161,17 @@ PatchRuntimeMenuOAM:
         bne     @BrushesValue
 
         RW      a16
-        lda     runtime_menu_draft_temporal_dither
+        lda     runtime_menu_draft_entities
         and     #$0001
         asl
         asl
         asl
         tax
-        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_TEMPORAL) + (RUNTIME_MENU_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
+        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_ENTITIES) + (RUNTIME_MENU_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
         RW      a8
         lda     #RUNTIME_MENU_VALUE_BYTES
         sta     RuntimeMenuBuildColumns
-@TemporalValue:
+@EntitiesValue:
         lda     f:RuntimeMenuToggleValues,x
         sec
         sbc     #RUNTIME_MENU_ASCII_FIRST
@@ -1017,7 +1184,8 @@ PatchRuntimeMenuOAM:
         iny
         iny
         dec     RuntimeMenuBuildColumns
-        bne     @TemporalValue
+        bne     @EntitiesValue
+
 @PatchDone:
         RW_forced a8i16
         rts
@@ -1043,11 +1211,18 @@ UpdateCameraControls:
         and     #JOY_SELECT
         beq     @AngleControls
         lda     technique
-        inc
-        cmp     #RUNTIME_MENU_TECHNIQUE_COUNT
-        bcc     :+
-        lda     #$0000
-:
+        cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE
+        beq     @SelectTechnique4
+        cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP
+        beq     @SelectTechnique7
+        lda     #RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE
+        bra     @StoreSelectedTechnique
+@SelectTechnique4:
+        lda     #RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP
+        bra     @StoreSelectedTechnique
+@SelectTechnique7:
+        lda     #RUNTIME_MENU_TECHNIQUE_UNTEXTURED_LIGHTMAP
+@StoreSelectedTechnique:
         sta     technique
         inc     control_dirty
 
@@ -1115,6 +1290,23 @@ UpdateCameraControls:
 
 @MovementControls:
         lda     z:SFX_joy1cont
+        and     #(JOY_X | JOY_B | JOY_Y | JOY_A)
+        bne     :+
+        jmp     @Clamp
+:
+        ; Preserve non-movement changes separately. A completely rejected
+        ; collision attempt is not a new camera command, while an angle or
+        ; technique change from the same input tick still must publish.
+        lda     control_dirty
+        pha
+        lda     camera_x
+        sta     camera_collision_previous_x
+        lda     camera_y
+        sta     camera_collision_previous_y
+        lda     camera_z
+        sta     camera_collision_previous_z
+
+        lda     z:SFX_joy1cont
         and     #(JOY_X | JOY_B)
         beq     @StrafeBasis
         jsr     BuildCameraForwardVector
@@ -1175,7 +1367,7 @@ UpdateCameraControls:
 @StrafeRight:
         lda     z:SFX_joy1cont
         and     #JOY_A
-        beq     @Clamp
+        beq     @ResolveMovement
         lda     camera_x
         sec
         sbc     f:BSPCameraMoveSin,x
@@ -1186,10 +1378,35 @@ UpdateCameraControls:
         sta     camera_y
         inc     control_dirty
 
+@ResolveMovement:
+        jsr     ClampCamera
+        jsr     ResolveFlyCameraCollision
+        lda     camera_x
+        cmp     camera_collision_previous_x
+        bne     @MovementChanged
+        lda     camera_y
+        cmp     camera_collision_previous_y
+        bne     @MovementChanged
+        lda     camera_z
+        cmp     camera_collision_previous_z
+        bne     @MovementChanged
+        pla
+        sta     control_dirty
+        bra     @MovementResolved
+@MovementChanged:
+        pla
+        inc
+        sta     control_dirty
+@MovementResolved:
+        lda     control_dirty
+        beq     @Return
+        bra     @PublishDirty
+
 @Clamp:
         lda     control_dirty
         beq     @Return
         jsr     ClampCamera
+@PublishDirty:
         inc     control_revision
 @Return:
         RW_forced a8i16
@@ -1344,7 +1561,189 @@ ClampCamera:
 @ClampDone:
         rts
 
+; Resolve a combined fly step one axis at a time. Every accepted intermediate
+; remains non-solid, so a blocked normal component still preserves tangent
+; movement along the wall. The candidate has already passed the outer clamp.
+ResolveFlyCameraCollision:
+        RW_assume a16i16
+        stz     camera_collision_rejected
+        lda     camera_x
+        sta     camera_collision_candidate_x
+        lda     camera_y
+        sta     camera_collision_candidate_y
+        lda     camera_z
+        sta     camera_collision_candidate_z
+
+        lda     camera_collision_previous_x
+        sta     camera_x
+        lda     camera_collision_previous_y
+        sta     camera_y
+        lda     camera_collision_previous_z
+        sta     camera_z
+
+        lda     camera_collision_candidate_x
+        cmp     camera_collision_previous_x
+        beq     @TryY
+        sta     camera_x
+        jsr     CameraPointIsSolid
+        bcc     @TryY
+        lda     camera_collision_previous_x
+        sta     camera_x
+        inc     camera_collision_rejected
+@TryY:
+        lda     camera_collision_candidate_y
+        cmp     camera_collision_previous_y
+        beq     @TryZ
+        sta     camera_y
+        jsr     CameraPointIsSolid
+        bcc     @TryZ
+        lda     camera_collision_previous_y
+        sta     camera_y
+        inc     camera_collision_rejected
+@TryZ:
+        lda     camera_collision_candidate_z
+        cmp     camera_collision_previous_z
+        beq     @Done
+        sta     camera_z
+        jsr     CameraPointIsSolid
+        bcc     @Done
+        lda     camera_collision_previous_z
+        sta     camera_z
+        inc     camera_collision_rejected
+@Done:
+        lda     camera_collision_rejected
+        beq     :+
+        inc     camera_collision_reject_counter
+:
+        rts
+
+; Multiply A by a generated layout constant without a general 16-bit loop.
+; Binary Horner expansion needs at most seven shifts for the current layout.
+; The collision address products are all proven to fit an unsigned word.
+.macro COLLISION_MULTIPLY_CONSTANT Factor
+        .assert Factor > 0 .and Factor <= $FFFF, error, "Invalid collision multiplier"
+        sta     camera_collision_cell
+        .repeat 15, Bit
+        .if (Factor >> (15-Bit)) <> 0
+        asl
+        .if (Factor & (1 << (14-Bit))) <> 0
+        clc
+        adc     camera_collision_cell
+        .endif
+        .endif
+        .endrepeat
+.endmacro
+
+; Return carry set when the current camera's packed integer coordinate is in
+; BSP solid leaf zero. The generated packed XY map selects a bit-packed Z
+; column, replacing a BSP walk with two bounded WRAM reads.
+; The boot copy is necessary because the GSU can own cartridge ROM during NMI.
+CameraPointIsSolid:
+        RW_assume a16i16
+        lda     camera_z
+        xba
+        and     #$00FF
+        sec
+        sbc     #.lobyte(BSP_COLLISION_MIN_Z)
+        and     #$00FF
+        sta     camera_collision_z_byte
+
+        lda     camera_x
+        xba
+        and     #$00FF
+        sec
+        sbc     #.lobyte(BSP_COLLISION_MIN_X)
+        and     #$00FF
+        sta     camera_collision_x_index
+        lda     camera_y
+        xba
+        and     #$00FF
+        sec
+        sbc     #.lobyte(BSP_COLLISION_MIN_Y)
+        and     #$00FF
+        sta     camera_collision_y_index
+
+        ; cell = y*generated_width + x.
+        lda     camera_collision_y_index
+        COLLISION_MULTIPLY_CONSTANT BSP_COLLISION_X_COUNT
+        clc
+        adc     camera_collision_x_index
+        sta     camera_collision_cell
+
+        ; Split cell into q*8+r before multiplying by the generated bit width.
+        ; This keeps the intermediate below 64 KiB even when the bit offset
+        ; itself exceeds 16 bits: byte=q*bits+floor(r*bits/8).
+        and     #$0007
+        sta     camera_collision_x_index
+        lda     camera_collision_cell
+        lsr
+        lsr
+        lsr
+        COLLISION_MULTIPLY_CONSTANT BSP_COLLISION_COLUMN_ID_BITS
+        sta     camera_collision_column
+
+        lda     camera_collision_x_index
+        COLLISION_MULTIPLY_CONSTANT BSP_COLLISION_COLUMN_ID_BITS
+        sta     camera_collision_offset
+        lsr
+        lsr
+        lsr
+        clc
+        adc     camera_collision_column
+        tax
+        lda     f:QuakeBSPCollisionMapRAM,x
+        sta     camera_collision_cell
+        lda     camera_collision_offset
+        and     #$0007
+        tax
+        beq     @ColumnNoShift
+        lda     camera_collision_cell
+@ColumnShift:
+        lsr
+        dex
+        bne     @ColumnShift
+        bra     @ColumnReady
+@ColumnNoShift:
+        lda     camera_collision_cell
+@ColumnReady:
+        and     #((1 << BSP_COLLISION_COLUMN_ID_BITS) - 1)
+        sta     camera_collision_column
+
+        ; Dictionary bit = column_id*generated_depth + Z.
+        COLLISION_MULTIPLY_CONSTANT BSP_COLLISION_Z_COUNT
+        clc
+        adc     camera_collision_z_byte
+        sta     camera_collision_cell
+        and     #$0007
+        tax
+        RW      a8
+        lda     f:BSPCollisionBitMasks,x
+        sta     z:camera_collision_mask
+        RW      a16
+        lda     camera_collision_cell
+        lsr
+        lsr
+        lsr
+        tax
+        RW      a8
+        lda     f:QuakeBSPCollisionDictionaryRAM,x
+        and     z:camera_collision_mask
+        clc
+        beq     @Result
+        sec
+@Result:
+        ; Both lookup outcomes must execute the runtime width restore. A plain
+        ; RW transition on separate branches lets assembler state from the
+        ; first branch suppress the REP needed by the empty branch.
+        RW_forced a16i16
+        rts
+
 .segment "RODATA"
+BSPCollisionBitMasks:
+        .byte   $01, $02, $04, $08, $10, $20, $40, $80
+BSPCollisionBitMasksEnd:
+.assert BSPCollisionBitMasksEnd - BSPCollisionBitMasks = 8, error, "Fly collision bit-mask table size changed"
+
 QuakeBSPMonsterCameras:
         .incbin "../Data/QuakeBSPMonsterCameras.bin"
 QuakeBSPMonsterCamerasEnd:
@@ -1356,44 +1755,52 @@ RuntimeMenuPaletteEnd:
 .assert RuntimeMenuPaletteEnd - RuntimeMenuPalette = 32, error, "Runtime-menu palette tail size changed"
 
 RuntimeMenuText:
-        .byte   " RESUME           "
-        .byte   " PLAYBACK ORDERED "
-        .byte   " TEXTURES ON      "
-        .byte   " LIGHTING LIGHTMAP"
-        .byte   " D-BRUSHES ON     "
-        .byte   " T-DITHER OFF     "
-        .byte   " RESTART          "
+        .byte   " RESUME       "
+        .byte   " PB           "
+        .byte   " TEXTURE      "
+        .byte   " LIGHT        "
+        .byte   " D-BRSH       "
+        .byte   " ENTITY       "
+        .byte   " RESTART      "
 RuntimeMenuTextEnd:
 .assert RuntimeMenuTextEnd - RuntimeMenuText = RUNTIME_MENU_ROW_COUNT * RUNTIME_MENU_COLUMNS, error, "Runtime-menu text dimensions changed"
 
 RuntimeMenuPlaybackValues:
-        .byte   "ORDERED "
-        .byte   "REALTIME"
-        .byte   "FLY     "
-        .byte   "1/2 REAL"
-        .byte   "1/4 REAL"
+        .byte   "ORDER 2HZ       "
+        .byte   "REALTIME        "
+        .byte   "FLY             "
+        .byte   "HALF            "
+        .byte   "QUARTER         "
+        .byte   "ORDER 20HZ      "
 RuntimeMenuPlaybackValuesEnd:
-.assert RuntimeMenuPlaybackValuesEnd - RuntimeMenuPlaybackValues = RUNTIME_MENU_PLAYBACK_COUNT * 8, error, "Runtime-menu playback values must stay fixed-width"
+.assert RuntimeMenuPlaybackValuesEnd - RuntimeMenuPlaybackValues = RUNTIME_MENU_PLAYBACK_COUNT * RUNTIME_MENU_PLAYBACK_RECORD_BYTES, error, "Runtime-menu playback values must stay fixed-width"
 
 RuntimeMenuPlaybackNext:
-        .word   RUNTIME_MENU_PLAYBACK_REALTIME
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
         .word   RUNTIME_MENU_PLAYBACK_HALF
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
         .word   RUNTIME_MENU_PLAYBACK_QUARTER
         .word   RUNTIME_MENU_PLAYBACK_FLY
+        .word   RUNTIME_MENU_PLAYBACK_REALTIME
 RuntimeMenuPlaybackPrevious:
         .word   RUNTIME_MENU_PLAYBACK_FLY
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
         .word   RUNTIME_MENU_PLAYBACK_QUARTER
         .word   RUNTIME_MENU_PLAYBACK_REALTIME
         .word   RUNTIME_MENU_PLAYBACK_HALF
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
 
 RuntimeMenuLightingValues:
         .byte   "NONE    "
-        .byte   "DISTANCE"
-        .byte   "LIGHTMAP"
+        .byte   "L-MAP   "
 RuntimeMenuLightingValuesEnd:
-.assert RuntimeMenuLightingValuesEnd - RuntimeMenuLightingValues = 3 * 8, error, "Runtime-menu lighting values must stay fixed-width"
+.assert RuntimeMenuLightingValuesEnd - RuntimeMenuLightingValues = 2 * 8, error, "Runtime-menu lighting values must stay fixed-width"
+
+RuntimeMenuTextureValues:
+        .byte   "OFF     "
+        .byte   "ON      "
+RuntimeMenuTextureValuesEnd:
+.assert RuntimeMenuTextureValuesEnd - RuntimeMenuTextureValues = RUNTIME_MENU_TEXTURES_COUNT * 8, error, "Runtime-menu texture values must stay fixed-width"
 
 RuntimeMenuToggleValues:
         .byte   "OFF     "

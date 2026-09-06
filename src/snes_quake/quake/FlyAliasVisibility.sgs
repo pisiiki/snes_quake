@@ -1,0 +1,483 @@
+; Fly-only geometric alias visibility. Ordered/demo rows retain QAV2 and the
+; exact qualified hot paths. Arbitrary fly cameras trace each opaque billboard
+; sample through the packed world BSP, so walls occlude sprites without a
+; framebuffer depth plane or a second geometry render.
+
+FLY_TRACE_VISIBILITY_RETURN = CLIP_V0_RIGHT
+FLY_TRACE_WORLD_RETURN      = CLIP_V0_UP
+FLY_TRACE_HELPER_RETURN     = CLIP_V0_DEPTH
+FLY_TRACE_DIVIDE_RETURN     = CLIP_V1_RIGHT
+FLY_TRACE_SAVED_R2          = CLIP_V1_UP
+FLY_TRACE_SAVED_R3          = CLIP_V1_DEPTH
+FLY_TRACE_SAVED_R4          = CLIP_V2_RIGHT
+FLY_TRACE_SAVED_R5          = CLIP_V2_UP
+FLY_TRACE_SAVED_R6          = CLIP_V2_DEPTH
+FLY_TRACE_SAVED_R7          = CLIP_A_RIGHT
+FLY_TRACE_SAVED_R9          = CLIP_A_UP
+FLY_TRACE_SAVED_R12         = CLIP_A_DEPTH
+FLY_TRACE_SAVED_R13         = CLIP_B_RIGHT
+FLY_TRACE_END_X             = CLIP_B_UP
+FLY_TRACE_END_Y             = CLIP_B_DEPTH
+FLY_TRACE_END_Z             = CLIP_C_RIGHT
+FLY_TRACE_START_X           = CLIP_C_UP
+FLY_TRACE_START_Y           = CLIP_C_DEPTH
+FLY_TRACE_START_Z           = CLIP_AX
+FLY_TRACE_NODE              = CLIP_AY
+FLY_TRACE_STACK_POINTER     = CLIP_BX
+FLY_TRACE_NORMAL_X          = CLIP_BY
+FLY_TRACE_NORMAL_Y          = CLIP_IN_RIGHT
+FLY_TRACE_NORMAL_Z          = CLIP_IN_UP
+FLY_TRACE_PLANE_DISTANCE    = CLIP_IN_DEPTH
+FLY_TRACE_START_DISTANCE    = CLIP_OUT_RIGHT
+FLY_TRACE_END_DISTANCE      = CLIP_OUT_UP
+FLY_TRACE_MID_X             = CLIP_OUT_DEPTH
+FLY_TRACE_MID_Y             = CLIP_EDGE_X
+FLY_TRACE_MID_Z             = CLIP_EDGE_Y
+FLY_TRACE_FACTOR            = CLIP_I0_X
+FLY_TRACE_VIEW_RIGHT        = CLIP_I0_Y
+FLY_TRACE_VIEW_UP           = CLIP_I1_X
+FLY_TRACE_HORIZONTAL        = CLIP_I1_Y
+FLY_TRACE_RESULT            = CLIP_RATIO
+FLY_TRACE_NEAR_CHILD        = CLIP_FACTOR
+FLY_TRACE_FAR_CHILD         = CLIP_BASE_RIGHT
+
+FLY_TRACE_STACK_NODE        = 0
+FLY_TRACE_STACK_END_X       = 2
+FLY_TRACE_STACK_END_Y       = 4
+FLY_TRACE_STACK_END_Z       = 6
+
+.assert FLY_TRACE_FAR_CHILD + 2 <= CLIP_Q6, error, "Fly trace state escapes the idle clip workspace"
+.assert GSU_ALIAS_FLY_TRACE_RECORD_BYTES = 8, error, "Fly trace stack ABI changed"
+
+.segment "GSU_ALIAS_FLY_CODE"
+
+; Called from the alias pixel loop after a non-transparent texel is decoded.
+; Preserve every register retained by that loop, restore the sprite ROM bank,
+; and return nonzero only when the camera-to-sample segment never enters the
+; unique solid world leaf (-1).
+FlyAliasTestVisibility:
+        sm      (FLY_TRACE_VISIBILITY_RETURN), R11
+        sm      (FLY_TRACE_SAVED_R2), R2
+        sm      (FLY_TRACE_SAVED_R3), R3
+        sm      (FLY_TRACE_SAVED_R4), R4
+        sm      (FLY_TRACE_SAVED_R5), R5
+        sm      (FLY_TRACE_SAVED_R6), R6
+        sm      (FLY_TRACE_SAVED_R7), R7
+        sm      (FLY_TRACE_SAVED_R9), R9
+        sm      (FLY_TRACE_SAVED_R12), R12
+        sm      (FLY_TRACE_SAVED_R13), R13
+
+        ; Pixel-center view coordinates are depth * signed half-pixel / 192.
+        ; Shift the signed 32-bit product by six first, then divide by three;
+        ; truncation toward zero is identical to one exact division by 192.
+        move    R0, R12
+        with    R0
+        add     R0
+        inc     R0
+        iwt     R1, #128
+        with    R0
+        sub     R1
+        move    R1, R0
+        lm      R7, (CLIP_DEPTH)
+        BSP_SIGNED_MUL_SHIFT_TRUNC R0, R7, R1, 6
+        jal     FlyAliasSignedDivideThree
+        nop
+        sm      (FLY_TRACE_VIEW_RIGHT), R0
+
+        lm      R0, (ALIAS_DEST_Y)
+        with    R0
+        add     R0
+        move    R1, #111
+        with    R1
+        sub     R0
+        lm      R7, (CLIP_DEPTH)
+        BSP_SIGNED_MUL_SHIFT_TRUNC R0, R7, R1, 6
+        jal     FlyAliasSignedDivideThree
+        nop
+        sm      (FLY_TRACE_VIEW_UP), R0
+
+        ; Invert the packed yaw/pitch transform at the billboard's constant
+        ; Q6 depth. The resulting Q6 map coordinates retain sub-unit precision
+        ; at wall boundaries while fitting signed words throughout E1M3.
+        lm      R7, (CLIP_DEPTH)
+        lm      R5, (PITCH_COS)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 6
+        lm      R7, (FLY_TRACE_VIEW_UP)
+        lm      R5, (PITCH_SIN)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 6
+        with    R12
+        sub     R0
+        sm      (FLY_TRACE_HORIZONTAL), R12
+
+        lm      R7, (CLIP_DEPTH)
+        lm      R5, (PITCH_SIN)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 6
+        lm      R7, (FLY_TRACE_VIEW_UP)
+        lm      R5, (PITCH_COS)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 6
+        with    R12
+        add     R0
+        lm      R1, (CAMERA_Z)
+  .repeat 6
+        with    R1
+        add     R1
+  .endrepeat
+        with    R12
+        add     R1
+        sm      (FLY_TRACE_END_Z), R12
+
+        lm      R7, (FLY_TRACE_HORIZONTAL)
+        lm      R5, (YAW_COS)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 6
+        lm      R7, (FLY_TRACE_VIEW_RIGHT)
+        lm      R5, (YAW_SIN)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 6
+        with    R12
+        sub     R0
+        lm      R1, (CAMERA_X)
+  .repeat 6
+        with    R1
+        add     R1
+  .endrepeat
+        with    R12
+        add     R1
+        sm      (FLY_TRACE_END_X), R12
+
+        lm      R7, (FLY_TRACE_HORIZONTAL)
+        lm      R5, (YAW_SIN)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 6
+        lm      R7, (FLY_TRACE_VIEW_RIGHT)
+        lm      R5, (YAW_COS)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 6
+        with    R12
+        add     R0
+        lm      R1, (CAMERA_Y)
+  .repeat 6
+        with    R1
+        add     R1
+  .endrepeat
+        with    R12
+        add     R1
+        sm      (FLY_TRACE_END_Y), R12
+
+        jal     FlyAliasTraceWorld
+        nop
+        sm      (FLY_TRACE_RESULT), R0
+
+        lm      R0, (ALIAS_PIXEL_BANK)
+        romb
+        lm      R2, (FLY_TRACE_SAVED_R2)
+        lm      R3, (FLY_TRACE_SAVED_R3)
+        lm      R4, (FLY_TRACE_SAVED_R4)
+        lm      R5, (FLY_TRACE_SAVED_R5)
+        lm      R6, (FLY_TRACE_SAVED_R6)
+        lm      R7, (FLY_TRACE_SAVED_R7)
+        lm      R9, (FLY_TRACE_SAVED_R9)
+        lm      R12, (FLY_TRACE_SAVED_R12)
+        lm      R13, (FLY_TRACE_SAVED_R13)
+        lm      R0, (FLY_TRACE_RESULT)
+        lm      R11, (FLY_TRACE_VISIBILITY_RETURN)
+        ret
+        nop
+
+; Signed word R0 / 3, rounded toward zero, returned in R0.
+FlyAliasSignedDivideThree:
+        sm      (FLY_TRACE_DIVIDE_RETURN), R11
+        moves   R0, R0
+        bpl     FlyAliasDivideThreePositive
+        nop
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+        move    R1, #3
+        jal     TextureDivideUnsigned
+        nop
+        move    R0, #0
+        with    R0
+        sub     R2
+        bra     FlyAliasDivideThreeDone
+        nop
+FlyAliasDivideThreePositive:
+        move    R1, #3
+        jal     TextureDivideUnsigned
+        nop
+        move    R0, R2
+FlyAliasDivideThreeDone:
+        lm      R11, (FLY_TRACE_DIVIDE_RETURN)
+        ret
+        nop
+
+; Trace one Q6 segment through the packed world BSP. Each pending far child
+; stores {node, split point, old end}; the generated maximum node depth proves
+; the visibility arena capacity at assembly time.
+FlyAliasTraceWorld:
+        sm      (FLY_TRACE_WORLD_RETURN), R11
+        lm      R0, (CAMERA_X)
+  .repeat 6
+        with    R0
+        add     R0
+  .endrepeat
+        sm      (FLY_TRACE_START_X), R0
+        lm      R0, (CAMERA_Y)
+  .repeat 6
+        with    R0
+        add     R0
+  .endrepeat
+        sm      (FLY_TRACE_START_Y), R0
+        lm      R0, (CAMERA_Z)
+  .repeat 6
+        with    R0
+        add     R0
+  .endrepeat
+        sm      (FLY_TRACE_START_Z), R0
+        move    R0, #BSP_WORLD_ROOT_NODE
+        sm      (FLY_TRACE_NODE), R0
+        iwt     R0, #GSU_ALIAS_FLY_TRACE_STACK_OFFSET
+        sm      (FLY_TRACE_STACK_POINTER), R0
+
+FlyAliasTraceNextNode:
+        lm      R0, (FLY_TRACE_NODE)
+        moves   R0, R0
+        bpl     FlyAliasTraceNodePresent
+        nop
+        inc     R0
+        bne     FlyAliasTraceNonSolidLeaf
+        nop
+        GSU_ABSOLUTE_GOTO FlyAliasTraceBlocked
+FlyAliasTraceNonSolidLeaf:
+        ; Any non-solid leaf completes this segment interval. Resume the most
+        ; recent pending far interval, or accept when none remains.
+        lm      R10, (FLY_TRACE_STACK_POINTER)
+        iwt     R1, #GSU_ALIAS_FLY_TRACE_STACK_OFFSET
+        with    R10
+        cmp     R1
+        bne     FlyAliasTracePop
+        nop
+        GSU_ABSOLUTE_GOTO FlyAliasTraceVisible
+FlyAliasTracePop:
+        with    R10
+        sub     #GSU_ALIAS_FLY_TRACE_RECORD_BYTES
+        sm      (FLY_TRACE_STACK_POINTER), R10
+        ; The completed near interval ends at the split point, so its current
+        ; end is exactly the pending far interval's start. Keep only the old
+        ; far end in the stack record.
+        lm      R1, (FLY_TRACE_END_X)
+        sm      (FLY_TRACE_START_X), R1
+        lm      R1, (FLY_TRACE_END_Y)
+        sm      (FLY_TRACE_START_Y), R1
+        lm      R1, (FLY_TRACE_END_Z)
+        sm      (FLY_TRACE_START_Z), R1
+        movew   R1, (R10)
+        sm      (FLY_TRACE_NODE), R1
+        inc     R10
+        inc     R10
+        movew   R1, (R10)
+        sm      (FLY_TRACE_END_X), R1
+        inc     R10
+        inc     R10
+        movew   R1, (R10)
+        sm      (FLY_TRACE_END_Y), R1
+        inc     R10
+        inc     R10
+        movew   R1, (R10)
+        sm      (FLY_TRACE_END_Z), R1
+        bra     FlyAliasTraceNextNode
+        nop
+
+FlyAliasTraceNodePresent:
+        sm      (BRUSH_CURRENT_NODE), R0
+        jal     BrushLoadCurrentNode
+        nop
+        lm      R0, (BRUSH_NODE_PLANE)
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R0
+        iwt     R4, #$8000
+        with    R4
+        add     R1
+        move    R0, #WORLD_PLANES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_SIGNED_BYTE R7
+        sm      (FLY_TRACE_NORMAL_X), R7
+        BSP_ROM_LOAD_SIGNED_BYTE R8
+        sm      (FLY_TRACE_NORMAL_Y), R8
+        BSP_ROM_LOAD_SIGNED_BYTE R9
+        sm      (FLY_TRACE_NORMAL_Z), R9
+        BSP_ROM_LOAD_WORD R10
+        sm      (FLY_TRACE_PLANE_DISTANCE), R10
+
+        iwt     R10, #FLY_TRACE_START_X
+        jal     FlyAliasTracePlaneDistance
+        nop
+        sm      (FLY_TRACE_START_DISTANCE), R0
+        iwt     R10, #FLY_TRACE_END_X
+        jal     FlyAliasTracePlaneDistance
+        nop
+        sm      (FLY_TRACE_END_DISTANCE), R0
+
+        lm      R0, (FLY_TRACE_START_DISTANCE)
+        moves   R0, R0
+        bpl     FlyAliasTraceStartFront
+        nop
+        lm      R1, (FLY_TRACE_END_DISTANCE)
+        moves   R1, R1
+        bpl     FlyAliasTraceSplitBackFront
+        nop
+        lm      R0, (BRUSH_NODE_BACK)
+        sm      (FLY_TRACE_NODE), R0
+        GSU_ABSOLUTE_GOTO FlyAliasTraceNextNode
+FlyAliasTraceStartFront:
+        lm      R1, (FLY_TRACE_END_DISTANCE)
+        moves   R1, R1
+        bmi     FlyAliasTraceSplitFrontBack
+        nop
+        lm      R0, (BRUSH_NODE_FRONT)
+        sm      (FLY_TRACE_NODE), R0
+        GSU_ABSOLUTE_GOTO FlyAliasTraceNextNode
+
+FlyAliasTraceSplitBackFront:
+        lm      R0, (BRUSH_NODE_BACK)
+        sm      (FLY_TRACE_NEAR_CHILD), R0
+        lm      R0, (BRUSH_NODE_FRONT)
+        sm      (FLY_TRACE_FAR_CHILD), R0
+        bra     FlyAliasTraceSplitReady
+        nop
+FlyAliasTraceSplitFrontBack:
+        lm      R0, (BRUSH_NODE_FRONT)
+        sm      (FLY_TRACE_NEAR_CHILD), R0
+        lm      R0, (BRUSH_NODE_BACK)
+        sm      (FLY_TRACE_FAR_CHILD), R0
+FlyAliasTraceSplitReady:
+        lm      R0, (FLY_TRACE_START_DISTANCE)
+        moves   R0, R0
+        bpl     FlyAliasTraceStartMagnitudeReady
+        nop
+        move    R1, #0
+        with    R1
+        sub     R0
+        move    R0, R1
+FlyAliasTraceStartMagnitudeReady:
+        move    R7, R0
+        lm      R1, (FLY_TRACE_END_DISTANCE)
+        moves   R1, R1
+        bpl     FlyAliasTraceEndMagnitudeReady
+        nop
+        move    R0, #0
+        with    R0
+        sub     R1
+        move    R1, R0
+FlyAliasTraceEndMagnitudeReady:
+        move    R2, R7
+        with    R2
+        add     R1
+        move    R0, R7
+        jal     TextureDivideQ12
+        nop
+        sm      (FLY_TRACE_FACTOR), R3
+
+        lm      R7, (FLY_TRACE_END_X)
+        lm      R8, (FLY_TRACE_START_X)
+        with    R7
+        sub     R8
+        lm      R3, (FLY_TRACE_FACTOR)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R0
+        add     R8
+        sm      (FLY_TRACE_MID_X), R0
+        lm      R7, (FLY_TRACE_END_Y)
+        lm      R8, (FLY_TRACE_START_Y)
+        with    R7
+        sub     R8
+        lm      R3, (FLY_TRACE_FACTOR)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R0
+        add     R8
+        sm      (FLY_TRACE_MID_Y), R0
+        lm      R7, (FLY_TRACE_END_Z)
+        lm      R8, (FLY_TRACE_START_Z)
+        with    R7
+        sub     R8
+        lm      R3, (FLY_TRACE_FACTOR)
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R0
+        add     R8
+        sm      (FLY_TRACE_MID_Z), R0
+
+        lm      R10, (FLY_TRACE_STACK_POINTER)
+        lm      R1, (FLY_TRACE_FAR_CHILD)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        lm      R1, (FLY_TRACE_END_X)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        lm      R1, (FLY_TRACE_END_Y)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        lm      R1, (FLY_TRACE_END_Z)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        sm      (FLY_TRACE_STACK_POINTER), R10
+
+        lm      R0, (FLY_TRACE_MID_X)
+        sm      (FLY_TRACE_END_X), R0
+        lm      R0, (FLY_TRACE_MID_Y)
+        sm      (FLY_TRACE_END_Y), R0
+        lm      R0, (FLY_TRACE_MID_Z)
+        sm      (FLY_TRACE_END_Z), R0
+        lm      R0, (FLY_TRACE_NEAR_CHILD)
+        sm      (FLY_TRACE_NODE), R0
+        GSU_ABSOLUTE_GOTO FlyAliasTraceNextNode
+
+; Both segment endpoints use this exact signed dot product at every visited
+; BSP node. Keep its instruction fetches in cache while reading point/plane
+; state from RAM; arithmetic and per-texel visibility remain unchanged.
+GSU_CACHE_KERNEL_BEGIN FlyAliasTracePlaneDistance
+        sm      (FLY_TRACE_HELPER_RETURN), R11
+        movew   R7, (R10)
+        inc     R10
+        inc     R10
+        lm      R5, (FLY_TRACE_NORMAL_X)
+        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 6
+        movew   R7, (R10)
+        inc     R10
+        inc     R10
+        lm      R5, (FLY_TRACE_NORMAL_Y)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 6
+        with    R12
+        add     R0
+        movew   R7, (R10)
+        lm      R5, (FLY_TRACE_NORMAL_Z)
+        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 6
+        with    R12
+        add     R0
+        lm      R1, (FLY_TRACE_PLANE_DISTANCE)
+        with    R12
+        sub     R1
+        move    R0, R12
+        lm      R11, (FLY_TRACE_HELPER_RETURN)
+        ret
+        nop
+GSU_CACHE_KERNEL_END FlyAliasTracePlaneDistance
+
+FlyAliasTraceBlocked:
+        move    R0, #0
+        bra     FlyAliasTraceDone
+        nop
+FlyAliasTraceVisible:
+        move    R0, #1
+FlyAliasTraceDone:
+        lm      R11, (FLY_TRACE_WORLD_RETURN)
+        ret
+        nop
+
+.assert * - FlyAliasTestVisibility <= GSU_ALIAS_FLY_CODE_CAPACITY, error, "Fly alias trace code exceeds the deferred overlay"

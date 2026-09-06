@@ -1,0 +1,295 @@
+{
+  "contract": {
+    "bitOrder": "row i is little-endian bit (i & 7) of byte (i >> 3)",
+    "rowCount": 1484,
+    "runtime": "default ordered playback may bypass local depth only on a set bit; fly, menu-disabled entities, and every clear bit retain exact depth",
+    "safeMeaning": "direct same-leaf brush replay produced the byte-identical logical framebuffer of the exact local-depth arbiter",
+    "sampleRateHz": 20
+  },
+  "coverage": {
+    "exactFallbackRanges": [
+      {
+        "count": 1,
+        "first": 26,
+        "last": 26
+      },
+      {
+        "count": 1,
+        "first": 28,
+        "last": 28
+      },
+      {
+        "count": 1,
+        "first": 33,
+        "last": 33
+      },
+      {
+        "count": 2,
+        "first": 114,
+        "last": 115
+      },
+      {
+        "count": 2,
+        "first": 118,
+        "last": 119
+      },
+      {
+        "count": 2,
+        "first": 127,
+        "last": 128
+      },
+      {
+        "count": 3,
+        "first": 208,
+        "last": 210
+      },
+      {
+        "count": 3,
+        "first": 337,
+        "last": 339
+      },
+      {
+        "count": 2,
+        "first": 383,
+        "last": 384
+      },
+      {
+        "count": 4,
+        "first": 388,
+        "last": 391
+      },
+      {
+        "count": 7,
+        "first": 399,
+        "last": 405
+      },
+      {
+        "count": 59,
+        "first": 456,
+        "last": 514
+      },
+      {
+        "count": 3,
+        "first": 536,
+        "last": 538
+      },
+      {
+        "count": 2,
+        "first": 540,
+        "last": 541
+      },
+      {
+        "count": 1,
+        "first": 543,
+        "last": 543
+      },
+      {
+        "count": 1,
+        "first": 551,
+        "last": 551
+      },
+      {
+        "count": 1,
+        "first": 555,
+        "last": 555
+      },
+      {
+        "count": 53,
+        "first": 567,
+        "last": 619
+      },
+      {
+        "count": 1,
+        "first": 630,
+        "last": 630
+      },
+      {
+        "count": 23,
+        "first": 644,
+        "last": 666
+      },
+      {
+        "count": 2,
+        "first": 671,
+        "last": 672
+      },
+      {
+        "count": 4,
+        "first": 683,
+        "last": 686
+      },
+      {
+        "count": 4,
+        "first": 689,
+        "last": 692
+      },
+      {
+        "count": 4,
+        "first": 697,
+        "last": 700
+      },
+      {
+        "count": 2,
+        "first": 705,
+        "last": 706
+      },
+      {
+        "count": 8,
+        "first": 752,
+        "last": 759
+      },
+      {
+        "count": 2,
+        "first": 885,
+        "last": 886
+      },
+      {
+        "count": 3,
+        "first": 891,
+        "last": 893
+      },
+      {
+        "count": 2,
+        "first": 901,
+        "last": 902
+      },
+      {
+        "count": 2,
+        "first": 913,
+        "last": 914
+      },
+      {
+        "count": 4,
+        "first": 917,
+        "last": 920
+      },
+      {
+        "count": 1,
+        "first": 989,
+        "last": 989
+      },
+      {
+        "count": 2,
+        "first": 992,
+        "last": 993
+      },
+      {
+        "count": 1,
+        "first": 995,
+        "last": 995
+      },
+      {
+        "count": 2,
+        "first": 1001,
+        "last": 1002
+      },
+      {
+        "count": 2,
+        "first": 1054,
+        "last": 1055
+      },
+      {
+        "count": 2,
+        "first": 1059,
+        "last": 1060
+      },
+      {
+        "count": 2,
+        "first": 1068,
+        "last": 1069
+      },
+      {
+        "count": 4,
+        "first": 1259,
+        "last": 1262
+      },
+      {
+        "count": 9,
+        "first": 1270,
+        "last": 1278
+      },
+      {
+        "count": 7,
+        "first": 1282,
+        "last": 1288
+      }
+    ],
+    "exactFallbackRowCount": 241,
+    "safeRowCount": 1243
+  },
+  "performanceEvidence": {
+    "exact": {
+      "busyTicks": 55990973166,
+      "frames": 39643,
+      "freshFps": 2.2497448932655204,
+      "instructions": 16062037818
+    },
+    "rowReconciledGuardedProjection": {
+      "busyTicks": 55403520490,
+      "frames": 39236,
+      "instructions": 16071024289,
+      "note": "sum of matched per-row exact/direct measurement deltas"
+    },
+    "unguardedDirect": {
+      "busyTicks": 54678365377,
+      "frames": 38728,
+      "freshFps": 2.3028980790055003,
+      "instructions": 16038896843
+    }
+  },
+  "rows": {
+    "safeMaskHex": "ffffffebfdffffffffffffffffff337ffefffffffffffffffffff8fffffffffffffffffffffffffffffff1ffffffff7f0e7fc0ffffffffffff00000000000000f8ffff487ff77f000000000000f0bfff0f000078fe87e1e1f9ffffffffff00ffffffffffffffffffffffffffffff9fc79fff19feffffffffffffffdff4f9ffffffffff3fe7cfffffffffffffffffffffffffffffffffffffffffffffff873f8003feffffffffffffffffffffffffffffffffffffffffffffff0f"
+  },
+  "schema": "quake-brush-direct-safety-v1",
+  "source": {
+    "boundInputs": {
+      "demoTiming": "654434444ff737598f81e75a2243e56cf6e39629ba8183a6676c4a55c57b9129",
+      "demoTrack": "3ab592cf1f376b1d8f8b6b0f88fed7bfd9670ef009dfcdf8abf72471965a9887",
+      "metadata": "49a139454630fe9fc68ed2150ee03278cab1a7725c11d7e96661a72708f9c793",
+      "orderedCameraTrack": "25062dd8e54ed229eccc3c7b5699701a33fb5f95213b882af769b6c171e17585",
+      "orderedTiming": "0a20566f14cfa159d19123f4fcdfc399812f03f6eaea9addb9d4522e0ac8151c"
+    },
+    "directReport": {
+      "bytes": 4140078,
+      "path": "direct.json",
+      "romSha256": "cb5c69a5f8f554bb80e3f0fbf51f559b950199be9318fbd8d6dbcd5c5e3157e8",
+      "sha256": "b704248bfa1b558b2a823a6ba3de936c8f834c60ba024fe3f96a6858fdc995fb"
+    },
+    "exactReport": {
+      "bytes": 4140609,
+      "path": "exact.json",
+      "romSha256": "27d49d39c8380f67e7feaa054adc9de29f704c7e2671d5266c471f867fc6be0e",
+      "sha256": "3d6af2ece58984ed30458901115992a66971e008304cc4078f4d2bb5688a1517"
+    },
+    "externalVisibilitySha256": "f6f51b80aeeb9301d950889577a10260723b5f39b9a05124d909f59f3ec3184b",
+    "inputRebind": {
+      "contract": "runtime metadata is byte-equal after excluding its generated-output inventory, verified PVS ROM placement, and retired visible-depth descriptors; every other bound input is byte-identical",
+      "currentMetadataSha256": "49a139454630fe9fc68ed2150ee03278cab1a7725c11d7e96661a72708f9c793",
+      "previousMetadataSha256": "52b1ba76518061ecac67657b1ad3a63f7714e69e30f0cfb19abb104223122211"
+    },
+    "pvsPlacementRebind": {
+      "contract": "validated bank-18 relocation; every encoded row, directory and guard byte is identical",
+      "sha256": {
+        "QuakeBSPWorldPVS0.bin": "e230f4ad0fb27c915c3e5e7163f0a2c5e1a81dccea1553d57947cce2832dbb6d",
+        "QuakeBSPWorldPVS1.bin": "35ee88ec10221c61fbba6ab4cb92f856e3c62fc0d55485f1208852fad6296ee7",
+        "QuakeBSPWorldPVS2.bin": "8ff7bbb5c655df8f57e7d63966b62a0eef69d42f8ff9b979798de2a78b47d37b",
+        "QuakeBSPWorldPVS3.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "QuakeBSPWorldPVSDirectory.bin": "47cefdad14fd84d5e4641eae102d9cbc4ab435b48990e39975da7cf10e3b3445",
+        "QuakeBSPWorldPVSGuards.bin": "3a8f2bbe6289180b09eaadd31c54431b7a1dea7d651da46bb08c52577ab2d8dd"
+      }
+    },
+    "visibilityRebind": {
+      "contract": "entity and face admission plus timeline are byte-equal; pixel-count diagnostics may change without changing the direct-safety mask",
+      "current": {
+        "bytes": 110737,
+        "referenceSourcesSha256": "1e41980acab68752ef1a544ff7a7563dc0d2776f228a7e95b5ec849e0f1b2176",
+        "sha256": "f6f51b80aeeb9301d950889577a10260723b5f39b9a05124d909f59f3ec3184b"
+      },
+      "previous": {
+        "bytes": 110737,
+        "referenceSourcesSha256": "1e41980acab68752ef1a544ff7a7563dc0d2776f228a7e95b5ec849e0f1b2176",
+        "sha256": "f6f51b80aeeb9301d950889577a10260723b5f39b9a05124d909f59f3ec3184b"
+      }
+    }
+  }
+}

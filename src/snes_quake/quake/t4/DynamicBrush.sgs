@@ -1,0 +1,170 @@
+; Technique-4 dynamic-brush dispatch overlays. Each fragment occupies the
+; exact general-code window it replaces so cache identity and every external
+; entry remain stable. ROM63 keeps the independently restorable dynamic path.
+
+.segment "GSU_T4_BRUSH_FRAGMENT_PATCH"
+T4BrushFragmentLightmap:
+        jal     BrushLoadFaceLightmap
+        nop
+  .repeat GSU_T4_BRUSH_FRAGMENT_CAPACITY - (* - T4BrushFragmentLightmap)
+        nop
+  .endrepeat
+.assert .loword(T4BrushFragmentLightmap) = GSU_T4_BRUSH_FRAGMENT_OFFSET, error, "Technique-4 fragment patch moved"
+.assert * = BrushFragmentTextureReady, error, "Technique-4 fragment patch changed the shared continuation"
+
+.segment "GSU_T4_BRUSH_WORLD_PATCH"
+T4BrushWorldLightmap:
+        jal     TextureLoadFaceLightmap
+        jal     TextureRenderConvexFaceShaded
+        GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
+  .repeat GSU_T4_BRUSH_WORLD_CAPACITY - (* - T4BrushWorldLightmap)
+        nop
+  .endrepeat
+.assert T4BrushWorldLightmap = BrushWorldTextureReady, error, "Technique-4 world-face patch moved"
+.assert * = BrushWorldNotLightmapped, error, "Technique-4 world-face patch changed the general continuation"
+
+.segment "GSU_T4_BRUSH_SAMPLE_PATCH"
+T4BrushSelectTextureSampleRoutine:
+        GSU_ABSOLUTE_GOTO TextureSelectSampleRoutine
+  .repeat GSU_T4_BRUSH_SAMPLE_CAPACITY - (* - T4BrushSelectTextureSampleRoutine)
+        nop
+  .endrepeat
+.assert T4BrushSelectTextureSampleRoutine = BrushSelectTextureSampleRoutine, error, "Technique-4 brush sampler selector moved"
+.assert * = BrushSelectTextureSampleRoutineTextured, error, "Technique-4 brush sampler patch changed the general continuation"
+
+.segment "GSU_T4_BRUSH_RASTER_PATCH"
+T4BrushRasterPreparedLightmap:
+        jal     TextureRasterPolygonShaded
+        nop
+        GSU_ABSOLUTE_GOTO BrushRasterPreparedDone
+  .repeat GSU_T4_BRUSH_RASTER_CAPACITY - (* - T4BrushRasterPreparedLightmap)
+        nop
+  .endrepeat
+.assert .loword(T4BrushRasterPreparedLightmap) = GSU_T4_BRUSH_RASTER_OFFSET, error, "Technique-4 brush raster patch moved"
+.assert T4BrushRasterPreparedLightmap = BrushRasterPreparedLightmap, error, "Technique-4 brush raster patch moved away from the general raster"
+.assert * = BrushRasterPreparedLightmapEnd, error, "Technique-4 brush raster patch changed the general continuation"
+
+.segment "GSU_T4_BRUSH_MODE_PATCH"
+T4BrushArbiterModeCheck:
+        GSU_ABSOLUTE_GOTO BrushArbiterCollectBegin
+  .repeat GSU_T4_BRUSH_MODE_CAPACITY - (* - T4BrushArbiterModeCheck)
+        nop
+  .endrepeat
+.assert T4BrushArbiterModeCheck = BrushArbiterModeCheck, error, "Technique-4 brush arbiter gate moved"
+.assert * = BrushArbiterCollectBegin, error, "Technique-4 brush arbiter gate changed the collector entry"
+
+.segment "GSU_T4_BRUSH_PREP_PATCH"
+T4BrushArbiterPrepareLightmap:
+        GSU_ABSOLUTE_GOTO BrushArbiterPrepareLightmap
+  .repeat GSU_T4_BRUSH_PREP_CAPACITY - (* - T4BrushArbiterPrepareLightmap)
+        nop
+  .endrepeat
+.assert .loword(T4BrushArbiterPrepareLightmap) = GSU_T4_BRUSH_PREP_OFFSET, error, "Technique-4 brush lightmap preparation patch moved"
+.assert * = BrushArbiterPrepareLightmap, error, "Technique-4 brush lightmap preparation changed its continuation"
+
+.segment "GSU_T4_BRUSH_ROW_PATCH"
+T4BrushArbiterStageRow:
+        jal     BrushArbiterStageCurrentRow
+        nop
+        sm      (BRUSH_ARB_ROW_STAGE_MODE), R0
+        moves   R0, R0
+        beq     BrushArbiterSelectGeneralRow
+        nop
+        dec     R0
+        beq     BrushArbiterSelectGeneralRow
+        nop
+        iwt     R0, #BrushArbiterDrawDisjointSpan
+        sm      (BRUSH_ARBITER_DRAW_ROUTINE), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterLoadStagedCandidate
+  .repeat GSU_T4_BRUSH_ROW_CAPACITY - (* - T4BrushArbiterStageRow)
+        nop
+  .endrepeat
+.assert .loword(T4BrushArbiterStageRow) = GSU_T4_BRUSH_ROW_OFFSET, error, "Technique-4 brush row patch moved"
+.assert * = BrushArbiterRowStageFallback, error, "Technique-4 brush row patch changed the fallback entry"
+
+.segment "GSU_T4_BRUSH_MATERIAL_PATCH"
+T4BrushArbiterMaterialLightmap:
+        GSU_ABSOLUTE_GOTO BrushArbiterMaterialLightmapped
+  .repeat GSU_T4_BRUSH_MATERIAL_CAPACITY - (* - T4BrushArbiterMaterialLightmap)
+        nop
+  .endrepeat
+.assert T4BrushArbiterMaterialLightmap = BrushArbiterTextureReady, error, "Technique-4 brush material patch moved"
+.assert * = BrushArbiterMaterialLightmapped, error, "Technique-4 brush material patch changed the lightmap entry"
+
+.segment "GSU_T4_BRUSH_FORWARD_PATCH"
+T4BrushArbiterForwardIntersect:
+        jal     TextureCacheActiveEdgeShaded
+        nop
+        iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET
+        jal     TextureIntersectActiveEdgeShaded
+        nop
+        sm      (TEXTURE_EDGE_S), R8
+        sm      (TEXTURE_EDGE_T), R9
+        sm      (TEXTURE_EDGE_SHADE), R12
+        bra     BrushArbiterForwardIntersected
+        nop
+  .repeat GSU_T4_BRUSH_FORWARD_CAPACITY - (* - T4BrushArbiterForwardIntersect)
+        nop
+  .endrepeat
+.assert .loword(T4BrushArbiterForwardIntersect) = GSU_T4_BRUSH_FORWARD_OFFSET, error, "Technique-4 forward-edge patch moved"
+.assert * = BrushArbiterForwardProjective, error, "Technique-4 forward-edge patch changed the general continuation"
+
+.segment "GSU_T4_BRUSH_REVERSE_PATCH"
+T4BrushArbiterReverseIntersect:
+        iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET+GSU_TEXTURE_EDGE_DIVIDE_CACHE_ENTRY_BYTES
+        jal     TextureIntersectActiveEdgeShaded
+        nop
+        sm      (TEXTURE_EDGE_S), R8
+        sm      (TEXTURE_EDGE_T), R9
+        sm      (TEXTURE_EDGE_SHADE), R12
+        bra     BrushArbiterReverseIntersected
+        nop
+  .repeat GSU_T4_BRUSH_REVERSE_CAPACITY - (* - T4BrushArbiterReverseIntersect)
+        nop
+  .endrepeat
+.assert .loword(T4BrushArbiterReverseIntersect) = GSU_T4_BRUSH_REVERSE_OFFSET, error, "Technique-4 reverse-edge patch moved"
+.assert * = BrushArbiterReverseProjective, error, "Technique-4 reverse-edge patch changed the general continuation"
+
+.segment "GSU_T4_BRUSH_SPAN_PATCH"
+T4BrushArbiterDrawCandidateSpan:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanNearDepthCheck
+  .repeat GSU_T4_BRUSH_SPAN_CAPACITY - (* - T4BrushArbiterDrawCandidateSpan)
+        nop
+  .endrepeat
+.assert T4BrushArbiterDrawCandidateSpan = BrushArbiterDrawCandidateSpan, error, "Technique-4 candidate-span patch moved"
+.assert * = BrushArbiterSpanNearDepthCheck, error, "Technique-4 candidate-span patch changed the near-depth entry"
+
+.segment "GSU_T4_BRUSH_BLOCK_PATCH"
+T4BrushArbiterSpanFirstBlock:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPrepareLightmap
+  .repeat GSU_T4_BRUSH_BLOCK_CAPACITY - (* - T4BrushArbiterSpanFirstBlock)
+        nop
+  .endrepeat
+.assert T4BrushArbiterSpanFirstBlock = BrushArbiterSpanFirstBlock, error, "Technique-4 span-block patch moved"
+.assert * = BrushArbiterSpanBlockSetup, error, "Technique-4 span-block patch changed the general block entry"
+
+.segment "GSU_T4_BRUSH_FINAL_PATCH"
+T4BrushArbiterSpanFinalCoordinates:
+        lm      R5, (BRUSH_ARBITER_FINAL_S)
+        lm      R6, (BRUSH_ARBITER_FINAL_T)
+        bra     BrushArbiterSpanBlockCoordinatesReady
+        nop
+  .repeat GSU_T4_BRUSH_FINAL_CAPACITY - (* - T4BrushArbiterSpanFinalCoordinates)
+        nop
+  .endrepeat
+.assert .loword(T4BrushArbiterSpanFinalCoordinates) = GSU_T4_BRUSH_FINAL_OFFSET, error, "Technique-4 final-coordinate patch moved"
+.assert * = BrushArbiterSpanSampleBlockEnd, error, "Technique-4 final-coordinate patch changed the fallback sampler entry"
+
+.segment "GSU_T4_BRUSH_FALLBACK_PATCH"
+T4BrushRenderFallbackWorld:
+        move    R0, #1
+        move    R1, #4
+        jal     TextureRenderFaces
+        nop
+        bra     BrushRenderComplete
+        nop
+  .repeat GSU_T4_BRUSH_FALLBACK_CAPACITY - (* - T4BrushRenderFallbackWorld)
+        nop
+  .endrepeat
+.assert T4BrushRenderFallbackWorld = BrushRenderFallbackWorld, error, "Technique-4 world fallback patch moved"
+.assert * = BrushRenderFallbackWorldEnd, error, "Technique-4 world fallback patch changed the general continuation"
