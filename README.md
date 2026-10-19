@@ -156,6 +156,9 @@ and [build instructions](docs/BUILDING.md).
   [Quake engine source](https://github.com/id-Software/Quake).
 - [Limited Run Games](https://limitedrungames.com/) for the
   [FX3 chip and its documentation](https://github.com/LimitedRunGames-Tech/snes-fx3).
+- [David Lindecrantz (Optiroc)](https://github.com/Optiroc) for
+  [libSFX](https://github.com/Optiroc/libSFX), the SNES development framework
+  used by this project.
 - [Mesen](https://www.mesen.ca/) creator Sour and the
   [Mesen Community Edition contributors](https://github.com/nesdev-org/MesenCE)
   for the emulator, debugger and Super FX support that make development and
