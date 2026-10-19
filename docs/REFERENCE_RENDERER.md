@@ -4,13 +4,13 @@ The C++ reference application lets you compare the original level geometry and
 lighting with the SNES renderer. Its window includes playback, rendering, sound
 and timeline controls.
 
-First [build the ROM and regenerate its assets](BUILDING.md) on an AVX2-capable
-machine, using the default build without the qualified-assets option. This
+First [build the ROM and regenerate its assets](BUILDING.md), using the default
+build without the qualified-assets option. This
 creates the level archive below. From the repository root, use the same Python
 environment to build the reference application:
 
 ```powershell
-./.venv/Scripts/python.exe tools/commands/snes_quake/build_quake_bsp_reference.py
+./.venv/Scripts/python.exe tools/snes_tooling_cli.py quake.build-quake-bsp-reference
 ```
 
 On Linux, use `.venv/bin/python` instead. The builder installs the pinned SDL3,
@@ -29,8 +29,8 @@ Launch the reference tool with the generated E1M3 level and replay inputs:
   --sound-replay src/snes_quake/Data/QuakeBSPReferenceSoundReplay.bin `
   --alias-assets src/snes_quake/Data `
   --data-dir src/snes_quake/Data `
-  --ordered-replay src/snes_quake/Data/QuakeBSPOrderedReplay20Hz.bin `
-  --ordered-2hz
+  --ordered-replay src/snes_quake/Data/QuakeBSPOrderedReplay30Hz.bin `
+  --ordered-3hz
 ```
 
 On Linux, the executable has no `.exe` suffix; use backslashes for shell line

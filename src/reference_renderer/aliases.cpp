@@ -86,7 +86,7 @@ std::size_t alias_fly_row(const AliasAssets& assets, const Camera& camera)
     {
         fail("QBA1 has no complete eight-angle fly row set");
     }
-    const auto orbit = static_cast<std::size_t>(((table_index(camera.yaw) + 2) >> 2) & 7);
+    const auto orbit = static_cast<std::size_t>(((table_index(camera.yaw) + 16) >> 5) & 7);
     return assets.rows.size() - kAliasFlyRowCount + orbit;
 }
 
@@ -492,6 +492,10 @@ void compose_alias_billboards(
             frame.indices[pixel] = static_cast<std::uint8_t>(index & 0x0fU);
             frame.material_indices[pixel] = 0;
             frame.texture_indices[pixel] = index;
+            if (!frame.turbulent_pixels.empty())
+            {
+                frame.turbulent_pixels[pixel] = 0;
+            }
             frame.texture_s[pixel] = source_x;
             frame.texture_t[pixel] = source_y;
             frame.lightmap_texture_indices[pixel] = index;
@@ -512,8 +516,7 @@ int alias_project_component_q7(int component, int depth)
     const bool negative = component < 0;
     const int magnitude = negative ? -component : component;
     const int quotient = static_cast<int>(static_cast<std::int64_t>(magnitude) * 2048 / depth);
-    const int projected = quotient * 6;
-    return negative ? -projected : projected;
+    return render_project_q7(negative ? -quotient : quotient);
 }
 } // namespace
 
@@ -528,8 +531,8 @@ PackedAliasAxisProjection project_packed_alias_axis(
 {
     const int direction = inverted ? -1 : 1;
     PackedAliasAxisProjection projection;
-    projection.first_q7 = center_q7 + direction * alias_project_component_q7(first_component, depth);
-    projection.last_q7 = center_q7 + direction * alias_project_component_q7(last_component, depth);
+    projection.first_q7 = center_q7 + alias_project_component_q7(direction * first_component, depth);
+    projection.last_q7 = center_q7 + alias_project_component_q7(direction * last_component, depth);
     projection.span_q7 = projection.last_q7 - projection.first_q7;
     if (projection.span_q7 <= 0)
     {
@@ -596,7 +599,8 @@ std::vector<std::uint8_t> compose_post_opaque_alias_indices(
     std::size_t sample_index,
     RenderMode mode,
     AliasCoverage* coverage,
-    AliasVisibilityRow* visibility
+    AliasVisibilityRow* visibility,
+    std::vector<std::int16_t>* composed_depth
 )
 {
     if (opaque_indices.size() != kLogicalPixels || opaque_depth_q6.size() != kLogicalPixels)
@@ -604,6 +608,8 @@ std::vector<std::uint8_t> compose_post_opaque_alias_indices(
         fail("post-opaque alias base has incomplete color or depth");
     }
     std::vector<std::uint8_t> composed(opaque_indices.begin(), opaque_indices.end());
+    if (composed_depth != nullptr)
+        composed_depth->assign(opaque_depth_q6.begin(), opaque_depth_q6.end());
     std::vector<std::int16_t> alias_owner;
     std::vector<std::size_t> record_by_token;
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> overwrite_pixels;
@@ -656,6 +662,8 @@ std::vector<std::uint8_t> compose_post_opaque_alias_indices(
                 alias_owner[pixel] = static_cast<std::int16_t>(token_ordinal);
             }
             composed[pixel] = mode.textures ? texel : kUntexturedBrightIndex;
+            if (composed_depth != nullptr)
+                (*composed_depth)[pixel] = static_cast<std::int16_t>(alias_depth_q6);
             if (coverage != nullptr)
             {
                 ++coverage->packed_visible_pixels;
@@ -746,8 +754,8 @@ Json packed_alias_inspection(
                      {"lastX", record.last_x},
                      {"lastY", record.last_y},
                      {"clipped",
-                      record.first_x < 0 || record.first_y < 0 || record.last_x >= kLogicalWidth ||
-                          record.last_y >= kLogicalHeight}
+                      record.first_x < 0 || record.first_y < 0 || record.last_x >= render_width() ||
+                          record.last_y >= render_height()}
                  }},
                 {"pixels",
                  Json{
@@ -785,6 +793,13 @@ Json packed_alias_inspection(
     }
     return Json{
         {"schema", "quake-reference-alias-inspection-v1"},
+        {"projection",
+         {
+             {"renderScale", render_scale_name(active_render_scale)},
+             {"center", {render_center_x(), render_center_y()}},
+             {"focal", render_focal_length()},
+             {"diagnosticSource", active_source_focal != 64},
+         }},
         {"available", true},
         {"sourcePose", source_pose},
         {"camera",
@@ -821,7 +836,8 @@ ReferenceFrame render_source_reference_with_aliases(
     const ExternalBspScene* external_scene,
     const ExternalBspReplay* external_replay,
     bool external_models_enabled,
-    ExternalBspCoverage* external_coverage
+    ExternalBspCoverage* external_coverage,
+    std::optional<double> surface_time
 )
 {
     auto frame = render_source_reference_with_brushes(
@@ -832,7 +848,8 @@ ReferenceFrame render_source_reference_with_aliases(
         replay,
         sample_index,
         flat,
-        brushes_enabled
+        brushes_enabled,
+        surface_time
     );
     if (external_replay != nullptr)
     {
@@ -854,7 +871,7 @@ ReferenceFrame render_source_reference_with_aliases(
                 *external_scene,
                 external_replay->row(sample_index),
                 sample_index,
-                external_bsp_server_time(*external_replay, sample_index),
+                surface_time.value_or(external_bsp_server_time(*external_replay, sample_index)),
                 flat,
                 source_view_transform(camera),
                 frame,

@@ -86,7 +86,7 @@ BrushArbiterCollectBegin:
         sm      (BRUSH_ARB_METADATA_COUNT), R0
         iwt     R0, #GSU_BRUSH_ARBITER_SCREEN_OFFSET
         sm      (BRUSH_ARB_SCREEN_CURSOR), R0
-        move    R0, #112
+        move    R0, #BSP_VIEW_HEIGHT
         sm      (BRUSH_ARB_GROUP_MIN_Y), R0
         move    R0, #0
         sm      (BRUSH_ARB_GROUP_MAX_Y), R0
@@ -537,7 +537,7 @@ BrushArbiterClearFirstReady:
         nop
         move    R3, #0
 BrushArbiterClearLastPositive:
-        move    R0, #127
+        move    R0, #BSP_VIEW_WIDTH-1
         move    R4, R0
         with    R4
         sub     R3
@@ -553,7 +553,7 @@ BrushArbiterClearLastReady:
         ; A vertically admitted polygon can still miss the horizontal
         ; viewport. Preserve the old full-row clear for that rare bound.
         move    R1, #0
-        iwt     R12, #BSP_LOGICAL_WIDTH
+        iwt     R12, #BSP_VIEW_WIDTH
         bra     BrushArbiterClearCountStore
         nop
 BrushArbiterClearCountReady:
@@ -1084,7 +1084,7 @@ BrushArbiterFirstReady:
         with    R3
         sub     R0
         BSP_ARITH_SHIFT7 R3, R4
-        move    R0, #127
+        move    R0, #BSP_VIEW_WIDTH-1
         move    R4, R0
         with    R4
         sub     R3

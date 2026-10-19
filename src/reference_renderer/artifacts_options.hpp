@@ -6,6 +6,8 @@
 
 namespace quake_bsp_reference {
 
+bool run_particle_option_contract_self_test();
+
 void write_quake_sky_artifacts(
     const fs::path& indices_path,
     std::span<const std::uint8_t> indices,
@@ -118,6 +120,12 @@ void write_diff(
 
 struct Options
 {
+    std::string render_scale{"x2"};
+    int diagnostic_source_focal{64};
+    std::string warp_model{"projective"};
+    double warp_depth{192.0};
+    int warp_bands{16};
+    std::vector<int> warp_profile;
     fs::path pak;
     std::string map_entry{"maps/e1m3.bsp"};
     fs::path data_dir;
@@ -143,6 +151,8 @@ struct Options
     fs::path brush_replay;
     fs::path external_bsp_replay;
     fs::path sound_replay;
+    fs::path particle_replay;
+    fs::path particle_output;
     fs::path alias_assets;
     fs::path ordered_replay;
     fs::path ordered_alias_visibility;
@@ -150,7 +160,7 @@ struct Options
     fs::path realtime_demo_timing;
     std::string instrumentation_session;
     std::string instrumentation_pipe;
-    Camera camera{-46, -80, -7, 24, 0};
+    Camera camera{-46, -80, -7, 192, 0};
     std::string camera_label{"spawn"};
     int allowed_holes{};
     int demo_pose{-1};
@@ -163,13 +173,17 @@ struct Options
     bool material_view{};
     PlaybackSpeed playback_speed{PlaybackSpeed::Realtime};
     Lighting lighting{Lighting::LightMap};
-    bool ordered_2hz{};
+    Lighting liquid_lighting{Lighting::LightMap};
+    LiquidTurbulence liquid_turbulence{LiquidTurbulence::None};
+    bool ordered_3hz{};
     bool ordered_fast{};
-    int ordered_presentation_hz{2};
+    int ordered_presentation_hz{3};
     bool no_brushes{};
     bool no_entities{};
     bool external_bsp_models{};
+    bool inspect_packed_external_visibility{};
     bool no_sound{};
+    bool particles{};
     float volume{0.7F};
     bool self_test{};
     bool report_only{};
@@ -179,8 +193,15 @@ struct RawOptionValues
 {
     std::string preset;
     std::string lighting{"lightmap"};
+    std::string liquid_lighting{"lightmap"};
+    std::string liquid_turbulence{"none"};
     std::string playback_speed{"realtime"};
     std::vector<int> camera;
+    std::vector<int> native_camera;
+    bool has_camera() const
+    {
+        return !camera.empty() || !native_camera.empty();
+    }
     CLI::Option* surface_time_option{};
 };
 

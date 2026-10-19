@@ -13,13 +13,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from snes_tooling.shared.file_snapshots import replace_snapshot
+
 
 TRANSACTION_DIRECTORY = ".generated-output-transaction"
 JOURNAL_NAME = "journal.json"
 COMMIT_MARKER = "COMMITTED"
 JOURNAL_VERSION = 1
-REPLACE_RETRY_ATTEMPTS = 4
-REPLACE_RETRY_DELAY_SECONDS = 0.1
+# External scanners/readers may hold a file beyond a heartbeat tick.
+# Bound total retry sleep to 30 seconds; normal publication never waits.
+REPLACE_RETRY_ATTEMPTS = 121
+REPLACE_RETRY_DELAY_SECONDS = 0.25
 
 
 class GeneratedOutputError(RuntimeError):
@@ -28,12 +32,15 @@ class GeneratedOutputError(RuntimeError):
 
 def atomic_replace(source: Path, destination: Path) -> None:
     """Atomically replace a path, retrying transient Windows sharing failures."""
+    started = time.monotonic()
     for attempt in range(REPLACE_RETRY_ATTEMPTS):
         try:
-            os.replace(source, destination)
+            replace_snapshot(source, destination)
             return
-        except PermissionError:
+        except PermissionError as error:
             if attempt + 1 == REPLACE_RETRY_ATTEMPTS:
+                error.add_note(f"Atomic replacement {source} -> {destination} denied "
+                    f"after {attempt+1} attempts in {time.monotonic()-started:.3f}s")
                 raise
             time.sleep(REPLACE_RETRY_DELAY_SECONDS)
 

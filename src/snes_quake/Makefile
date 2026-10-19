@@ -1,12 +1,12 @@
 # Convenience entry points; the Python builder owns assembly and validation.
 name := quake
 PYTHON ?= python
-builder := ../../tools/commands/snes_quake/build_quake_release.py
+builder := ../../tools/snes_tooling_cli.py
 
 .PHONY: all assets check
 all:
-	"$(PYTHON)" "$(builder)" --release-root ../..
+	"$(PYTHON)" "$(builder)" quake.build-quake-release --release-root ../..
 assets:
-	"$(PYTHON)" "$(builder)" --release-root ../.. --assets-only
+	"$(PYTHON)" "$(builder)" quake.build-quake-release --release-root ../.. --assets-only
 check:
-	"$(PYTHON)" "$(builder)" --release-root ../.. --check
+	"$(PYTHON)" "$(builder)" quake.build-quake-release --release-root ../.. --check

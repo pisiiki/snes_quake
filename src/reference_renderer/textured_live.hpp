@@ -173,7 +173,9 @@ RasterResult render_convex_counterfactual(
     bool front_to_back
 );
 
-const std::vector<std::uint8_t>& selected_render_indices(const ReferenceFrame& frame, RenderMode mode);
+std::vector<std::uint8_t> selected_render_indices(const ReferenceFrame& frame, RenderMode mode);
+
+Json liquid_lighting_inspection(const ReferenceFrame& frame, RenderMode mode);
 
 const std::vector<std::uint8_t>& selected_render_indices(const PackedTextureRaster& frame, RenderMode mode);
 

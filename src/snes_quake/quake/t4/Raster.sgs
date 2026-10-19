@@ -33,7 +33,8 @@ T4TextureStageLightmapFallbackRight:
 .segment "GSU_T4_EDGE_PATCH"
 
 T4TextureShadeIntersectModeDispatch:
-        jal     TexturePerspectiveFactorQ12BaseLoaded
+        iwt     R13, #TextureEdgePerspectiveLookup
+        jal     TexturePerspectiveFactorQ12Products
         move    R6, R3
         bra     TextureShadeIntersectScaleFactor
         nop
@@ -46,9 +47,8 @@ T4TextureShadeIntersectModeDispatch:
 
 T4TextureShadeIntersectScaledDepth:
         BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
-        with    R5
-        add     R0
-        move    R12, R5
+        to      R12
+        add     R5
         bra     TextureShadeIntersectScaledAttributes
         nop
 
@@ -57,7 +57,8 @@ T4TextureShadeIntersectScaledDepth:
 .assert * <= TextureShadeIntersectDepthEnd, error, "Technique-4 edge depth output overlaps the general continuation"
 
 ; The common T4 row path writes each edge straight into its compact stage
-; record while the shaded-edge cache is resident. Oversized faces retain the
+; record and returns left edges while the shaded-edge cache is resident.
+; Right-edge completion uses the hidden code tail. Oversized faces retain the
 ; unchanged direct-span fallback and never enter this helper.
 .segment "GSU_T4_STAGE_CODE"
 
@@ -75,32 +76,18 @@ T4TextureStageLightmapEdge:
         with    R10
         add     #4
         movew   (R10), R12
-        moves   R2, R2
-        bne     T4TextureStageLightmapRight
+        ; Left edges return directly; only right edges finish the row.
+        dec     R2
+        bpl     T4TextureStageLightmapFinishRight
         nop
         ret
         nop
-
-T4TextureStageLightmapRight:
-        ; R10 is base+14. The right X is already staged and no longer needs
-        ; to survive the overwhelmingly common orientation comparison.
-        with    R10
-        sub     #14
-        movew   R1, (R10)
-        inc     R10
-        inc     R10
-        movew   R0, (R10)
-        with    R0
-        sub     R1
-        bpl     T4TextureStageLightmapOrdered
-        nop
-        GSU_ABSOLUTE_GOTO T4TextureStageLightmapReverseCold
-T4TextureStageLightmapOrdered:
-        with    R10
-        add     #14
-T4TextureStageLightmapAdvance:
-        sm      (TEXTURE_COORD_PTR), R10
-        GSU_ABSOLUTE_GOTO T4TextureRasterNextRow
+T4TextureStageLightmapFinishRight:
+        GSU_ABSOLUTE_GOTO T4TextureStageLightmapRight
+        .res 32 - (* - T4TextureStageLightmapEdge)
+DEFINE_TEXTURE_EDGE_PERSPECTIVE_LOOKUP T4TextureEdgePerspectiveLookup
+        .res GSU_T4_STAGE_CODE_CAPACITY - (* - T4TextureStageLightmapEdge)
+.assert T4TextureEdgePerspectiveLookup = TextureEdgePerspectiveLookup, error, "T4 perspective lookup moved away from the shared edge cache"
 
 .assert T4TextureStageLightmapEdge = TextureStageLightmapRow, error, "Technique-4 stage helper moved away from the resident edge-cache window"
 .assert * - T4TextureStageLightmapEdge <= GSU_T4_STAGE_CODE_CAPACITY, error, "Technique-4 stage helper exceeds the shared row-writer window"
@@ -115,16 +102,14 @@ T4TextureShadeIntersectOutputs:
         lm      R5, (TEXTURE_BASE_S)
         lm      R7, (TEXTURE_DELTA_S)
         BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
-        with    R5
-        add     R0
-        move    R8, R5
+        to      R8
+        add     R5
 
         lm      R5, (TEXTURE_BASE_T)
         lm      R7, (TEXTURE_DELTA_T)
         BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
-        with    R5
-        add     R0
-        move    R9, R5
+        to      R9
+        add     R5
         bra     TextureShadeIntersectScreenX
         nop
 

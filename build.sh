@@ -23,7 +23,7 @@ done
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 lib_sfx="$root/third_party/libSFX"
 cc65="$lib_sfx/tools/cc65"
-release_tool="$root/tools/commands/snes_quake/build_quake_release.py"
+release_tool="$root/tools/snes_tooling_cli.py"
 
 for command in git make cmake ninja "$python"; do
     command -v "$command" >/dev/null 2>&1 || {
@@ -42,7 +42,7 @@ if [ -e "$root/.git" ]; then
 fi
 git -C "$lib_sfx" submodule update --init tools/cc65
 
-"$python" "$release_tool" --release-root "$root" --preflight
+"$python" "$release_tool" quake.build-quake-release --release-root "$root" --preflight
 
 ca65="$cc65/bin/ca65"
 ld65="$cc65/bin/ld65"
@@ -54,7 +54,7 @@ if [ ! -x "$ca65" ] || [ ! -x "$ld65" ]; then
     exit 2
 fi
 
-set -- "$release_tool" --release-root "$root" --tar "$bsdtar"
+set -- "$release_tool" quake.build-quake-release --release-root "$root" --tar "$bsdtar"
 [ "$check" = false ] || set -- "$@" --check
 [ "$assets_only" = false ] || set -- "$@" --assets-only
 [ "$qualified_assets" = false ] || set -- "$@" --qualified-assets

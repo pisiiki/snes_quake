@@ -138,7 +138,8 @@ ReferenceFrame render_source_reference_with_brushes(
     const BrushReplay& replay,
     std::size_t sample_index,
     bool flat,
-    bool enabled
+    bool enabled,
+    std::optional<double> surface_time = std::nullopt
 );
 
 bool run_brush_reference_self_test();

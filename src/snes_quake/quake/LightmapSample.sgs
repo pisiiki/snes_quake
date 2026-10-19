@@ -19,10 +19,6 @@ LightmapSample:
         beq     LightmapSampleBlockBilinear
         nop
         GSU_ABSOLUTE_GOTO LightmapSampleCachedDegenerate
-TexturePrimeLightmapCache:
-        cache
-        ret
-        nop
 LightmapSampleGenericChecked:
         lm      R0, (LIGHTMAP_ROM_BANK)
         moves   R0, R0
@@ -45,12 +41,9 @@ LightmapSampleGenericClamped:
 LightmapSampleGenericDecode:
         move    R5, R8
         move    R0, R5
-        with    R0
         hib
-        with    R0
         sex
         lm      R1, (LIGHTMAP_MIN_BLOCK_S)
-        with    R0
         sub     R1
         move    R8, R0
         moves   R6, R6
@@ -83,14 +76,11 @@ LightmapSampleSInterior:
 LightmapSampleT:
         move    R5, R9
         move    R0, R5
-        with    R0
         hib
-        with    R0
         sex
         ; Preserve the S-fraction mask in R1 for the proven-interior route.
         ; Checked coordinates reload R1 below before their clamp comparison.
         lm      R4, (LIGHTMAP_MIN_BLOCK_T)
-        with    R0
         sub     R4
         moves   R6, R6
         bne     LightmapSampleTFastInterior
@@ -121,9 +111,7 @@ LightmapSampleTFastInterior:
         and     R1
 LightmapSampleOffsets:
         lm      R1, (LIGHTMAP_WIDTH)
-        with    R0
         umult   R1
-        with    R0
         add     R8
         move    R6, R0                  ; upper-left byte offset
 LightmapSampleHorizontalReady:
@@ -131,7 +119,15 @@ LightmapSampleHorizontalReady:
         lm      R4, (LIGHTMAP_ROM_ADDRESS)
         bra     LightmapSampleBaseReady
         nop
+TexturePrimeLightmapCache:
+        ; Share the sampler's CBR. Priming an earlier 16-byte anchor makes
+        ; the horizontal entry invalidate that warmed cache on every block.
+        cache
+        ret
+        nop
 LightmapSampleAdjustedHorizontalReady:
+        ; CACHE uses the PC after fetching its opcode, including at $xF.
+        .assert ((TexturePrimeLightmapCache + 1) & $FFFFF0) = ((LightmapSampleHorizontalReady + 1) & $FFFFF0), lderror, "Lightmap prime must share the sampler cache anchor"
         lm      R4, (LIGHTMAP_ADJUSTED_ADDRESS)
 LightmapSampleBaseReady:
         with    R4
@@ -186,7 +182,6 @@ LightmapSampleLowerReady:
         with    R4
         umult   R1
         move    R0, R9
-        with    R0
         umult   R3
         with    R4
         add     R0
@@ -197,7 +192,6 @@ LightmapSampleLowerReady:
         with    R6
         umult   R1
         move    R0, R11
-        with    R0
         umult   R3
         with    R6
         add     R0
@@ -218,7 +212,6 @@ LightmapSampleHorizontalInterpolated:
         with    R1
         sub     R5
         move    R0, R4
-        with    R0
         umult   R1
         move    R4, R6
         with    R4

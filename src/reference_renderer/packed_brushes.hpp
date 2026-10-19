@@ -65,7 +65,7 @@ struct PackedBrushEntity
 {
     std::uint16_t entity{};
     std::uint8_t inline_model{};
-    std::uint8_t variant_count{};
+    std::uint16_t variant_count{};
     std::uint16_t first_variant{};
 };
 
@@ -116,7 +116,7 @@ struct PackedBrushToken
 
 struct PackedBrushVisualState
 {
-    std::vector<std::pair<std::uint8_t, std::uint8_t>> transforms;
+    std::vector<std::pair<std::uint8_t, std::uint16_t>> transforms;
     std::vector<std::array<std::uint8_t, 3>> textures;
 };
 

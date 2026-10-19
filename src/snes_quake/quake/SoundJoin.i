@@ -40,7 +40,15 @@ Continue:
 .endif
 .endmacro
 
-.macro BSP_SOUND_FX3_JOB_JOIN
+.macro BSP_SOUND_FX3_JOB_JOIN RenderScale
+        .local ScaleValue
+        ScaleValue .set 2
+.ifnblank RenderScale
+        ScaleValue .set RenderScale
+.endif
+.if ScaleValue = 3
+        jsr     HdmaWarpJoinFX3
+.else
 .if BSP_SOUND_ENABLED
         .local Active, Done
         ; Compatible playback enters the mixer-aware join. Other modes retain
@@ -55,12 +63,22 @@ Done:
 .else
         FX3_JOB_JOIN
 .endif
+.endif
 .endmacro
 
-.macro BSP_SOUND_WAIT_FRAME
+.macro BSP_SOUND_WAIT_FRAME RenderScale
+        .local ScaleValue
+        ScaleValue .set 2
+.ifnblank RenderScale
+        ScaleValue .set RenderScale
+.endif
+.if ScaleValue = 3
+        jsr     HdmaWarpWaitFrame
+.else
 .if BSP_SOUND_ENABLED
         jsr     QuakeSoundWaitFrame
 .else
         wai
+.endif
 .endif
 .endmacro

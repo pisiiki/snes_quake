@@ -19,7 +19,7 @@ Software.
 
 `third_party/quake106/quake106.zip` is the complete, unmodified shareware distribution
 (9094045 bytes; SHA-256 `ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239`). Its original
-`SLICNSE.TXT` and `README.TXT` are extracted beside it for convenient review.
+`SLICNSE.TXT` and `README.TXT` remain inside the untouched archive.
 Quake game data remains copyrighted by id Software; those terms are not
 replaced by the source-code licenses in this repository.
 The linked replay video is rendered from those shareware game-data assets and

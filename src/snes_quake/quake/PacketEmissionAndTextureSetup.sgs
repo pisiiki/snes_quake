@@ -725,7 +725,7 @@ PacketShadeMinReady:
         add     R9
         with    R8
         add     R4
-        iwt     R0, #127
+        iwt     R0, #BSP_VIEW_WIDTH-1
         move    R1, R8
         with    R1
         cmp     R0
@@ -974,8 +974,7 @@ GSU_CACHE_KERNEL_END GSU_TextureCode
 
 ; Preserve the qualified technique-4 overlay addresses while the retired
 ; standalone shade kernel's former cache line remains intentionally vacant.
-.align $10
-.res $30
+.res $1170 - (* - GSU_SelectVisibility)
 
 ; Static BSP29 lightmap experiment. Q12 perspective edges and eight-pixel span
 ; blocks produce absolute signed-Q4 coordinates; a face-local 16-unit grid
@@ -1778,6 +1777,9 @@ TextureInterpolateT:
         nop
 
 TextureProjectPolygonShaded:
+        ; Keep this vertex loop resident while its exact divider runs outside
+        ; the window. No projection arithmetic or clipping policy changes.
+        cache
         sm      (TEXTURE_PROJECT_RETURN), R11
         iwt     R0, #24576
         sm      (CONVEX_MIN_Y), R0
@@ -1804,7 +1806,7 @@ TextureShadeProjectLoop:
         lm      R1, (CONVEX_CUR_RIGHT)
         lm      R2, (CONVEX_CUR_DEPTH)
         jal     ConvexProjectComponent
-        iwt     R1, #8192
+        iwt     R1, #BSP_VIEW_CENTER_X_Q7
         with    R0
         add     R1
         lm      R10, (CONVEX_SCREEN_PTR)
@@ -1815,7 +1817,7 @@ TextureShadeProjectLoop:
         lm      R1, (CONVEX_CUR_UP)
         lm      R2, (CONVEX_CUR_DEPTH)
         jal     ConvexProjectComponent
-        iwt     R1, #7168
+        iwt     R1, #BSP_VIEW_CENTER_Y_Q7
         with    R1
         sub     R0
         movew   (R10), R1
@@ -1881,7 +1883,7 @@ TextureShadeProjectVerticesDone:
         nop
         move    R0, #0
 TextureShadeRasterFirstYPositive:
-        move    R1, #111
+        move    R1, #BSP_VIEW_HEIGHT-1
         with    R1
         sub     R0
         bpl     TextureShadeRasterFirstYReady
@@ -1905,7 +1907,7 @@ TextureShadeRasterFirstYReady:
         bra     TextureShadeProjectRejected
         nop
 TextureShadeRasterLastYPositive:
-        move    R1, #111
+        move    R1, #BSP_VIEW_HEIGHT-1
         move    R2, R1
         with    R2
         sub     R0

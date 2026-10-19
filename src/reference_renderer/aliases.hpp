@@ -18,10 +18,25 @@ inline constexpr std::uint16_t kAliasFace = 0xfffe;
 inline constexpr std::uint16_t kAliasDirectionalTag = 0x8000;
 inline constexpr std::uint16_t kAliasDirectionalMask = 0x7fff;
 inline constexpr std::size_t kAliasFlyRowCount = 8;
-inline constexpr std::array<std::pair<std::uint8_t, std::uint16_t>, 17> kAliasStorageLocations{{
-    {0x6b, 0x8000}, {0x6c, 0x0000}, {0x6c, 0x8000}, {0x6d, 0x0000}, {0x6d, 0x8000}, {0x6e, 0x0000}, {0x6e, 0x8000},
-    {0x0e, 0x8000}, {0x38, 0x8000}, {0x39, 0x8000}, {0x3a, 0x8000}, {0x3b, 0x8000}, {0x3c, 0x8000}, {0x3d, 0x8000},
-    {0x3e, 0x8000}, {0x25, 0x8000}, {0x0f, 0x8000},
+inline constexpr std::array<std::pair<std::uint8_t, std::uint16_t>, 18> kAliasStorageLocations{{
+    {0x6b, 0x8000},
+    {0x6c, 0x0000},
+    {0x6c, 0x8000},
+    {0x6d, 0x0000},
+    {0x6d, 0x8000},
+    {0x6e, 0x0000},
+    {0x6e, 0x8000},
+    {0x0e, 0x8000},
+    {0x38, 0x8000},
+    {0x39, 0x8000},
+    {0x3a, 0x8000},
+    {0x3b, 0x8000},
+    {0x3c, 0x8000},
+    {0x3d, 0x8000},
+    {0x3e, 0x8000},
+    {0x25, 0x8000},
+    {0x0f, 0x8000},
+    {0x37, 0x8000},
 }};
 
 struct AliasSprite
@@ -182,18 +197,21 @@ void for_each_alias_pixel(
         }
         const double center_right = dot(delta, view.screen_right);
         const double center_up = dot(delta, view.up);
-        const double left = 64.0 + (center_right + sprite.left) * kFocalLength / depth;
-        const double right = 64.0 + (center_right + sprite.left + alias_world_width(sprite)) * kFocalLength / depth;
-        const double top = 56.0 - (center_up + sprite.top) * kFocalLength / depth;
-        const double bottom = 56.0 - (center_up + sprite.top - alias_world_height(sprite)) * kFocalLength / depth;
+        const double left = render_center_x() + (center_right + sprite.left) * render_focal_length() / depth;
+        const double right =
+            render_center_x() +
+            (center_right + sprite.left + alias_world_width(sprite)) * render_focal_length() / depth;
+        const double top = render_center_y() - (center_up + sprite.top) * render_focal_length() / depth;
+        const double bottom =
+            render_center_y() - (center_up + sprite.top - alias_world_height(sprite)) * render_focal_length() / depth;
         if (!(right > left) || !(bottom > top))
         {
             continue;
         }
         const int first_x = std::max(0, static_cast<int>(std::ceil(left - 0.5 - 1e-9)));
-        const int last_x = std::min(kLogicalWidth - 1, static_cast<int>(std::floor(right - 0.5 + 1e-9)));
+        const int last_x = std::min(render_width() - 1, static_cast<int>(std::floor(right - 0.5 + 1e-9)));
         const int first_y = std::max(0, static_cast<int>(std::ceil(top - 0.5 - 1e-9)));
-        const int last_y = std::min(kLogicalHeight - 1, static_cast<int>(std::floor(bottom - 0.5 + 1e-9)));
+        const int last_y = std::min(render_height() - 1, static_cast<int>(std::floor(bottom - 0.5 + 1e-9)));
         for (int y = first_y; y <= last_y; ++y)
         {
             const auto source_y = std::min(
@@ -294,10 +312,22 @@ void for_each_packed_alias_pixel(
         const int right_component = wrap_i16(right + (sprite.left + alias_world_width(sprite)) * 4);
         const int top_component = wrap_i16(up + sprite.top * 4);
         const int bottom_component = wrap_i16(up + (sprite.top - alias_world_height(sprite)) * 4);
-        const auto horizontal =
-            project_packed_alias_axis(left_component, right_component, depth, 8192, false, kLogicalWidth);
-        const auto vertical =
-            project_packed_alias_axis(top_component, bottom_component, depth, 7168, true, kLogicalHeight);
+        const auto horizontal = project_packed_alias_axis(
+            left_component,
+            right_component,
+            depth,
+            render_center_x() * 128,
+            false,
+            render_width()
+        );
+        const auto vertical = project_packed_alias_axis(
+            top_component,
+            bottom_component,
+            depth,
+            render_center_y() * 128,
+            true,
+            render_height()
+        );
         if (!horizontal.visible || !vertical.visible)
         {
             continue;
@@ -352,8 +382,8 @@ void for_each_packed_alias_pixel(
                  raw_last_y}
             );
         }
-        const int last_x = std::min(kLogicalWidth - 1, raw_last_x);
-        const int last_y = std::min(kLogicalHeight - 1, raw_last_y);
+        const int last_x = std::min(render_width() - 1, raw_last_x);
+        const int last_y = std::min(render_height() - 1, raw_last_y);
         for (int y = std::max(0, first_y); y <= last_y; ++y)
         {
             const int source_y = std::clamp(
@@ -391,7 +421,8 @@ std::vector<std::uint8_t> compose_post_opaque_alias_indices(
     std::size_t sample_index,
     RenderMode mode,
     AliasCoverage* coverage = nullptr,
-    AliasVisibilityRow* visibility = nullptr
+    AliasVisibilityRow* visibility = nullptr,
+    std::vector<std::int16_t>* composed_depth = nullptr
 );
 
 Json packed_alias_inspection(
@@ -416,7 +447,8 @@ ReferenceFrame render_source_reference_with_aliases(
     const ExternalBspScene* external_scene = nullptr,
     const ExternalBspReplay* external_replay = nullptr,
     bool external_models_enabled = false,
-    ExternalBspCoverage* external_coverage = nullptr
+    ExternalBspCoverage* external_coverage = nullptr,
+    std::optional<double> surface_time = std::nullopt
 );
 
 } // namespace quake_bsp_reference

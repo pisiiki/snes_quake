@@ -24,7 +24,8 @@ from snes_tooling.shared.validate_gsu_cache_kernels import (
     validate_cache_kernels,
     validate_cache_manifest,
 )
-from snes_tooling.workspace import Workspace
+from snes_tooling.shared.processes import python_child_environment as python_child_environment
+from snes_tooling.workspace import Workspace, git_common_directory as _git_common_directory
 
 
 LIBSFX_SOURCES = [
@@ -34,6 +35,7 @@ LIBSFX_SOURCES = [
     ("CPU/SMP.s", "CPU/SMP.o", []),
     ("SMP/System.s700", "SMP/System.o700", ["-D", "TARGET_SMP"]),
 ]
+LIBSFX_PACKAGES = {"Mouse": "MOUSE", "LZ4": "LZ4"}
 WORKSPACE = Workspace.discover().root
 LIBSFX_WORKSPACE_PATH = Path("github/Optiroc/libSFX/master")
 LIBSFX_NATIVE_TOOLS = ("ca65", "ld65")
@@ -48,33 +50,10 @@ def _complete_libsfx(candidate: Path, *, os_name: str | None = None) -> bool:
     )
 
 
-def _git_common_directory(workspace: Path) -> Path | None:
-    """Return Git's absolute common directory for one checkout, if available."""
-    try:
-        result = subprocess.run(
-            (
-                "git",
-                "-C",
-                str(workspace),
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-common-dir",
-            ),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return None
-    if result.returncode or not result.stdout.strip():
-        return None
-    return Path(result.stdout.strip()).resolve()
-
-
 def default_libsfx(workspace: Path, *, os_name: str | None = None) -> Path:
     """Resolve the canonical libSFX checkout for this workspace layout."""
-    if (workspace / "libSFX").is_dir() and (workspace / "src/snes_quake").is_dir():
-        return workspace / "libSFX"
+    if (workspace / "third_party/libSFX").is_dir():
+        return workspace / "third_party/libSFX"
     local = workspace / LIBSFX_WORKSPACE_PATH
     if _complete_libsfx(local, os_name=os_name):
         return local
@@ -83,10 +62,6 @@ def default_libsfx(workspace: Path, *, os_name: str | None = None) -> Path:
         primary = common_directory.parent / LIBSFX_WORKSPACE_PATH
         if primary != local and _complete_libsfx(primary, os_name=os_name):
             return primary
-    for parent in workspace.parents:
-        candidate = parent / LIBSFX_WORKSPACE_PATH
-        if _complete_libsfx(candidate, os_name=os_name):
-            return candidate
     return local
 
 
@@ -111,6 +86,7 @@ class ProjectLayout:
     libsfx_build_dir: Path
     output_dir: Path
     cache_kernel_manifest: Path
+    source_generator: Path | None = None
 
 
 def _project_path(example_dir: Path, value: object, *, field: str) -> Path:
@@ -135,6 +111,7 @@ def project_layout(example_dir: Path) -> ProjectLayout:
     manifest = example_dir / PROJECT_MANIFEST
     defaults = {
         "assetGenerator": ASSET_GENERATOR.as_posix(),
+        "sourceGenerator": None,
         "buildDirectory": ".build",
         "libsfxBuildDirectory": ".build_libsfx",
         "outputDirectory": ".",
@@ -167,6 +144,10 @@ def project_layout(example_dir: Path) -> ProjectLayout:
         manifest_path = manifest
     return ProjectLayout(
         manifest=manifest_path,
+        source_generator=(
+            _project_path(example_dir, document["sourceGenerator"], field="sourceGenerator")
+            if document["sourceGenerator"] is not None else None
+        ),
         asset_generator=_project_path(
             example_dir, document["assetGenerator"], field="assetGenerator"
         ),
@@ -326,6 +307,8 @@ def _write_snes_example_freshness(
         ca65,
         ld65,
     )
+    if (example_dir / "Makefile").is_file():
+        link_inputs += (example_dir / "Makefile",)
     receipt = {
         "schema": FRESHNESS_SCHEMA,
         "name": name,
@@ -370,12 +353,24 @@ def require_snes_example_fresh(
 ) -> dict[str, Any]:
     """Require an existing example build to match its assembler dependencies."""
     example_dir = example_dir.resolve()
-    layout = project_layout(example_dir)
     run_example_asset_generator(
         example_dir,
         check=True,
         arguments=asset_generator_arguments,
     )
+    return require_snes_example_build_fresh(example_dir, name, rom=rom)
+
+
+def require_snes_example_build_fresh(
+    example_dir: Path, name: str, *, rom: Path | None = None,
+) -> dict[str, Any]:
+    """Check recorded build inputs/outputs without regenerating or auditing assets.
+
+    Native probes use this cheap read-only guard after a qualified build. Full
+    asset qualification remains the responsibility of the normal build/check.
+    """
+    example_dir = example_dir.resolve()
+    layout = project_layout(example_dir)
     debug_info = layout.output_dir / f"{name}.dnfo"
     outputs = {
         "rom": rom.resolve() if rom is not None else layout.output_dir / f"{name}.sfc",
@@ -509,33 +504,12 @@ def run_checked(
     return {"command": command[0], "elapsedSeconds": elapsed}
 
 
-def python_child_environment(
-    package_root: Path,
-    *,
-    environment: Mapping[str, str] | None = None,
-    path_separator: str | None = None,
-) -> dict[str, str]:
-    """Prepend one checkout's package root to a preserved child environment."""
-
-    child = dict(os.environ if environment is None else environment)
-    separator = os.pathsep if path_separator is None else path_separator
-    package_entry = str(package_root.resolve())
-    existing = child.get("PYTHONPATH")
-    entries = existing.split(separator) if existing else []
-    normalized_package = os.path.normcase(os.path.normpath(package_entry))
-    retained = [
-        entry
-        for entry in entries
-        if os.path.normcase(os.path.normpath(entry)) != normalized_package
-    ]
-    child["PYTHONPATH"] = separator.join((package_entry, *retained))
-    return child
 
 
 def package_root() -> Path:
     """Resolve the package parent when a child process actually needs it."""
 
-    return Path(__file__).resolve().parents[2]
+    return Workspace.discover().path('tools')
 
 
 def run_example_asset_generator(
@@ -567,6 +541,20 @@ def run_example_asset_generator(
     return {**result, "script": str(generator), "check": check}
 
 
+def run_example_source_generator(example_dir: Path) -> dict[str, Any] | None:
+    """Refresh generated source even when expensive content assets are reused."""
+    generator = project_layout(example_dir).source_generator
+    if generator is None:
+        return None
+    if not generator.is_file():
+        raise FileNotFoundError(f"configured SNES source generator does not exist: {generator}")
+    result = run_checked(
+        [sys.executable, str(generator)], example_dir, echo_output=True,
+        environment=python_child_environment(package_root()),
+    )
+    return {**result, "script": str(generator)}
+
+
 def prepare_example_assets(
     example_dir: Path,
     *,
@@ -591,6 +579,24 @@ def prepare_example_assets(
         "reason": "--skip-asset-generation",
         "elapsedSeconds": 0.0,
     }
+
+
+def libsfx_packages(example_dir: Path) -> tuple[str, ...]:
+    """Read literal package declarations; never silently omit requested code."""
+    makefile = example_dir / "Makefile"
+    if not makefile.is_file():
+        return ()
+    names: list[str] = []
+    for line in makefile.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"\s*libsfx_packages\s*(:?=|\+=)\s*([^#]*)", line)
+        if match:
+            if match[1] != "+=":
+                names.clear()
+            names.extend(match[2].split())
+    unsupported = sorted(set(names) - LIBSFX_PACKAGES.keys())
+    if unsupported:
+        raise ValueError("unsupported libSFX packages: " + ", ".join(unsupported))
+    return tuple(dict.fromkeys(names))
 
 
 def assembler_flags(libsfx_dir: Path) -> list[str]:
@@ -631,7 +637,11 @@ def assemble_libsfx(
     commands: list[dict[str, Any]] = []
     objects: list[Path] = []
 
-    for source_name, object_name, extra_flags in LIBSFX_SOURCES:
+    package_sources = [
+        (f"Packages/{name}/{name}.s", f"Packages/{name}.o", [])
+        for name in libsfx_packages(example_dir)
+    ]
+    for source_name, object_name, extra_flags in (*LIBSFX_SOURCES, *package_sources):
         source = include_dir / source_name
         output = build_dir / object_name
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -661,14 +671,34 @@ def build_snes_example(
         skip_generation=skip_asset_generation,
         arguments=asset_generator_arguments,
     )
+    source_generation = run_example_source_generator(example_dir)
     build_dir = layout.build_dir
     build_dir.mkdir(parents=True, exist_ok=True)
     layout.output_dir.mkdir(parents=True, exist_ok=True)
 
     config_include_dir = libsfx_dir / "include" / "Configurations"
     flags = assembler_flags(libsfx_dir)
+    for package in libsfx_packages(example_dir):
+        flags.extend(("-D", "SFXPKG_" + LIBSFX_PACKAGES[package]))
+    # Reject CPU/GSU syntax and capacity errors before traversing the large
+    # include graph for lint or rebuilding support libraries. Keep link order.
+    ca65 = require_cc65_tool(libsfx_dir, "ca65")
+    ld65 = require_cc65_tool(libsfx_dir, "ld65")
+    cpu_object = build_dir / f"{name}.o"
+    cpu_command = run_checked(
+        [str(ca65), *flags, "-o", str(cpu_object), f"{name}.s"], example_dir
+    )
     gsu_source = example_dir / f"{name}.sgs"
     uses_gsu = gsu_source.is_file()
+    gsu_object = build_dir / f"{name}.ogs"
+    gsu_command = (
+        run_checked(
+            [str(ca65), *flags, "-D", "TARGET_GSU", "-o", str(gsu_object), gsu_source.name],
+            example_dir,
+        )
+        if uses_gsu
+        else None
+    )
     special_register_lint = (
         validate_gsu_special_registers(
             gsu_source,
@@ -687,9 +717,6 @@ def build_snes_example(
         else None
     )
 
-    ca65 = require_cc65_tool(libsfx_dir, "ca65")
-    ld65 = require_cc65_tool(libsfx_dir, "ld65")
-
     commands, objects = assemble_libsfx(
         example_dir,
         libsfx_dir,
@@ -697,29 +724,10 @@ def build_snes_example(
         build_dir=layout.libsfx_build_dir,
     )
 
-    cpu_object = build_dir / f"{name}.o"
-    commands.append(
-        run_checked(
-            [str(ca65), *flags, "-o", str(cpu_object), f"{name}.s"], example_dir
-        )
-    )
+    commands.insert(0, cpu_command)
     objects.append(cpu_object)
-    if uses_gsu:
-        gsu_object = build_dir / f"{name}.ogs"
-        commands.append(
-            run_checked(
-                [
-                    str(ca65),
-                    *flags,
-                    "-D",
-                    "TARGET_GSU",
-                    "-o",
-                    str(gsu_object),
-                    f"{name}.sgs",
-                ],
-                example_dir,
-            )
-        )
+    if gsu_command is not None:
+        commands.insert(1, gsu_command)
         objects.append(gsu_object)
 
     smp_source = example_dir / f"{name}.s700"
@@ -789,6 +797,7 @@ def build_snes_example(
         "usesGsu": uses_gsu,
         "usesSmp": uses_smp,
         "assetGeneration": asset_generation,
+        "sourceGeneration": source_generation,
         "commands": commands,
         "specialRegisterLint": (
             special_register_lint.to_dict() if special_register_lint else None

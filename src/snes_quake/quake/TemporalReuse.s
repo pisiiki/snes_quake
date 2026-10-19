@@ -9,9 +9,12 @@
 :
 .endmacro
 
-; Cache/compare the generated raster-reachable QBA1/QAV2 identity. Equal IDs
+; Cache/compare the generated raster-reachable QBA1/QAV3 identity. Equal IDs
 ; prove exact painter groups, referenced alias states, and brush-aware masks;
 ; dynamic states excluded from every painter group cannot contribute pixels.
+; Hidden QAV tokens still contribute their complete QBA1 state. Together with
+; equal camera/focal flags and brush state, the regenerated joint identities
+; bind all three projection masks. The separate predecessor oracle remains X2.
 .macro TEXTURE_TEMPORAL_CACHE_ALIAS_INPUT row
         lda     row
         cmp     #BSP_ALIAS_VISIBILITY_SOURCE_ROW_COUNT
@@ -23,10 +26,10 @@
         lda     render_camera+10
         and     #(BSP_OVERLAY_DYNAMIC_BRUSHES << 8)
         beq     :+
-        lda     f:QuakeBSPAliasVisibilityEnabled+BSP_ALIAS_TEMPORAL_IDENTITY_OFFSET,x
+        lda     f:QuakeBSPAliasTemporalEnabled,x
         bra     :++
 :
-        lda     f:QuakeBSPAliasVisibilityDisabled+BSP_ALIAS_TEMPORAL_IDENTITY_OFFSET,x
+        lda     f:QuakeBSPAliasTemporalDisabled,x
 :
         sta     temporal_alias_raster_identity
 .endmacro
@@ -42,10 +45,10 @@
         lda     render_camera+10
         and     #(BSP_OVERLAY_DYNAMIC_BRUSHES << 8)
         beq     :+
-        lda     f:QuakeBSPAliasVisibilityEnabled+BSP_ALIAS_TEMPORAL_IDENTITY_OFFSET,x
+        lda     f:QuakeBSPAliasTemporalEnabled,x
         bra     :++
 :
-        lda     f:QuakeBSPAliasVisibilityDisabled+BSP_ALIAS_TEMPORAL_IDENTITY_OFFSET,x
+        lda     f:QuakeBSPAliasTemporalDisabled,x
 :
         cmp     temporal_alias_raster_identity
         beq     :+
@@ -59,6 +62,14 @@
 ; and require that exact predecessor to be the retained staged identity.
 TryReuseOrdered20Predecessor:
         RW_assume a16i16
+        ; This image-equality oracle was qualified at X2; X3 projections do
+        ; not share that complete-image proof.
+        lda     active_render_scale
+        cmp     #3
+        bne     :+
+        clc
+        rts
+:
         lda     render_coverage_mode
         bne     @Different
         lda     demo_mode
@@ -110,7 +121,7 @@ TryReuseOrdered20Predecessor:
         lsr
         asl
         tax
-        lda     f:QuakeBSPAliasVisibilityEnabled+BSP_ALIAS_PREDECESSOR_REUSE_OFFSET,x
+        lda     f:QuakeBSPAliasPredecessor,x
         bit     temporal_alias_raster_identity
         beq     @Different
         sec

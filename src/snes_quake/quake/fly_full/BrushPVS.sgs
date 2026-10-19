@@ -1,0 +1,175 @@
+; Full fly owns these four call-target substitutions. Their default targets
+; and every existing instruction address remain unchanged for demo playback.
+.export BrushReplayGeometryCall, BrushStaticGeometryCall, BrushExternalGeometryCall
+.export BrushBucketPainterCall, BrushBuildGeometryLinks, BrushMarkPainterAncestors
+.export FlyBrushBuildGeometryLinks, FlyBrushMarkVisiblePainter
+
+.segment "GSUCODE"
+
+; R0 = raw source leaf. R0 returns its admitted bit; preserve ROM cursor,
+; variant count and painter parent in R4/R12/R3.
+FlyBrushLeafVisible:
+        move    R1, R0
+        with    R1
+        and     #7
+  .repeat 3
+        lsr
+  .endrepeat
+        iwt     R10, #GSU_BRUSH_PVS_OFFSET
+        with    R10
+        add     R0
+        move    R2, #1
+        moves   R1, R1
+        beq     FlyBrushLeafBitReady
+        nop
+FlyBrushLeafBitLoop:
+        with    R2
+        add     R2
+        dec     R1
+        bne     FlyBrushLeafBitLoop
+        nop
+FlyBrushLeafBitReady:
+        moveb   R0, (R10)
+        with    R0
+        and     R2
+        ret
+        nop
+
+; Reject a whole variant before its center/extent projection. The packed
+; bucket domain already includes the generated global quantization guard.
+FlyBrushBuildGeometryLinks:
+        sm      (BRUSH_GEOMETRY_RETURN), R11
+        lm      R0, (BRUSH_CURRENT_GEOMETRY_VARIANT)
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R0                       ; 3v
+  .repeat 3
+        with    R1
+        add     R1
+  .endrepeat
+        iwt     R4, #BSP_BRUSH_FRAGMENT_VARIANTS_ADDRESS+8
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_FRAGMENT_VARIANTS_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R1
+        BSP_ROM_LOAD_WORD R12
+  .repeat 3
+        with    R1
+        add     R1
+  .endrepeat
+        iwt     R4, #BSP_BRUSH_FRAGMENT_BUCKETS_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_FRAGMENT_BUCKETS_BANK
+        romb
+FlyBrushVariantBucket:
+        moves   R12, R12
+        beq     FlyBrushVariantHidden
+        nop
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        jal     FlyBrushLeafVisible
+        nop
+        moves   R0, R0
+        bne     FlyBrushVariantVisible
+        nop
+        with    R4
+        add     #8
+        dec     R12
+        bra     FlyBrushVariantBucket
+        nop
+FlyBrushVariantHidden:
+        lm      R11, (BRUSH_GEOMETRY_RETURN)
+        ret
+        nop
+FlyBrushVariantVisible:
+        lm      R11, (BRUSH_GEOMETRY_RETURN)
+        GSU_ABSOLUTE_GOTO BrushBuildGeometryLinks
+
+; The caller has loaded a non-solid bucket, but has not marked ancestors or
+; appended any links. A hidden bucket continues at the existing loop advance.
+FlyBrushMarkVisiblePainter:
+        sm      (BRUSH_MARK_RETURN), R11
+        lm      R0, (BRUSH_CURRENT_LEAF)
+        jal     FlyBrushLeafVisible
+        nop
+        moves   R0, R0
+        beq     FlyBrushBucketHidden
+        nop
+        lm      R11, (BRUSH_MARK_RETURN)
+        GSU_ABSOLUTE_GOTO BrushMarkPainterAncestors
+FlyBrushBucketHidden:
+        GSU_ABSOLUTE_GOTO BrushBucketAdvance
+
+.segment "GSU_TEXTURE_TAIL_CODE"
+.assert BSP_BRUSH_PVS_DIRECTORY_RECORD_BYTES = 3, error, "Brush PVS requires 24-bit row pointers"
+
+; The cache lives outside all selector and renderer scratch, including alias
+; sorting. A new camera in the same leaf reuses it. Leaf zero has an explicit
+; all-visible generated row, just like a missing source VIS row.
+FlyBrushLoadPVS:
+        sm      (BRUSH_LOAD_RETURN), R11
+        lm      R0, (GSU_TELEMETRY_LEAF)
+        lm      R1, (GSU_BRUSH_PVS_LEAF_OFFSET)
+        cmp     R1
+        beq     FlyBrushPVSReady
+        nop
+        sm      (GSU_BRUSH_PVS_LEAF_OFFSET), R0
+        to      R1
+        add     R0
+        add     R1
+        iwt     R4, #BSP_BRUSH_PVS_DIRECTORY_ADDRESS
+        with    R4
+        add     R0
+        move    R0, #BSP_BRUSH_PVS_DIRECTORY_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R4
+        getb
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        iwt     R10, #GSU_BRUSH_PVS_OFFSET
+        iwt     R12, #GSU_BRUSH_PVS_BYTES
+FlyBrushPVSByte:
+        BSP_ROM_LOAD_BYTE R0
+        moves   R0, R0
+        beq     FlyBrushPVSZeroRun
+        nop
+        moveb   (R10), R0
+        inc     R10
+        dec     R12
+        bne     FlyBrushPVSByte
+        nop
+        bra     FlyBrushPVSCamera
+        nop
+FlyBrushPVSZeroRun:
+        BSP_ROM_LOAD_BYTE R1
+        move    R0, #0
+FlyBrushPVSZero:
+        moveb   (R10), R0
+        inc     R10
+        dec     R12
+        beq     FlyBrushPVSCamera
+        dec     R1
+        bne     FlyBrushPVSZero
+        nop
+        bra     FlyBrushPVSByte
+        nop
+FlyBrushPVSCamera:
+        lm      R0, (GSU_BRUSH_PVS_LEAF_OFFSET)
+        jal     FlyBrushLeafVisible
+        nop
+        ; LeafVisible supplies this leaf's byte address and bit independently
+        ; of whether the PVS explicitly includes the camera itself.
+        moveb   R0, (R10)
+        with    R0
+        or      R2
+        moveb   (R10), R0
+FlyBrushPVSReady:
+        lm      R11, (BRUSH_LOAD_RETURN)
+        ret
+        nop

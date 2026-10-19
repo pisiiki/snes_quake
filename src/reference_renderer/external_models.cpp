@@ -1,5 +1,6 @@
 #include "external_models.hpp"
 #include "world.hpp"
+#include "turbulence.hpp"
 #include "geometry.hpp"
 #include "brushes.hpp"
 
@@ -301,7 +302,15 @@ ExactTextureSample sample_external_bsp_texture(
     const double t = dot(info.t_axis, point) + info.t_offset;
     const auto u = wrapped_texel(s, texture.width);
     const auto v = wrapped_texel(t, texture.height);
-    return {texture.level_zero[v * texture.width + u], projection_plane_distance(depth), s, t};
+    const auto index = texture.level_zero[v * texture.width + u];
+    return {
+        index,
+        projection_plane_distance(depth),
+        s,
+        t,
+        texture.turbulent,
+        texture.turbulent ? sample_source_turbulent_texture(texture, s, t, server_time) : index
+    };
 }
 
 namespace {
@@ -373,11 +382,15 @@ void write_external_bsp_source_pixel(
         flat
     );
     frame.texture_indices[pixel] = sample.index;
+    frame.turbulent_texture_indices[pixel] = sample.turbulent_index;
+    frame.turbulent_pixels[pixel] = static_cast<std::uint8_t>(sample.turbulent);
     frame.texture_s[pixel] = sample.s;
     frame.texture_t[pixel] = sample.t;
     const auto lightmap_level = sample_bsp_lightmap_level(world, face, sample.s, sample.t);
     frame.lightmap_texture_levels[pixel] = lightmap_level;
     frame.lightmap_texture_indices[pixel] = remap_texture_index(world, sample.index, lightmap_level, 0);
+    frame.turbulent_lightmap_texture_indices[pixel] =
+        remap_texture_index(world, sample.turbulent_index, lightmap_level, 0);
     frame.untextured_lightmap_indices[pixel] = untextured_lightmap_index(lightmap_level);
 }
 } // namespace
@@ -418,9 +431,9 @@ void compose_source_external_bsp_models(
             }
         }
         const auto model_key = static_cast<std::uint16_t>(kExternalBspModelOwnershipBase + entity.model_slot);
-        for (int y = 0; y < kLogicalHeight; ++y)
+        for (int y = 0; y < render_height(); ++y)
         {
-            for (int x = 0; x < kLogicalWidth; ++x)
+            for (int x = 0; x < render_width(); ++x)
             {
                 const auto ray = external_bsp_local_ray(basis, entity.origin, view_ray(view, x, y));
                 const auto hit = model.bvh->nearest(ray, visible_faces);

@@ -1,4 +1,5 @@
 .if BSP_SOUND_ENABLED
-        ; Bulk cartridge-to-SPC transfers must remain outside NMI. The main
-        ; loop refill remains interruptible, so every VBlank can return on time.
+        ; Mixer commands, queue management and chunk completion stay outside
+        ; NMI. Warp arithmetic may send one nonblocking three-byte packet at
+        ; each designated boundary; it never waits for the SPC or runs a loop.
 .endif

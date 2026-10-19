@@ -1,6 +1,8 @@
 #include "brushes.hpp"
 #include "world.hpp"
+#include "turbulence.hpp"
 #include "geometry.hpp"
+#include "textured_live.hpp"
 
 namespace quake_bsp_reference {
 
@@ -55,7 +57,7 @@ BrushReplay parse_brush_replay(std::span<const std::uint8_t> bytes)
     }
     if (sample_rate == 0 || sample_rate % 2 != 0 || sample_rate % 10 != 0)
     {
-        fail("QBR2 sample rate must be divisible by 2 Hz and 10 Hz clocks");
+        fail("QBR2 sample rate must be divisible by 3 Hz and 10 Hz clocks");
     }
     if (!std::isfinite(first_server_time) || first_server_time < 0.0)
     {
@@ -542,7 +544,15 @@ ExactTextureSample sample_brush_texture(
     const double t = dot(info.t_axis, point) + info.t_offset;
     const auto u = wrapped_texel(s, texture.width);
     const auto v = wrapped_texel(t, texture.height);
-    return {texture.level_zero[v * texture.width + u], projection_plane_distance(depth), s, t};
+    const auto index = texture.level_zero[v * texture.width + u];
+    return {
+        index,
+        projection_plane_distance(depth),
+        s,
+        t,
+        texture.turbulent,
+        texture.turbulent ? sample_source_turbulent_texture(texture, s, t, server_time) : index
+    };
 }
 
 namespace {
@@ -641,11 +651,15 @@ void write_brush_pixel(
     frame.material_indices[pixel] =
         material_shade_index(texture_family * kApparentLightLevels + light_level, x, y, flat);
     frame.texture_indices[pixel] = sample.index;
+    frame.turbulent_texture_indices[pixel] = sample.turbulent_index;
+    frame.turbulent_pixels[pixel] = static_cast<std::uint8_t>(sample.turbulent);
     frame.texture_s[pixel] = sample.s;
     frame.texture_t[pixel] = sample.t;
     const auto lightmap_level = sample_bsp_lightmap_level(face.lightmap, world.lighting, sample.s, sample.t);
     frame.lightmap_texture_levels[pixel] = lightmap_level;
     frame.lightmap_texture_indices[pixel] = remap_texture_index(world, sample.index, lightmap_level, 0);
+    frame.turbulent_lightmap_texture_indices[pixel] =
+        remap_texture_index(world, sample.turbulent_index, lightmap_level, 0);
     frame.untextured_lightmap_indices[pixel] = untextured_lightmap_index(lightmap_level);
 }
 } // namespace
@@ -693,9 +707,9 @@ void compose_source_brushes(
                 ++frame.visible_faces;
             }
         }
-        for (int y = 0; y < kLogicalHeight; ++y)
+        for (int y = 0; y < render_height(); ++y)
         {
-            for (int x = 0; x < kLogicalWidth; ++x)
+            for (int x = 0; x < render_width(); ++x)
             {
                 auto local_ray = view_ray(view, x, y);
                 local_ray.origin = local_ray.origin - entity.origin;
@@ -761,11 +775,11 @@ ReferenceFrame render_source_reference_with_brushes(
 {
     if (!enabled)
     {
-        return render_source_reference(world, world_bvh, camera, flat);
+        return render_source_reference(world, world_bvh, camera, flat, server_time);
     }
     require_translation_only(entities, sample_index);
     const auto view = source_view_transform(camera);
-    auto frame = render_source_reference(world, world_bvh, camera, flat);
+    auto frame = render_source_reference(world, world_bvh, camera, flat, server_time);
     compose_source_brushes(world, scene, entities, sample_index, server_time, flat, view, frame);
     return frame;
 }
@@ -786,7 +800,7 @@ ReferenceFrame render_packed_camera_source_reference_with_brushes(
     const auto view = packed_view_transform(world, camera);
     auto frame = render_reference_with_view(world, world_bvh, view, nullptr, flat, {}, {});
     shade_material_frame(frame, world, camera, flat);
-    shade_exact_texture_frame(frame, world, view);
+    shade_exact_texture_frame(frame, world, view, server_time);
     compose_source_brushes(world, scene, entities, sample_index, server_time, flat, view, frame);
     return frame;
 }
@@ -799,14 +813,16 @@ ReferenceFrame render_source_reference_with_brushes(
     const BrushReplay& replay,
     std::size_t sample_index,
     bool flat,
-    bool enabled
+    bool enabled,
+    std::optional<double> surface_time
 )
 {
     if (sample_index >= replay.row_count())
     {
         fail("brush render sample index is out of range");
     }
-    const double server_time = replay.first_server_time + static_cast<double>(sample_index) / replay.sample_rate;
+    const double server_time =
+        surface_time.value_or(replay.first_server_time + static_cast<double>(sample_index) / replay.sample_rate);
     return render_source_reference_with_brushes(
         world,
         world_bvh,
@@ -964,6 +980,78 @@ bool run_brush_reference_self_test()
         std::abs(enabled.depths[center] - 5.0) > 1e-9)
     {
         return false;
+    }
+
+    // The same fixed camera/geometry exercises both world and composed brush
+    // liquid ownership. Ordinary pixels and diagnostic lighting stay intact.
+    world.texture_colormap[63][7] = 43;
+    world.textures[0].width = world.textures[0].height = 64;
+    world.textures[0].level_zero.assign(4096, 7);
+    for (const bool turbulent : {true, false})
+    {
+        world.textures[0].turbulent = turbulent;
+        for (const bool brushes : {false, true})
+        {
+            const auto shaded =
+                render_source_reference_with_brushes(world, world_bvh, scene, camera, entities, 0, 0.0, false, brushes);
+            const auto lit = selected_render_indices(shaded, {true, Lighting::LightMap, Lighting::LightMap});
+            const auto unlit = selected_render_indices(shaded, {true, Lighting::LightMap, Lighting::None});
+            if (lit[center] != 43 || unlit[center] != (turbulent ? 7 : 43) ||
+                shaded.turbulent_pixels[center] != static_cast<std::uint8_t>(turbulent) ||
+                shaded.models[center] != (brushes ? 1 : 0))
+            {
+                return false;
+            }
+            for (std::size_t pixel = 0; pixel < lit.size(); ++pixel)
+            {
+                if (unlit[pixel] != (shaded.turbulent_pixels[pixel] != 0 ? shaded.texture_indices[pixel] : lit[pixel]))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    world.texture_colormap[63][7] = 7;
+    world.textures[0].turbulent = true;
+    const auto overridden =
+        render_source_reference_with_brushes(world, world_bvh, scene, camera, replay, 0, false, false, 6.4);
+    if (overridden.surface_time != 6.4)
+        return false;
+    for (std::size_t pixel = 0; pixel < 4096; ++pixel)
+        world.textures[0].level_zero[pixel] = static_cast<std::uint8_t>((pixel % 64) + 3 * (pixel / 64));
+    for (const bool brushes : {false, true})
+    {
+        std::vector<std::uint8_t> previous;
+        for (const double time : {6.35, 6.4})
+        {
+            const auto shaded = render_source_reference_with_brushes(
+                world,
+                world_bvh,
+                scene,
+                camera,
+                entities,
+                0,
+                time,
+                false,
+                brushes
+            );
+            const auto pixels =
+                selected_render_indices(shaded, {true, Lighting::LightMap, Lighting::None, LiquidTurbulence::SnesQ4});
+            if (shaded.models[center] != (brushes ? 1 : 0) || shaded.surface_time != time ||
+                (!previous.empty() && previous == pixels))
+                return false;
+            for (std::size_t pixel = 0; pixel < pixels.size(); ++pixel)
+                if (shaded.turbulent_pixels[pixel] &&
+                    pixels[pixel] !=
+                        sample_source_turbulent_texture(
+                            world.textures[0],
+                            shaded.texture_s[pixel],
+                            shaded.texture_t[pixel],
+                            time
+                        ))
+                    return false;
+            previous = pixels;
+        }
     }
 
     entity.origin = {10.0, 0.0, 0.0};

@@ -9,8 +9,8 @@
 #include "aliases.hpp"
 #include "textured_live.hpp"
 #include "live_demo.hpp"
-#include "external_models_packed.hpp"
 #include "packed_brushes.hpp"
+#include "external_models_packed.hpp"
 #include "turbulence.hpp"
 
 namespace quake_bsp_reference {
@@ -82,8 +82,8 @@ OrderedPackedReplay load_ordered_packed_replay(
             signed_byte(offset + 2),
             signed_byte(offset + 3),
             signed_byte(offset + 4),
-            static_cast<int>(bytes[offset + 5]),
-            signed_byte(offset + 6)
+            static_cast<int>(bytes[offset + 5]) * 8,
+            signed_byte(offset + 6) * 8
         };
         const auto reserved = bytes[offset + 7];
         const auto face_count = read_u16(bytes, offset + 8);
@@ -124,10 +124,8 @@ std::vector<std::uint8_t> render_ordered_packed_indices(
     bool authentic_sky,
     double surface_time,
     Json* surface_inspection,
-    const ExternalBspScene* external_scene,
-    const ExternalBspReplay* external_replay,
-    bool external_models_enabled,
-    ExternalBspCoverage* external_coverage
+    const ParticleReplay* particles,
+    const PackedExternalVisibilityInspection* external_visibility
 )
 {
     constexpr auto raster_mode = TextureRasterMode::projective_block8;
@@ -173,37 +171,27 @@ std::vector<std::uint8_t> render_ordered_packed_indices(
             raster.untextured_lightmap_indices[pixel] = 0;
         }
     }
-    if (external_replay != nullptr)
+    Json visibility_inspection;
+    if (external_visibility != nullptr)
     {
-        if (ordered_frame.source_pose >= external_replay->row_count())
-        {
-            fail("ordered external BSP source pose is out of range");
-        }
-        if (external_coverage != nullptr)
-        {
-            *external_coverage = external_bsp_row_coverage(*external_replay, ordered_frame.source_pose);
-        }
-        if (external_models_enabled)
-        {
-            if (external_scene == nullptr)
-            {
-                fail("external BSP rendering has no loaded model scene");
-            }
-            compose_packed_external_bsp_models(
-                raster,
-                world,
-                *external_scene,
-                external_replay->row(ordered_frame.source_pose),
-                ordered_frame.source_pose,
-                external_bsp_server_time(*external_replay, ordered_frame.source_pose),
-                ordered_frame.camera,
-                external_coverage
-            );
-        }
-    }
-    else if (external_models_enabled)
-    {
-        fail("external BSP rendering requires a QER1 replay");
+        if (brush_assets.external_entity_slot_first < brush_assets.entities.size())
+            fail("external visibility inspection requires inline-only packed assets");
+        auto diagnostic_raster = raster;
+        const auto& replay = external_visibility->replay;
+        auto external_coverage = external_bsp_row_coverage(replay, ordered_frame.source_pose);
+        compose_packed_external_bsp_models(
+            diagnostic_raster,
+            world,
+            external_visibility->scene,
+            replay.row(ordered_frame.source_pose),
+            ordered_frame.source_pose,
+            external_bsp_server_time(replay, ordered_frame.source_pose),
+            ordered_frame.camera,
+            &external_coverage
+        );
+        visibility_inspection =
+            external_bsp_inspection(replay, ordered_frame.source_pose, true, true, external_coverage);
+        visibility_inspection["imageModified"] = false;
     }
     const auto turbulence_inspection = quake_turbulence_inspection(raster);
     if (surface_inspection != nullptr)
@@ -211,7 +199,17 @@ std::vector<std::uint8_t> render_ordered_packed_indices(
         *surface_inspection = Json{
             {"schema", "quake-reference-surface-inspection-v1"},
             {"available", true},
-            {"turbulence", turbulence_inspection}
+            {"turbulence", turbulence_inspection},
+            {"externalBsp",
+             {{"schema", "quake-reference-packed-external-bsp-v1"},
+              {"available", false},
+              {"reason", "packed BSP pickups use the brush and entity controls; the separate control is source-only"},
+              {"composition", "native-packed-brush-entities-v1"},
+              {"sourcePose", ordered_frame.source_pose},
+              {"packedAssetsPresent", brush_assets.external_entity_slot_first < brush_assets.entities.size()},
+              {"effective",
+               brushes_enabled && entities_enabled &&
+                   brush_assets.external_entity_slot_first < brush_assets.entities.size()}}}
         };
     }
     const auto& selected = selected_render_indices(raster, mode);
@@ -231,23 +229,41 @@ std::vector<std::uint8_t> render_ordered_packed_indices(
         if (surface_inspection != nullptr)
         {
             sky.inspection["turbulence"] = turbulence_inspection;
+            sky.inspection["externalBsp"] = surface_inspection->at("externalBsp");
             *surface_inspection = std::move(sky.inspection);
         }
     }
-    if (!entities_enabled)
+    std::vector<std::int16_t> scene_depth = raster.depth_q6;
+    auto composed =
+        entities_enabled
+            ? compose_post_opaque_alias_indices(
+                  opaque,
+                  raster.depth_q6,
+                  ordered_frame.camera,
+                  alias_assets,
+                  ordered_frame.source_pose,
+                  mode,
+                  coverage,
+                  visibility,
+                  particles != nullptr ? &scene_depth : nullptr
+              )
+            : std::move(opaque);
+    if (particles != nullptr)
     {
-        return opaque;
+        auto inspection = compose_particles(
+            composed,
+            particle_scene_depth(scene_depth),
+            packed_view_transform(world, ordered_frame.camera),
+            *particles,
+            ordered_frame.source_pose,
+            mode
+        );
+        if (surface_inspection != nullptr)
+            (*surface_inspection)["particles"] = std::move(inspection);
     }
-    return compose_post_opaque_alias_indices(
-        opaque,
-        raster.depth_q6,
-        ordered_frame.camera,
-        alias_assets,
-        ordered_frame.source_pose,
-        mode,
-        coverage,
-        visibility
-    );
+    if (surface_inspection != nullptr && external_visibility != nullptr)
+        (*surface_inspection)["externalBspVisibility"] = std::move(visibility_inspection);
+    return composed;
 }
 
 namespace {
@@ -483,7 +499,7 @@ int run_realtime_demo(
     RenderMode initial_mode,
     bool initial_legacy_material,
     PlaybackSpeed initial_playback_speed,
-    bool ordered_2hz,
+    bool ordered_3hz,
     bool ordered_fast,
     int presentation_rate_hz,
     ReferenceInstrumentationConfig instrumentation,
@@ -494,14 +510,17 @@ int run_realtime_demo(
     bool external_bsp_models_enabled,
     const QuakeSoundAssets* sound_assets,
     bool sound_enabled,
-    float sound_volume
+    float sound_volume,
+    const ParticleReplay* particles,
+    bool particles_enabled,
+    bool inspect_external_visibility
 )
 {
-    if (!ordered_2hz)
+    if (!ordered_3hz)
     {
         if (ordered_fast)
         {
-            fail("fast ordered playback requires --ordered-2hz");
+            fail("fast ordered playback requires --ordered-3hz");
         }
         return run_source_realtime_demo(
             world,
@@ -522,14 +541,16 @@ int run_realtime_demo(
             sound_assets,
             sound_enabled,
             sound_volume,
-            std::move(instrumentation)
+            std::move(instrumentation),
+            particles,
+            particles_enabled
         );
     }
     if (initial_legacy_material)
     {
         fail(
             "--material-view is a source-renderer experiment and cannot use "
-            "--ordered-2hz"
+            "--ordered-3hz"
         );
     }
     auto quantized_world = build_quantized_world(data_dir, world);
@@ -545,6 +566,14 @@ int run_realtime_demo(
         fail("live ordered playback requires the complete source-rate QOR1 replay");
     }
     auto brush_assets = load_packed_brush_assets(data_dir);
+    std::optional<PackedExternalVisibilityInspection> visibility_probe;
+    if (inspect_external_visibility)
+    {
+        if (external_scene == nullptr || external_replay == nullptr || !brushes_enabled)
+            fail("external visibility inspection requires loaded models and enabled packed brushes");
+        visibility_probe.emplace(*external_scene, *external_replay);
+    }
+    const auto precise_cameras = load_precise_demo_track(camera_track_path);
     const double ordered_source_rate = replay.source_rate;
     const double duration_seconds = constant_step_duration(replay.frames.size(), ordered_source_rate);
     return run_live_demo(
@@ -555,11 +584,13 @@ int run_realtime_demo(
         [&](std::size_t pose) { return static_cast<double>(replay.frames.at(pose).source_pose) / replay.source_rate; },
         [&](std::size_t pose) { return packed_view_transform(quantized_world, replay.frames.at(pose).camera); },
         [&](std::size_t pose,
+            std::size_t,
             RenderMode mode,
             bool legacy_material,
             bool brushes,
             bool entities,
-            bool external_models) {
+            bool,
+            bool show_particles) {
             if (legacy_material)
             {
                 fail("ordered packed playback cannot select legacy material");
@@ -574,8 +605,6 @@ int run_realtime_demo(
             const double surface_time =
                 brush_replay.first_server_time +
                 static_cast<double>(replay.frames.at(pose).source_pose) / brush_replay.sample_rate;
-            ExternalBspCoverage external_coverage;
-            const bool effective_external_models = external_models;
             auto indices = render_ordered_packed_indices(
                 quantized_world,
                 replay.frames.at(pose),
@@ -590,10 +619,8 @@ int run_realtime_demo(
                 true,
                 surface_time,
                 &surface_inspection,
-                external_scene,
-                external_replay,
-                effective_external_models,
-                &external_coverage
+                show_particles ? particles : nullptr,
+                visibility_probe ? &*visibility_probe : nullptr
             );
             Json inspection{
                 {"schema", "quake-reference-alias-inspection-v1"},
@@ -610,21 +637,13 @@ int run_realtime_demo(
                     coverage
                 );
             }
+            auto external_inspection = surface_inspection.at("externalBsp");
             LiveRenderResult result{std::move(indices), std::move(inspection), std::move(surface_inspection)};
-            if (external_replay != nullptr)
-            {
-                result.external_bsp_inspection = external_bsp_inspection(
-                    *external_replay,
-                    replay.frames.at(pose).source_pose,
-                    external_models,
-                    effective_external_models,
-                    external_coverage
-                );
-            }
+            result.external_bsp_inspection = std::move(external_inspection);
             return result;
         },
         LiveDemoConfiguration{
-            .playback_contract = "packed SNES parity | exact ordered source rows | no skips",
+            .playback_contract = "packed SNES parity | integrated BSP pickups | exact ordered source rows | no skips",
             .initial_mode = initial_mode,
             .initial_legacy_material = false,
             .initial_playback_speed = PlaybackSpeed::Realtime,
@@ -640,10 +659,18 @@ int run_realtime_demo(
             .legacy_material_control = false,
             .brush_control = true,
             .entity_control = true,
-            .external_bsp_model_control = external_replay != nullptr,
+            .external_bsp_model_control = false,
+            .particle_control = particles != nullptr,
             .initial_brushes = brushes_enabled,
             .initial_entities = entities_enabled,
-            .initial_external_bsp_models = external_bsp_models_enabled
+            .initial_external_bsp_models = false,
+            .initial_particles = particles_enabled,
+            .camera_at_pose = [&](std::size_t pose) {
+                auto view = source_view_transform(precise_cameras.at(pose));
+                // Exact recorded orientation, in the packed renderer's screen convention.
+                view.screen_right = view.screen_right * -1.0;
+                return view;
+            }
         }
     );
 }

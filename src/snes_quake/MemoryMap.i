@@ -3,6 +3,7 @@
 .ifndef __QUAKE_BSP_MEMORY_MAP_I__
 __QUAKE_BSP_MEMORY_MAP_I__ = 1
 
+.include "quake/CameraAngles.i"
 .include "Data/QuakeBSPScene.i"
 .include "Data/QuakeBSPBrushAssets.i"
 .include "Data/QuakeBSPMonsterCameras.i"
@@ -10,7 +11,9 @@ __QUAKE_BSP_MEMORY_MAP_I__ = 1
 .include "Data/QuakeBSPAliasAssets.i"
 .include "Data/QuakeBSPAliasVisibility.i"
 .include "Data/QuakeBSPCollision.i"
-.include "Data/QuakeBSPSkyAssets.i"
+.include "Data/Warp/QuakeBSPSkyAssets.i"
+.include "Data/Warp/WarpDepthProfile.i"
+.include "Data/Warp/WarpMotionProfile.i"
 .include "Data/QuakeBSPTurbulenceAssets.i"
 .include "Data/QuakeBSPSoundtrack.i"
 
@@ -24,9 +27,8 @@ BSP_COLLISION_CPU_ROM_BASE    = $F00000
 GSU_RAM_BANK_BYTES            = $10000
 GSU_BRUSH_CODE_OFFSET         = $8C00
 GSU_BRUSH_CODE_CAPACITY       = $25A0
-; Fly alias tracing occupies the otherwise-unused tail of the brush overlay,
+; Fly alias visibility occupies the otherwise-unused tail of the brush overlay,
 ; but is loaded only when fly mode is entered so ordered boot stays unchanged.
-; Align the overlay to a cache line for its plane-distance kernel.
 GSU_ALIAS_FLY_CODE_OFFSET     = $AA70
 GSU_AUX_CODE_OFFSET           = $B1A0
 GSU_AUX_CODE_CAPACITY         = $0E40
@@ -154,9 +156,20 @@ GSU_TURBULENCE_TABLE_BYTES   = BSP_TURBULENCE_TABLE_BYTES * 2
 GSU_VERTEX_REMAP_OFFSET       = $0300
 GSU_VERTEX_REMAP_CAPACITY     = $38FC
 GSU_VERTEX_REMAP_GUARD_OFFSET = $3BFC
+; Persistent leaf PVS has its own cache in the unused remap/selection gap.
+; Neither selector remapping nor brush/alias arenas reach beyond their guard.
+GSU_BRUSH_PVS_OFFSET          = GSU_VERTEX_REMAP_GUARD_OFFSET + 2
+GSU_BRUSH_PVS_BYTES           = (BSP_BRUSH_LEAF_HEAD_COUNT + 7) / 8
+GSU_BRUSH_PVS_LEAF_OFFSET     = (GSU_BRUSH_PVS_OFFSET + GSU_BRUSH_PVS_BYTES + 1) & $FFFE
+; Fine Q6 camera tables occupy the unused persistent PVS/admission gap.
+; Keep the renderer's existing lookup instructions and all hot-code addresses.
+GSU_CAMERA_SIN_OFFSET        = GSU_BRUSH_PVS_LEAF_OFFSET + 2
+GSU_CAMERA_COS_OFFSET        = GSU_CAMERA_SIN_OFFSET + CAMERA_ANGLE_STEPS
 ; The modern E1M3 profile needs 403 admitted faces. Pull the selected-face
 ; bitset into the unused remap/bitset gap and grow the sidecar tail to 405.
 GSU_SELECTED_FACES_OFFSET     = $3F70
+.assert GSU_BRUSH_PVS_LEAF_OFFSET + 2 <= GSU_SELECTED_FACES_OFFSET, error, "Brush PVS overlaps selector admission"
+.assert GSU_CAMERA_COS_OFFSET + CAMERA_ANGLE_STEPS <= GSU_SELECTED_FACES_OFFSET, error, "Fine camera tables overlap selector admission"
 GSU_SELECTED_FACES_CAPACITY   = $023E
 GSU_SELECTED_FACES_GUARD_OFFSET = $41AE
 GSU_PACKET_SIDECARS_OFFSET    = $41B0
@@ -177,6 +190,14 @@ GSU_TEXTURE_FRAMEBUFFER_OFFSET = $0000
 GSU_TEXTURE_FRAMEBUFFER_SCBR  = 0
 GSU_TEXTURE_FRAMEBUFFER_BYTES = $4000
 GSU_TEXTURE_VISIBLE_BYTES     = $3800
+; Compact Mode 7 pages are 11x10 patterns; the converter uses one otherwise
+; unrendered planar tile below the live $3800 code tail as temporary storage.
+GSU_MODE7_FRAME_BYTES         = 11 * 10 * 64
+GSU_MODE7_PACK_CODE           = $3000
+GSU_MODE7_PACK_SCRATCH        = $3700
+BSP_MODE7_UPLOAD_CHUNK_BYTES  = GSU_MODE7_FRAME_BYTES / 2
+.assert GSU_MODE7_PACK_SCRATCH + 64 <= GSU_TEXTURE_VISIBLE_BYTES, error, "Mode 7 scratch overlaps live code"
+.assert 2 * GSU_MODE7_FRAME_BYTES + 64 <= $4000, error, "Mode 7 pages exceed the pattern pool"
 BSP_TECHNIQUE_TEXTURED_LIGHTMAP   = 4
 BSP_TECHNIQUE_UNTEXTURED_LIGHTMAP = 7
 GSU_TEXTURE_TAIL_CODE_OFFSET  = GSU_TEXTURE_VISIBLE_BYTES
@@ -193,10 +214,12 @@ GSU_DIVIDE_Q12_HOT_MIRROR_OFFSET = GSU_TEXTURE_FRAMEBUFFER_OFFSET + GSU_TEXTURE_
 GSU_DIVIDE_Q12_HOT_MIRROR_END = GSU_BRUSH_CODE_OFFSET
 GSU_DIVIDE_Q12_HOT_MIRROR_BYTES = GSU_DIVIDE_Q12_HOT_MIRROR_END - GSU_DIVIDE_Q12_HOT_MIRROR_OFFSET
 GSU_DIVIDE_Q12_HOT_MIRROR_ENTRIES = GSU_DIVIDE_Q12_HOT_MIRROR_BYTES / GSU_DIVIDE_Q12_RECIPROCAL_ENTRY_BYTES
-; The bank-$70 turbulence sampler occupies the mirror's final 260-byte tail.
-; Reciprocal lookups exclude this reserved tail and use the exact ROM fallback.
-GSU_TURBULENCE_HOT_CODE_OFFSET = $8AFC
-GSU_TURBULENCE_HOT_CODE_CAPACITY = $0104
+; The ordinary interior brush arbiter keeps depth, texture, lightmap and
+; pixel advancement in one 512-byte CACHE window. Cold support and liquid
+; sampling live in hidden framebuffer scanlines. The reserved reciprocal tail
+; remains excluded from lookups, which retain the exact ROM fallback.
+GSU_TURBULENCE_HOT_CODE_OFFSET = $8A00
+GSU_TURBULENCE_HOT_CODE_CAPACITY = $0200
 GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_BYTES = GSU_TURBULENCE_HOT_CODE_OFFSET - GSU_DIVIDE_Q12_HOT_MIRROR_OFFSET
 GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES = GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_BYTES / GSU_DIVIDE_Q12_RECIPROCAL_ENTRY_BYTES
 
@@ -276,6 +299,11 @@ GSU_EXPAND_STATE_BYTES        = $000E
 GSU_LIGHTMAP_ROW_STAGE_OFFSET = $4C40
 GSU_LIGHTMAP_ROW_STAGE_ROWS   = 92
 GSU_LIGHTMAP_ROW_STAGE_BYTES  = GSU_LIGHTMAP_ROW_STAGE_ROWS * 16
+; Tall T4 faces reuse the same arenas in bounded row chunks. A 128-pixel
+; row needs at most sixteen eight-pixel intervals plus its first endpoint.
+GSU_LIGHTMAP_TALL_CHUNK_ROWS  = 24
+.assert GSU_LIGHTMAP_TALL_CHUNK_ROWS <= GSU_LIGHTMAP_ROW_STAGE_ROWS, error, "Tall lightmap chunk exceeds row staging"
+.assert GSU_LIGHTMAP_TALL_CHUNK_ROWS * (128 / 8 + 1) <= GSU_TEXTURE_ENDPOINT_STAGE_RECORDS, error, "Tall lightmap chunk exceeds endpoint staging"
 ; World faces and one dynamic-brush leaf group render serially. During a brush
 ; row the lightmap-row arena is idle and can hold one prepared 20-byte record
 ; for every generated group fragment, including arbitrary fly-camera rows.
@@ -294,6 +322,9 @@ GSU_TEXTURE_COORD_MAP_BYTES   = $0080
 ; One immutable per-job signed Q6 pickup basis in the unused map/stage gap.
 GSU_ALIAS_ROTATION_OFFSET     = GSU_TEXTURE_COORD_MAP_OFFSET + GSU_TEXTURE_COORD_MAP_BYTES
 .assert GSU_ALIAS_ROTATION_OFFSET + 2 <= GSU_LIGHTMAP_ROW_STAGE_OFFSET, error, "Alias rotation overlaps row staging"
+; CPU selects the immutable projection/pose archive address before the GSU job.
+GSU_ALIAS_ARCHIVE_ADDRESS_OFFSET = GSU_ALIAS_ROTATION_OFFSET + 2
+.assert GSU_ALIAS_ARCHIVE_ADDRESS_OFFSET + 2 <= GSU_LIGHTMAP_ROW_STAGE_OFFSET, error, "Alias archive command overlaps row staging"
 GSU_TEXTURE_COLORMAP_OFFSET   = $C000
 GSU_LIGHTMAP_COLORMAP_BYTES   = $4000
 GSU_COMMAND_OFFSET            = $8800
@@ -318,11 +349,17 @@ BSP_OVERLAY_ALIAS_ENTITIES    = $02
 BSP_OVERLAY_FLY_STATICS       = $04
 BSP_OVERLAY_SKY_DEFER         = $10
 BSP_OVERLAY_EXTERNAL_BSP      = $20
+BSP_OVERLAY_WARP_OVERSCAN     = $80
+; Fixed demo-WARP source intrinsics. Display rays retain focal length 64.
+.include "quake/WarpFocalConfig.i"
+BSP_WARP_FOCAL_PATCH_BYTES    = 18
+.assert BSP_WARP_SOURCE_FOCAL > 32 .and BSP_WARP_SOURCE_FOCAL <= 64, error, "Invalid fixed WARP source focal length"
 .if BSP_EXTERNAL_BSP_SUPPORTED
 .assert BSP_EXTERNAL_BSP_ACTIVE_ROW_BYTES = 3, error, "External BSP active rows no longer fit the 24-bit fly mask"
 .endif
 BSP_SKY_FLAG_ENABLED          = $01
 BSP_SKY_FLAG_PRESENTED        = $02
+.include "quake/fly_full/Config.i"
 GSU_TELEMETRY_OFFSET          = $8820
 GSU_TELEMETRY_BYTES           = $40
 ; Geometry-stage observation counters are optional telemetry.  $FFFF exceeds
@@ -367,16 +404,16 @@ GSU_SOURCE_FACE_IDS_BYTES     = GSU_PACKET_FACE_CAPACITY * 2
 ; with one tagged world/fragment token stream after world selection.
 GSU_BRUSH_MIXED_TOKENS_OFFSET = GSU_SOURCE_FACE_IDS_OFFSET
 GSU_BRUSH_MIXED_TOKEN_CAPACITY = (GSU_FACE_PLANES_OFFSET - GSU_BRUSH_MIXED_TOKENS_OFFSET) / 2
-; Complete fly brush states require at most 1,149 mixed tokens. Trade 32
-; spare projection-cache entries for 64 tokens without moving the vertices.
-GSU_FACE_PLANES_OFFSET        = $9170
+; Complete fly brush states plus all 128 live entity tokens need 1,179
+; mixed tokens. Trade 16 spare projection-cache entries for 32 more tokens.
+GSU_FACE_PLANES_OFFSET        = $91B0
 GSU_FACE_PLANES_CAPACITY      = $07F8
-GSU_FACE_PLANES_GUARD_OFFSET  = $9966
+GSU_FACE_PLANES_GUARD_OFFSET  = $99A6
 ; A selector command can encounter at most 1,297 drawable vertices in any
-; non-solid E1M3 PVS row. Cache 1,504 projected x/y pairs with explicit tagged
+; non-solid E1M3 PVS row. Cache 1,488 projected x/y pairs with explicit tagged
 ; remap state, leaving deterministic headroom without generation counters.
-GSU_PROJECTION_CACHE_OFFSET   = $9968
-GSU_PROJECTION_CACHE_ENTRIES  = 1504
+GSU_PROJECTION_CACHE_OFFSET   = $99A8
+GSU_PROJECTION_CACHE_ENTRIES  = 1488
 GSU_PROJECTION_CACHE_RECORD_BYTES = 4
 GSU_PROJECTION_CACHE_BYTES    = GSU_PROJECTION_CACHE_ENTRIES * GSU_PROJECTION_CACHE_RECORD_BYTES
 GSU_PROJECTION_CACHE_GUARD_OFFSET = $B0E8
@@ -406,8 +443,13 @@ GSU_BRUSH_LINKS_END           = GSU_BRUSH_LINKS_OFFSET + GSU_BRUSH_LINK_CAPACITY
 ; MDL billboard visibility is already reduced to at most one compact group per
 ; origin leaf. These tables share the selector-idle remap tail with brush links.
 GSU_ALIAS_GROUPS_OFFSET       = GSU_BRUSH_LINKS_END
+; A live 30 Hz inspection snapshot can contain more actors than the initial
+; fly row. Reserve the complete seven-bit token domain, independent of the
+; smaller maxima observed in the packaged demo-camera rows.
+GSU_ALIAS_MAX_STATES          = 128
+GSU_ALIAS_MAX_GROUPS          = 128
 GSU_ALIAS_GROUP_RECORD_BYTES = 6
-GSU_ALIAS_GROUPS_BYTES        = BSP_ALIAS_MAX_GROUPS * GSU_ALIAS_GROUP_RECORD_BYTES
+GSU_ALIAS_GROUPS_BYTES        = GSU_ALIAS_MAX_GROUPS * GSU_ALIAS_GROUP_RECORD_BYTES
 GSU_ALIAS_GROUPS_END          = GSU_ALIAS_GROUPS_OFFSET + GSU_ALIAS_GROUPS_BYTES
 ; Once painter traversal has consumed the leaf groups, reuse their arena for
 ; one exact-depth record per flattened token. The sorted original ordinals are
@@ -415,28 +457,21 @@ GSU_ALIAS_GROUPS_END          = GSU_ALIAS_GROUPS_OFFSET + GSU_ALIAS_GROUPS_BYTES
 ; pointers and masks stay keyed by canonical QBA1 token ordinal.
 GSU_ALIAS_RENDER_SORT_OFFSET  = GSU_ALIAS_GROUPS_OFFSET
 GSU_ALIAS_RENDER_SORT_RECORD_BYTES = 4
-GSU_ALIAS_RENDER_SORT_BYTES   = BSP_ALIAS_MAX_VISIBLE_STATES * GSU_ALIAS_RENDER_SORT_RECORD_BYTES
+GSU_ALIAS_RENDER_SORT_BYTES   = GSU_ALIAS_MAX_STATES * GSU_ALIAS_RENDER_SORT_RECORD_BYTES
 GSU_ALIAS_RENDER_SORT_END     = GSU_ALIAS_RENDER_SORT_OFFSET + GSU_ALIAS_RENDER_SORT_BYTES
 GSU_ALIAS_TOKENS_OFFSET       = GSU_ALIAS_GROUPS_END
-GSU_ALIAS_TOKENS_BYTES        = BSP_ALIAS_MAX_VISIBLE_STATES
+GSU_ALIAS_TOKENS_BYTES        = GSU_ALIAS_MAX_STATES
 GSU_ALIAS_TOKENS_END          = GSU_ALIAS_TOKENS_OFFSET + GSU_ALIAS_TOKENS_BYTES
 ; Ordered alias depth masks must survive every opaque world/brush raster. The
 ; selector-idle remap tail is persistent for that complete phase, unlike the
 ; polygon scratch. A pointer sentinel selects the zero-cost visible path or a
 ; projection-level hidden reject; only partial tokens point at staged masks.
 GSU_ALIAS_VISIBILITY_POINTERS_OFFSET = GSU_ALIAS_TOKENS_END
-GSU_ALIAS_VISIBILITY_POINTERS_BYTES = BSP_ALIAS_MAX_VISIBLE_STATES * 2
+GSU_ALIAS_VISIBILITY_POINTERS_BYTES = GSU_ALIAS_MAX_STATES * 2
 GSU_ALIAS_VISIBILITY_POINTERS_END = GSU_ALIAS_VISIBILITY_POINTERS_OFFSET + GSU_ALIAS_VISIBILITY_POINTERS_BYTES
 GSU_ALIAS_VISIBILITY_MASKS_OFFSET = GSU_ALIAS_VISIBILITY_POINTERS_END
-GSU_ALIAS_VISIBILITY_MASKS_BYTES = BSP_ALIAS_VISIBILITY_MAX_MASK_BYTES
+GSU_ALIAS_VISIBILITY_MASKS_BYTES = BSP_ALIAS_ARCHIVE_MAX_DECODED_BYTES
 GSU_ALIAS_VISIBILITY_MASKS_END = GSU_ALIAS_VISIBILITY_MASKS_OFFSET + GSU_ALIAS_VISIBILITY_MASKS_BYTES
-; Painter traversal and alias sorting are complete before billboard raster.
-; Reuse their group arena for the fly-only BSP segment stack, keeping the
-; per-token visibility pointers intact throughout every traced sprite.
-GSU_ALIAS_FLY_TRACE_STACK_OFFSET = GSU_ALIAS_GROUPS_OFFSET
-GSU_ALIAS_FLY_TRACE_RECORD_BYTES = 8
-GSU_ALIAS_FLY_TRACE_STACK_BYTES = BSP_WORLD_MAX_NODE_DEPTH * GSU_ALIAS_FLY_TRACE_RECORD_BYTES
-GSU_ALIAS_FLY_TRACE_STACK_END = GSU_ALIAS_FLY_TRACE_STACK_OFFSET + GSU_ALIAS_FLY_TRACE_STACK_BYTES
 ; Quarter-depth lookup for Q6 projection: 1,024 unsigned Q12 words. The
 ; natural lightmap colormap begins at $C000 and phase-overlays the far suffix.
 GSU_RECIPROCAL_OFFSET         = $BD20
@@ -541,7 +576,7 @@ BSP_TEXTURE_UPLOAD_LAST_CHUNK_BYTES = GSU_TEXTURE_VISIBLE_BYTES - BSP_TEXTURE_UP
 .assert GSU_TURBULENCE_HOT_CODE_OFFSET >= GSU_DIVIDE_Q12_HOT_MIRROR_OFFSET, error, "Turbulence hot code starts below the reciprocal mirror"
 .assert GSU_TURBULENCE_HOT_CODE_OFFSET + GSU_TURBULENCE_HOT_CODE_CAPACITY = GSU_DIVIDE_Q12_HOT_MIRROR_END, error, "Turbulence hot code no longer fills the reciprocal mirror tail"
 .assert (GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_BYTES & (GSU_DIVIDE_Q12_RECIPROCAL_ENTRY_BYTES-1)) = 0, error, "Sky hot overlay splits a reciprocal entry"
-.assert GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES = $12BF, error, "Safe Q12 mirror prefix changed"
+.assert GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES = $1280, error, "Safe Q12 mirror prefix changed"
 .assert GSU_SKY_COMPOSITOR_SCRATCH_OFFSET = GSU_RASTER_SCRATCH_OFFSET + $0180, error, "Sky compositor scratch no longer begins at the texture polygon arena"
 .assert GSU_SKY_COMPOSITOR_SCRATCH_OFFSET + GSU_SKY_COMPOSITOR_SCRATCH_BYTES = GSU_SIN_OFFSET, error, "Sky compositor scratch no longer ends at the trigonometry tables"
 .assert GSU_TELEMETRY_OFFSET + GSU_TELEMETRY_BYTES = GSU_SOURCE_FACE_IDS_OFFSET, error, "BSP telemetry overlaps source-face sidecar"
@@ -549,7 +584,9 @@ BSP_TEXTURE_UPLOAD_LAST_CHUNK_BYTES = GSU_TEXTURE_VISIBLE_BYTES - BSP_TEXTURE_UP
 .if BSP_BRUSH_DYNAMIC_REPLAY_SUPPORTED
 .assert GSU_BRUSH_MIXED_TOKEN_CAPACITY >= 1028, error, "Brush mixed-token capacity regressed"
 .assert GSU_BRUSH_MIXED_TOKEN_CAPACITY >= GSU_PACKET_FACE_CAPACITY + BSP_BRUSH_FLY_LINK_MAX + BSP_BRUSH_FLY_LEAF_MARKER_MAX, error, "Brush mixed tokens cannot hold the proven fly snapshot and leaf markers"
-.assert GSU_BRUSH_MIXED_TOKEN_CAPACITY >= GSU_PACKET_FACE_CAPACITY + BSP_BRUSH_FLY_LINK_MAX + BSP_BRUSH_FLY_LEAF_MARKER_MAX + BSP_ALIAS_MAX_VISIBLE_STATES, error, "Mixed tokens cannot hold the proven brush and alias maxima"
+.assert GSU_BRUSH_MIXED_TOKEN_CAPACITY >= GSU_PACKET_FACE_CAPACITY + BSP_BRUSH_FLY_LINK_MAX + BSP_BRUSH_FLY_LEAF_MARKER_MAX + GSU_ALIAS_MAX_STATES, error, "Mixed tokens cannot hold the proven brush and alias maxima"
+.assert GSU_ALIAS_MAX_STATES >= BSP_ALIAS_MAX_VISIBLE_STATES, error, "Alias states exceed live capacity"
+.assert GSU_ALIAS_MAX_GROUPS >= BSP_ALIAS_MAX_GROUPS, error, "Alias groups exceed live capacity"
 .endif
 .assert GSU_BRUSH_LEAF_HEADS_OFFSET >= GSU_VERTEX_REMAP_OFFSET + BSP_WORLD_FACE_COUNT * 2, error, "Brush leaf heads overlap the face lookup"
 .assert BSP_BRUSH_LEAF_HEAD_COUNT = BSP_WORLD_VIS_LEAF_COUNT + 1, error, "Brush leaf heads must cover the world VIS domain"
@@ -565,7 +602,6 @@ BSP_TEXTURE_UPLOAD_LAST_CHUNK_BYTES = GSU_TEXTURE_VISIBLE_BYTES - BSP_TEXTURE_UP
 .assert GSU_ALIAS_RENDER_SORT_END <= GSU_ALIAS_GROUPS_END, error, "Alias render sort exceeds the retired group arena"
 .assert GSU_ALIAS_TOKENS_END <= GSU_VERTEX_REMAP_GUARD_OFFSET, error, "Alias tokens escape the phase-separated remap tail"
 .assert GSU_ALIAS_VISIBILITY_MASKS_END <= GSU_VERTEX_REMAP_GUARD_OFFSET, error, "Alias visibility masks escape the persistent remap tail"
-.assert GSU_ALIAS_FLY_TRACE_STACK_END <= GSU_ALIAS_GROUPS_END, error, "Fly alias trace stack escapes the retired group arena"
 .assert GSU_FACE_PLANES_OFFSET + GSU_FACE_PLANES_CAPACITY = GSU_PROJECTION_CACHE_OFFSET, error, "Projection cache moved away from face planes"
 .assert GSU_FACE_PLANES_GUARD_OFFSET + 2 <= GSU_FACE_PLANES_OFFSET + GSU_FACE_PLANES_CAPACITY, error, "Face-plane guard escapes its packet"
 .assert GSU_PROJECTION_CACHE_OFFSET + GSU_PROJECTION_CACHE_BYTES = GSU_PROJECTION_CACHE_GUARD_OFFSET, error, "Projection cache capacity disagrees with its guard"

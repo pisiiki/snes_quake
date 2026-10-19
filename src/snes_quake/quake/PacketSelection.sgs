@@ -300,6 +300,12 @@ CONVEX_EDGE_X0 = CONVEX_STATE + $60
 CONVEX_EDGE_Y0 = CONVEX_STATE + $62
 CONVEX_EDGE_X1 = CONVEX_STATE + $64
 CONVEX_EDGE_Y1 = CONVEX_STATE + $66
+; These retired edge words are private to the T4 tall-face replay lifecycle.
+; Reset ACTIVE at every raster entry; no new cartridge RAM is reserved.
+T4_LIGHTMAP_CHUNK_FINAL_Y = CONVEX_EDGE_X0
+T4_LIGHTMAP_CHUNK_FORWARD_PTR = CONVEX_EDGE_Y0
+T4_LIGHTMAP_CHUNK_REVERSE_PTR = CONVEX_EDGE_X1
+T4_LIGHTMAP_CHUNK_ACTIVE = CONVEX_EDGE_Y1
 CONVEX_DIV_NUM = CONVEX_STATE + $68
 CONVEX_DIV_DEN = CONVEX_STATE + $6A
 CONVEX_SCREEN_END_PTR = CONVEX_STATE + $6C
@@ -451,12 +457,15 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
 .assert BSP_PROJECTION_SHIFT = 12, error, "BSP subpixel reciprocal requires Q12 projection"
 .assert BSP_WORLD_LIGHTMAP_MAX_FACE_SAMPLE_BYTES <= GSU_LIGHTMAP_CACHE_BYTES, error, "BSP face lightmap exceeds its raster cache"
 
+; These products begin after a complete instruction resets SRC/DST. FROM
+; selects the operand directly; LMULT writes R0 and leaves the product sign.
+; Every arithmetic operation resets SRC/DST again, including the R4 shifts,
+; so the intervening high-word operations can use the implicit R0 registers.
 .macro BSP_SIGNED_MUL_PROJECT dest, source, multiplier
         ; LMULT leaves the signed 32-bit result in Dreg:R4. Extract bits 8..23
         ; without MERGE: FX3 repurposes that opcode as its clear-command port.
         move    R6, multiplier
-        move    R0, source
-        with    R0
+        from    source
         lmult
         move    R7, R0
         with    R7
@@ -488,11 +497,9 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
         ; Shift the complete signed LMULT result, propagating the high-word
         ; carry into R4 so Q6 sub-world precision survives projection.
         move    R6, multiplier
-        move    R0, source
-        with    R0
+        from    source
         lmult
   .repeat shift
-        with    R0
         asr
         with    R4
         ror
@@ -513,21 +520,17 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
         ; Signed 16x16 product shifted toward zero. Bias a negative 32-bit
         ; product before the arithmetic shift, carrying from its low word.
         move    R6, multiplier
-        move    R0, source
-        with    R0
+        from    source
         lmult
-        moves   R0, R0
         bpl     :+
         nop
         iwt     R1, #(1 << shift) - 1
         with    R4
         add     R1
         move    R1, #0
-        with    R0
         adc     R1
 :
   .repeat shift
-        with    R0
         asr
         with    R4
         ror
@@ -540,8 +543,7 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
 ; HIB followed by four shifts extracts low-word bits 15..12 directly.
 .macro BSP_SIGNED_MUL_SHIFT12 dest, source, multiplier
         move    R6, multiplier
-        move    R0, source
-        with    R0
+        from    source
         lmult
         with    R4
         hib
@@ -551,10 +553,8 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
   .endrepeat
         move    R6, R4
   .repeat 4
-        with    R0
         add     R0
   .endrepeat
-        with    R0
         or      R6
         move    dest, R0
 .endmacro
@@ -562,17 +562,14 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
 ; Signed Q12 multiplication rounded toward zero, matching the generic helper.
 .macro BSP_SIGNED_MUL_SHIFT_TRUNC12 dest, source, multiplier
         move    R6, multiplier
-        move    R0, source
-        with    R0
+        from    source
         lmult
-        moves   R0, R0
         bpl     :+
         nop
         iwt     R1, #4095
         with    R4
         add     R1
         move    R1, #0
-        with    R0
         adc     R1
 :
         with    R4
@@ -583,10 +580,8 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
   .endrepeat
         move    R6, R4
   .repeat 4
-        with    R0
         add     R0
   .endrepeat
-        with    R0
         or      R6
         move    dest, R0
 .endmacro
@@ -673,53 +668,7 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
         sm      (CONVEX_OUTPUT_COUNT), R0
 .endmacro
 
-; Return in R0 the four exact frustum-plane outcode bits for the Q6
-; CLIP_RIGHT/UP/DEPTH coordinate left by ClipTransformVertex.
-.macro BSP_CLASSIFY_CLIP_OUTCODE
-        .local Plane0Inside, Plane1Inside, Plane2Inside, Plane3Inside
-        move    R0, #0
-        lm      R4, (CLIP_DEPTH)
-        with    R4
-        asr
-        lm      R5, (CLIP_RIGHT)
-        with    R5
-        asr
-        move    R6, R4
-        with    R6
-        add     R5
-        bpl     Plane0Inside
-        nop
-        with    R0
-        or      #1
-Plane0Inside:
-        move    R6, R4
-        with    R6
-        sub     R5
-        bpl     Plane1Inside
-        nop
-        with    R0
-        or      #2
-Plane1Inside:
-        lm      R5, (CLIP_UP)
-        with    R5
-        asr
-        move    R6, R4
-        with    R6
-        sub     R5
-        bpl     Plane2Inside
-        nop
-        with    R0
-        or      #4
-Plane2Inside:
-        move    R6, R4
-        with    R6
-        add     R5
-        bpl     Plane3Inside
-        nop
-        with    R0
-        or      #8
-Plane3Inside:
-.endmacro
+.include "quake/ClipOutcode.i"
 
 .macro BSP_PACKET_CLAMP_Y reg
         .local CheckHigh, Done
@@ -1041,7 +990,7 @@ PacketClearRemap:
         nop
 
         iwt     R10, #SELECTED_FACE_BITS
-        iwt     R12, #(BSP_WORLD_FACE_BITSET_BYTES-1)/2
+        iwt     R12, #BSP_WORLD_FACE_BITSET_BYTES/2
         iwt     R13, #PacketClearSelected
         move    R0, #0
 PacketClearSelected:
@@ -1050,7 +999,12 @@ PacketClearSelected:
         inc     R10
         loop
         nop
-        moveb   (R10), R0               ; Final odd byte (byte 552).
+  .if BSP_WORLD_FACE_BITSET_BYTES & 1
+        moveb   (R10), R0               ; Clear a tail only for an odd byte count.
+  .else
+        nop                             ; Preserve the following cache addresses.
+        nop
+  .endif
 
         iwt     R10, #PAINTER_NODE_BITS
         iwt     R12, #GSU_PAINTER_NODE_MASK_BYTES/2
@@ -1089,13 +1043,13 @@ PacketClearPainterNodes:
         sm      (PACKET_YAW), R4
         GSU_LOAD_BYTE R5
         sm      (PACKET_PITCH), R5
-        GSU_LOAD_SIGNED_TABLE R0, GSU_SIN_OFFSET, R4
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_SIN_OFFSET, R4
         sm      (PACKET_YAW_SIN), R0
-        GSU_LOAD_SIGNED_TABLE R0, GSU_COS_OFFSET, R4
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_COS_OFFSET, R4
         sm      (PACKET_YAW_COS), R0
-        GSU_LOAD_SIGNED_TABLE R0, GSU_SIN_OFFSET, R5
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_SIN_OFFSET, R5
         sm      (PACKET_PITCH_SIN), R0
-        GSU_LOAD_SIGNED_TABLE R0, GSU_COS_OFFSET, R5
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_COS_OFFSET, R5
         sm      (PACKET_PITCH_COS), R0
 
         iwt     R10, #COMMAND+8
@@ -1250,10 +1204,14 @@ PacketScanPlaneCull:
         add     R4
         with    R12
         sub     R10
-        ; Quake world polygons are wound toward solid space. Interior cameras
-        ; see the negative/oriented-back side, so reject the opposite side.
-        bpl     PacketScanNextBit
+        ; Keep coplanar faces: rounding the Q6 view can give them a visible
+        ; sliver even when their world-space plane distance is exactly zero.
+        ; The actual clipped polygon, rather than a widened neighbor, covers it.
+        bmi     PacketScanPlaneAccepted
         nop
+        bne     PacketScanNextBit
+        nop
+PacketScanPlaneAccepted:
         GSU_ABSOLUTE_GOTO PacketProjectFaceBegin
 
 PacketScanNextBit:
@@ -1443,7 +1401,10 @@ GSU_CACHE_KERNEL_END PacketLoadProjectedWorldVertex
 
 ; Project a previously unseen PACKET_SOURCE_INDEX with the renderer's
 ; deterministic signed-word arithmetic and lookup tables.
-GSU_CACHE_KERNEL_BEGIN PacketProjectWorldVertex
+; One-shot transform/store stages preserve the fan walker's repeatedly used cache.
+        .align GSU_CACHE_LINE_BYTES
+PacketProjectWorldVertex:
+        nop
         lm      R0, (PACKET_SOURCE_INDEX)
         move    R1, R0
         with    R1
@@ -1460,7 +1421,6 @@ GSU_CACHE_KERNEL_BEGIN PacketProjectWorldVertex
         BSP_ROM_LOAD_SIGNED_BYTE R2
         BSP_ROM_LOAD_SIGNED_BYTE R3
         BSP_ROM_LOAD_BYTE R7
-
         ; Decode signed Q2 = base*4 + the component's two residual bits.
         with    R1
         add     R1
@@ -1496,7 +1456,6 @@ GSU_CACHE_KERNEL_BEGIN PacketProjectWorldVertex
         and     #3
         with    R3
         add     R7
-
         lm      R0, (PACKET_CAMERA_Q2_X)
         with    R1
         sub     R0                       ; dx
@@ -1517,7 +1476,6 @@ GSU_CACHE_KERNEL_BEGIN PacketProjectWorldVertex
         with    R12
         add     R0
         sm      (PACKET_VIEW_FORWARD), R12
-
         BSP_SIGNED_MUL_SHIFT R7, R1, R9, 2
         with    R5
         sub     R7
@@ -1544,11 +1502,11 @@ PacketProjectLevelPitch:
   .repeat $129 - (* - PacketProjectWorldVertex)
         nop
   .endrepeat
-GSU_CACHE_KERNEL_END PacketProjectWorldVertex
-; Classify and project the Q6 view coordinate in a separate cache window. This
-; keeps compact-vertex decode/transform and the two 32-bit Q12 multiplies under
-; the SuperFX 512-byte cache limit without changing their shared state.
-GSU_CACHE_KERNEL_BEGIN PacketProjectTransformedWorldVertex
+; Classify and project the Q6 view coordinate without replacing the fan cache.
+; Preserve the established entry addresses, including the former CACHE byte.
+        .align GSU_CACHE_LINE_BYTES
+PacketProjectTransformedWorldVertex:
+        nop
         lm      R8, (PACKET_VIEW_DEPTH)
         move    R0, #0
         sm      (PACKET_PROJ_VALID), R0
@@ -1610,14 +1568,14 @@ PacketProjectInRange:
         add     R5
         movew   R9, (R10)
         lm      R5, (PACKET_VIEW_RIGHT)
-        BSP_SIGNED_MUL_SHIFT R0, R5, R9, BSP_PROJECTION_SHIFT
-        move    R1, #64
+        BSP_SIGNED_MUL_SHIFT12 R0, R5, R9
+        move    R1, #BSP_VIEW_CENTER_X
         with    R0
         add     R1
         sm      (PACKET_PROJ_X), R0
         lm      R5, (PACKET_VIEW_UP)
-        BSP_SIGNED_MUL_SHIFT R0, R5, R9, BSP_PROJECTION_SHIFT
-        move    R1, #56
+        BSP_SIGNED_MUL_SHIFT12 R0, R5, R9
+        move    R1, #BSP_VIEW_CENTER_Y
         with    R1
         sub     R0
         sm      (PACKET_PROJ_Y), R1
@@ -1629,12 +1587,22 @@ PacketProjectInRange:
         sm      (PACKET_PROJ_VALID), R0
         sm      (PACKET_PROJ_STATE), R0
         GSU_ABSOLUTE_GOTO PacketCacheStoreProjection
-GSU_CACHE_KERNEL_END PacketProjectTransformedWorldVertex
+
+; The direct Q12 product avoids twelve serial carry-propagating shifts. Its
+; R4/R6 scratch is dead after each projection; coordinate ADD/SUB sets fresh flags.
+; Fill only the unreachable tail so every downstream public/cache entry keeps
+; its established address despite the shorter X/Y projection helpers.
+  .repeat $06E0 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 
 ; Publish the just-computed projection only after all coordinates and state are
 ; complete. Rejected faces therefore retain reusable cache entries but never
 ; expose packet-local IDs or packet-array bytes.
-GSU_CACHE_KERNEL_BEGIN PacketCacheStoreProjection
+        .align GSU_CACHE_LINE_BYTES
+PacketCacheStoreProjection:
+.assert PacketCacheStoreProjection - GSU_SelectVisibility = $06E0, error, "Packet projection cache entry moved"
+        nop
         lm      R1, (PACKET_PROJECTION_COUNT)
         iwt     R2, #GSU_PROJECTION_CACHE_ENTRIES
         with    R1
@@ -1705,7 +1673,6 @@ PacketProjectionCacheOverflow:
         movew   (R10), R1
         ret
         nop
-GSU_CACHE_KERNEL_END PacketCacheStoreProjection
 
 GSU_CACHE_KERNEL_BEGIN PacketProjectFaceBegin
         lm      R0, (PACKET_FACE_FIRST)
@@ -1722,7 +1689,7 @@ GSU_CACHE_KERNEL_END PacketProjectFaceBegin
 ; PacketNearStraddler path still admits a face with both projectable and
 ; behind-near vertices; RenderFaces already clips those crossing triangles.
 GSU_CACHE_KERNEL_BEGIN PacketProjectFaceLoop
-        ; Keep the walker cached; unseen vertices establish a transform cache.
+        ; Keep the walker cached while unseen vertices execute the cold stages.
         jal     PacketLoadProjectedWorldVertex+1
         nop
         lm      R0, (PACKET_FAN_ORDINAL)
@@ -1773,7 +1740,7 @@ PacketFanThreeValid:
         nop
         GSU_ABSOLUTE_GOTO PacketFanAdvancePrevious
 PacketFanHasNonnegativeX:
-        iwt     R2, #BSP_LOGICAL_WIDTH+1
+        iwt     R2, #BSP_VIEW_WIDTH+1
         lm      R4, (PACKET_FAN_X0)
         with    R4
         cmp     R2
@@ -1813,7 +1780,7 @@ PacketFanXIntersects:
         GSU_ABSOLUTE_GOTO PacketFanAdvancePrevious
 PacketFanHasNonnegativeY:
         ; min(y)<113.
-        iwt     R2, #BSP_LOGICAL_HEIGHT+1
+        iwt     R2, #BSP_VIEW_HEIGHT+1
         move    R0, R4
         with    R0
         cmp     R2

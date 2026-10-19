@@ -1,0 +1,468 @@
+; Exact world and brush coverage for Fly aliases. Reuse the normal projection,
+; span rounding and perspective depth kernels after opaque raster retires.
+; Only a one-bit mask persists; no full-frame depth values are allocated.
+.segment "GSU_SKY_ROM_CODE"
+
+.macro FLY_MASK_CALL routine
+        iwt     R8, #routine
+        iwt     R9, #.loword(:+)
+        sm      (FLY_MASK_ROM_RETURN), R9
+        move    R9, #$70
+        iwt     R10, #FlyBrushMaskCallRAM
+        from    R10
+        ljmp    R9
+        nop
+:
+.endmacro
+
+.macro FLY_MASK_COPY source, destination, words
+        iwt     R4, #source
+        iwt     R6, #destination
+        iwt     R12, #words
+        iwt     R13, #.loword(:+)
+:
+        movew   R0, (R4)
+        movew   (R6), R0
+        inc     R4
+        inc     R4
+        inc     R6
+        inc     R6
+        loop
+        nop
+.endmacro
+
+FlyBrushResetMaskROM:
+        iwt     R0, #$FFFF
+        sm      (FLY_MASK_TOKEN), R0
+        GSU_ABSOLUTE_GOTO .loword(AliasBuildVisibilityDone)
+
+FlyBrushTestMaskROM:
+FlyBrushMaskEnabled:
+        lm      R0, (BRUSH_CURRENT_TOKEN)
+        lm      R1, (FLY_MASK_TOKEN)
+        with    R0
+        cmp     R1
+        bne     FlyBrushMaskBuild
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskRead)
+FlyBrushMaskBuild:
+        sm      (FLY_MASK_TOKEN), R0
+        iwt     R0, #$FFFF
+        with    R1
+        cmp     R0
+        bne     FlyWorldBoundsReady
+        nop
+        iwt     R10, #FLY_MASK_BOUNDS
+        iwt     R12, #FLY_MASK_BOUNDS_BYTES/2
+        iwt     R13, #.loword(FlyWorldBoundsClear)
+FlyWorldBoundsClear:
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        loop
+        nop
+        sm      (FLY_MASK_CEILING), R0
+FlyWorldBoundsReady:
+        lm      R0, (ALIAS_FIRST_X)
+        moves   R0, R0
+        bpl     FlyMaskLeftClamped
+        nop
+        move    R0, #0
+FlyMaskLeftClamped:
+        sm      (FLY_MASK_RECT_FIRST_X), R0
+        lm      R0, (ALIAS_LAST_X)
+        iwt     R1, #BSP_VIEW_WIDTH-1
+        with    R0
+        cmp     R1
+        bcc     FlyMaskRightClamped
+        nop
+        move    R0, R1
+FlyMaskRightClamped:
+        sm      (FLY_MASK_RECT_LAST_X), R0
+        lm      R0, (ALIAS_LAST_Y)
+        iwt     R1, #BSP_VIEW_HEIGHT-1
+        with    R0
+        cmp     R1
+        bcc     FlyMaskBottomClamped
+        nop
+        move    R0, R1
+FlyMaskBottomClamped:
+        sm      (FLY_MASK_RECT_LAST_Y), R0
+        lm      R0, (CLIP_DEPTH)
+        sm      (FLY_MASK_DEPTH), R0
+        lm      R0, (ALIAS_DEST_Y)
+        sm      (FLY_MASK_FIRST_Y), R0
+        lm      R1, (FLY_MASK_RECT_LAST_Y)
+        with    R1
+        sub     R0
+        inc     R1
+        lm      R0, (FLY_MASK_RECT_LAST_X)
+        lm      R2, (FLY_MASK_RECT_FIRST_X)
+        with    R0
+        sub     R2
+        inc     R0
+        with    R0
+        umult   R1
+        sm      (FLY_MASK_REMAINING), R0
+        ; Preserve texture/convex/visibility state and mixed-token cursors. The
+        ; brush slot table and alias state lie beyond the second copy.
+        FLY_MASK_COPY 0, FLY_MASK_BACKUP, $100
+        FLY_MASK_COPY BRUSH_STATE, FLY_MASK_BACKUP+$200, $80
+        lm      R0, (FLY_MASK_DEPTH)
+        lm      R1, (FLY_MASK_CEILING)
+        with    R0
+        cmp     R1
+        bcc     FlyBrushMaskClearStart
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskReuse)
+FlyBrushMaskClearStart:
+        move    R0, #0
+        sm      (FLY_MASK_CEILING), R0
+        iwt     R10, #FLY_MASK_BITS
+        iwt     R12, #FLY_MASK_BYTES/2
+        iwt     R13, #.loword(FlyBrushMaskClear)
+FlyBrushMaskClear:
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        loop
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyWorldMaskStart)
+
+; Only retain bits while every recorded occluder is in front of the new alias.
+; Depth and geometry are unchanged throughout the alias suffix of this frame.
+FlyBrushMaskReuse:
+        lm      R4, (FLY_MASK_FIRST_Y)
+        lm      R5, (FLY_MASK_REMAINING)
+        lm      R7, (FLY_MASK_RECT_LAST_X)
+        lm      R8, (FLY_MASK_RECT_LAST_Y)
+FlyBrushMaskReuseRow:
+        lm      R6, (FLY_MASK_RECT_FIRST_X)
+FlyBrushMaskReusePixel:
+        move    R0, R4
+        move    R2, R6
+        FLY_MASK_BIT
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        and     R1
+        beq     FlyBrushMaskReuseNextPixel
+        nop
+        dec     R5
+        bne     FlyBrushMaskReuseNextPixel
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskFinish)
+FlyBrushMaskReuseNextPixel:
+        with    R6
+        cmp     R7
+        beq     FlyBrushMaskReuseNextRow
+        nop
+        inc     R6
+        bra     FlyBrushMaskReusePixel
+        nop
+FlyBrushMaskReuseNextRow:
+        with    R4
+        cmp     R8
+        beq     FlyBrushMaskReuseReady
+        nop
+        inc     R4
+        bra     FlyBrushMaskReuseRow
+        nop
+FlyBrushMaskReuseReady:
+        sm      (FLY_MASK_REMAINING), R5
+        GSU_ABSOLUTE_GOTO .loword(FlyWorldMaskStart)
+
+FlyBrushMaskLink:
+        lm      R0, (FLY_MASK_LINK)
+        moves   R0, R0
+        bpl     FlyBrushMaskBrushLink
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyWorldMaskLink)
+FlyBrushMaskBrushLink:
+        lm      R1, (BRUSH_LINK_COUNT)
+        with    R0
+        cmp     R1
+        bne     FlyBrushMaskLinkPresent
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskFinish)
+FlyBrushMaskLinkPresent:
+        sm      (BRUSH_CURRENT_LINK), R0
+        ; Mixed links already bind admitted inline, VSTATIC and external BSP
+        ; slots to their active scene state. All opaque links can occlude an
+        ; alias; excluding QER1 slots lets sprites draw through pickups.
+FlyBrushMaskInline:
+        FLY_MASK_CALL BrushLoadCurrentFragment
+        FLY_MASK_CALL BrushFaceFrontFacing
+        moves   R0, R0
+        beq     FlyBrushMaskNextLink
+        nop
+        ; The mask uses geometry/depth; its S/T fields are deliberately zero.
+        FLY_MASK_CALL FlyBrushBuildDepthView
+        FLY_MASK_CALL BrushArbiterProjectCurrent
+        moves   R0, R0
+        bne     FlyBrushMaskProjected
+        nop
+FlyBrushMaskNextLink:
+        lm      R0, (FLY_MASK_LINK)
+        moves   R0, R0
+        bpl     FlyBrushMaskNextBrush
+        nop
+        dec     R0
+        sm      (FLY_MASK_LINK), R0
+        GSU_ABSOLUTE_GOTO .loword(FlyWorldMaskLink)
+FlyBrushMaskNextBrush:
+        inc     R0
+        sm      (FLY_MASK_LINK), R0
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskLink)
+
+FlyBrushMaskProjected:
+        FLY_MASK_CALL FlyBrushMaskRasterize
+        moves   R0, R0
+        beq     FlyBrushMaskRasterNext
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskFinish)
+FlyBrushMaskRasterNext:
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskNextLink)
+
+; A polygon's scanlines and depth samples stay in the deferred RAM overlay.
+.pushseg
+.segment "GSU_ALIAS_FLY_CODE"
+FlyBrushMaskRasterize:
+        sm      (FLY_VIS_RASTER_RETURN), R11
+        lm      R0, (CONVEX_RASTER_Y)
+        lm      R1, (FLY_MASK_FIRST_Y)
+        with    R0
+        cmp     R1
+        bcs     FlyBrushMaskFirstYReady
+        nop
+        move    R0, R1
+FlyBrushMaskFirstYReady:
+        sm      (FLY_MASK_Y), R0
+        lm      R0, (CONVEX_TOP_PTR)
+        lm      R1, (FLY_MASK_RECT_LAST_Y)
+        with    R0
+        cmp     R1
+        bcc     FlyBrushMaskLastYReady
+        nop
+        move    R0, R1
+FlyBrushMaskLastYReady:
+        sm      (FLY_MASK_LAST_Y), R0
+        lm      R1, (FLY_MASK_Y)
+        with    R0
+        sub     R1
+        bpl     FlyBrushMaskRowsPresent
+        nop
+        GSU_ABSOLUTE_GOTO FlyBrushMaskNextPolygon
+FlyBrushMaskRowsPresent:
+        move    R0, #0
+        sm      (BRUSH_ARB_METADATA_COUNT), R0
+        sm      (BRUSH_ARB_GROUP_MAX_Y), R0
+        move    R0, #BSP_VIEW_HEIGHT
+        sm      (BRUSH_ARB_GROUP_MIN_Y), R0
+        iwt     R0, #FLY_MASK_SCREEN
+        sm      (BRUSH_ARB_SCREEN_CURSOR), R0
+        jal     BrushArbiterStoreCurrent
+        nop
+
+FlyBrushMaskRow:
+        lm      R0, (FLY_MASK_Y)
+        sm      (BRUSH_ARB_ROW), R0
+        BSP_SCALE_LOGICAL_TO_Q7 R0
+        iwt     R1, #64
+        with    R0
+        add     R1
+        sm      (CONVEX_SAMPLE_Y), R0
+        iwt     R0, #GSU_BRUSH_ARBITER_METADATA_OFFSET
+        sm      (BRUSH_ARB_CANDIDATE_CURSOR), R0
+        jal     BrushArbiterPrepareCandidateSpan
+        nop
+        moves   R0, R0
+        bne     FlyBrushMaskSpanPresent
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskNextRow)
+FlyBrushMaskSpanPresent:
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (FLY_MASK_RECT_FIRST_X)
+        with    R0
+        cmp     R1
+        bcs     FlyBrushMaskFirstXReady
+        nop
+        move    R0, R1
+FlyBrushMaskFirstXReady:
+        sm      (FLY_MASK_X), R0
+        lm      R0, (TEXTURE_SPAN_END_X)
+        lm      R1, (FLY_MASK_RECT_LAST_X)
+        with    R0
+        cmp     R1
+        bcc     FlyBrushMaskLastXReady
+        nop
+        move    R0, R1
+FlyBrushMaskLastXReady:
+        sm      (FLY_MASK_LAST_X), R0
+        lm      R1, (FLY_MASK_X)
+        with    R0
+        sub     R1
+        bpl     FlyBrushMaskSpanReady
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskNextRow)
+FlyBrushMaskSpanReady:
+        lm      R0, (TEXTURE_LEFT_SHADE)
+        sm      (TEXTURE_BASE_DEPTH), R0
+        lm      R1, (TEXTURE_RIGHT_SHADE)
+        with    R1
+        sub     R0
+        sm      (TEXTURE_DELTA_DEPTH), R1
+        lm      R2, (CONVEX_MAX_X)
+        lm      R1, (CONVEX_MIN_X)
+        with    R2
+        sub     R1
+        sm      (BRUSH_ARBITER_SCREEN_DEN), R2
+        moves   R2, R2
+        beq     FlyBrushMaskPixel
+        nop
+        jal     TexturePrepareDivideQ12
+        nop
+FlyBrushMaskPixel:
+        lm      R0, (FLY_MASK_X)
+        BSP_SCALE_LOGICAL_TO_Q7 R0
+        iwt     R1, #64
+        with    R0
+        add     R1
+        lm      R1, (CONVEX_MIN_X)
+        with    R0
+        sub     R1
+        bpl     FlyBrushMaskNumeratorPositive
+        nop
+        move    R0, #0
+FlyBrushMaskNumeratorPositive:
+        jal     FlyBrushMaskDepth
+        nop
+        lm      R0, (FLY_MASK_DEPTH)
+        with    R0
+        sub     R5
+        bmi     FlyBrushMaskNextPixel
+        nop
+        lm      R0, (FLY_MASK_Y)
+        lm      R2, (FLY_MASK_X)
+        FLY_MASK_BIT
+        move    R0, #0
+        moveb   R0, (R10)
+        move    R3, R0
+        with    R3
+        and     R1
+        bne     FlyBrushMaskNextPixel
+        nop
+        with    R0
+        or      R1
+        moveb   (R10), R0
+        lm      R0, (FLY_MASK_CEILING)
+        with    R0
+        cmp     R5
+        bcs     FlyBrushMaskCeilingReady
+        nop
+        sm      (FLY_MASK_CEILING), R5
+FlyBrushMaskCeilingReady:
+        lm      R0, (FLY_MASK_REMAINING)
+        dec     R0
+        sm      (FLY_MASK_REMAINING), R0
+        bne     FlyBrushMaskNextPixel
+        nop
+        GSU_ABSOLUTE_GOTO FlyBrushMaskRasterCovered
+FlyBrushMaskNextPixel:
+        lm      R0, (FLY_MASK_X)
+        lm      R1, (FLY_MASK_LAST_X)
+        with    R0
+        cmp     R1
+        beq     FlyBrushMaskNextRow
+        nop
+        inc     R0
+        sm      (FLY_MASK_X), R0
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskPixel)
+FlyBrushMaskNextRow:
+        lm      R0, (FLY_MASK_Y)
+        lm      R1, (FLY_MASK_LAST_Y)
+        with    R0
+        cmp     R1
+        beq     FlyBrushMaskNextPolygon
+        nop
+        inc     R0
+        sm      (FLY_MASK_Y), R0
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskRow)
+FlyBrushMaskNextPolygon:
+        move    R0, #0
+FlyBrushMaskRasterReturn:
+        lm      R11, (FLY_VIS_RASTER_RETURN)
+        ret
+        nop
+FlyBrushMaskRasterCovered:
+        move    R0, #1
+        bra     FlyBrushMaskRasterReturn
+        nop
+
+.popseg
+
+FlyWorldMaskStart:
+        lm      R0, (GSU_TELEMETRY_PACKET_FACE_COUNT)
+        iwt     R1, #$8000
+        with    R0
+        or      R1
+        dec     R0
+        sm      (FLY_MASK_LINK), R0
+FlyWorldMaskLink:
+        lm      R0, (FLY_MASK_LINK)
+        iwt     R1, #$7FFF
+        with    R0
+        cmp     R1
+        bne     FlyWorldMaskPresent
+        nop
+        lm      R0, (BRUSH_OVERLAY_FLAGS)
+        with    R0
+        and     #BSP_OVERLAY_DYNAMIC_BRUSHES
+        bne     FlyWorldMaskBrushes
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskFinish)
+FlyWorldMaskBrushes:
+        move    R0, #0
+        sm      (FLY_MASK_LINK), R0
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskLink)
+FlyWorldMaskPresent:
+        FLY_MASK_CALL FlyWorldMaskCheckBounds
+        moves   R0, R0
+        bne     FlyWorldMaskBoundsOverlap
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskNextLink)
+FlyWorldMaskBoundsOverlap:
+        FLY_MASK_CALL FlyWorldBuildDepthView
+        FLY_MASK_CALL BrushArbiterProjectCurrent
+        FLY_MASK_CALL FlyWorldMaskStoreBounds
+        moves   R0, R0
+        bne     FlyWorldMaskProjected
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskNextLink)
+FlyWorldMaskProjected:
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushMaskProjected)
+
+FlyBrushMaskFinish:
+        FLY_MASK_COPY FLY_MASK_BACKUP, 0, $100
+        FLY_MASK_COPY FLY_MASK_BACKUP+$200, BRUSH_STATE, $80
+FlyBrushMaskRead:
+        lm      R0, (ALIAS_DEST_Y)
+        lm      R2, (FLY_VIS_SAVED_R12)
+        FLY_MASK_BIT
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        and     R1
+        beq     FlyBrushMaskVisible
+        nop
+        move    R0, #0
+        bra     FlyBrushMaskReturn
+        nop
+FlyBrushMaskVisible:
+        move    R0, #1
+FlyBrushMaskReturn:
+        move    R9, #$70
+        iwt     R8, #FlyAliasBrushMaskDone
+        from    R8
+        ljmp    R9
+        nop

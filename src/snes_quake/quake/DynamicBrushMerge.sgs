@@ -103,6 +103,70 @@ ALIAS_STATE                    = BRUSH_SLOT_TABLE + BRUSH_SLOT_COUNT * BRUSH_SLO
 ; Keep command feature bits in persistent alias state so every projection and
 ; near-clip phase leaves the later mixed-token dispatch unchanged.
 BRUSH_OVERLAY_FLAGS            = ALIAS_STATE + $72
+; Fly aliases follow the complete opaque pass. Its projection cache holds a
+; one-bit coverage mask for the current alias; one polygon uses the remainder.
+FLY_MASK_TOKEN                = ALIAS_STATE + $74
+FLY_MASK_ROM_RETURN           = ALIAS_STATE + $76
+FLY_MASK_LINK                 = ALIAS_STATE + $78
+FLY_MASK_Y                    = ALIAS_STATE + $7A
+FLY_MASK_LAST_Y               = ALIAS_STATE + $7C
+FLY_MASK_X                    = ALIAS_STATE + $7E
+FLY_MASK_LAST_X               = ALIAS_STATE + $80
+FLY_MASK_DEPTH                = ALIAS_STATE + $82
+FLY_MASK_FIRST_Y              = ALIAS_STATE + $84
+FLY_MASK_DEPTH_RETURN         = ALIAS_STATE + $86
+FLY_MASK_BITS                 = GSU_PROJECTION_CACHE_OFFSET
+FLY_MASK_BYTES                = BSP_LOGICAL_WIDTH * BSP_LOGICAL_HEIGHT / 8
+FLY_MASK_SCREEN               = FLY_MASK_BITS + FLY_MASK_BYTES
+FLY_MASK_BACKUP               = GSU_LIGHTMAP_ROW_STAGE_OFFSET
+; Alias ordering has retired before any billboard sample asks for visibility.
+FLY_MASK_REMAINING            = ALIAS_STATE + $6E
+FLY_MASK_CEILING              = ALIAS_STATE + $70
+; Per-frame bounds only: four clamped screen bytes and a conservative minimum
+; Q6 depth. Exact per-pixel coverage still comes from the shared rasterizer.
+FLY_MASK_BOUNDS               = FLY_MASK_SCREEN + CONVEX_VERTEX_CAPACITY * TEXTURE_SHADE_SCREEN_RECORD_BYTES
+FLY_MASK_BOUNDS_BYTES         = GSU_PACKET_FACE_CAPACITY * 6
+FLY_MASK_RECT_FIRST_X         = FLY_MASK_BOUNDS + FLY_MASK_BOUNDS_BYTES
+FLY_MASK_RECT_LAST_X          = FLY_MASK_RECT_FIRST_X + 2
+FLY_MASK_RECT_LAST_Y          = FLY_MASK_RECT_LAST_X + 2
+.assert FLY_MASK_RECT_LAST_Y + 2 <= GSU_PROJECTION_CACHE_GUARD_OFFSET, error, "Fly world bounds exceed retired projection cache"
+.assert BSP_LOGICAL_WIDTH = 128, error, "Fly mask bit addressing requires 16-byte rows"
+.assert FLY_MASK_SCREEN + CONVEX_VERTEX_CAPACITY * TEXTURE_SHADE_SCREEN_RECORD_BYTES <= GSU_PROJECTION_CACHE_GUARD_OFFSET, error, "Fly mask and polygon escape the retired projection cache"
+.assert FLY_MASK_BACKUP + $300 <= GSU_LIGHTMAP_ROW_STAGE_OFFSET + GSU_LIGHTMAP_ROW_STAGE_BYTES, error, "Fly mask backup escapes retired row staging"
+.assert GSU_RENDER_STATE_OFFSET + GSU_RENDER_STATE_BYTES <= $200, error, "Fly mask backup omits live renderer state"
+.assert FLY_MASK_DEPTH_RETURN + 2 <= BRUSH_ARB_POOL_BASE, error, "Fly mask state overlaps the opaque lightmap pool"
+
+; Return mask address in R10 and bit in R1, for logical R2=x and R0=y.
+.macro FLY_MASK_BIT
+  .repeat 4
+        with    R0
+        add     R0
+  .endrepeat
+        move    R3, R2
+        with    R3
+        and     #7
+  .repeat 3
+        with    R2
+        lsr
+  .endrepeat
+        with    R0
+        add     R2
+        iwt     R10, #FLY_MASK_BITS
+        with    R10
+        add     R0
+        move    R1, #1
+        moves   R3, R3
+        beq     :++
+        nop
+:
+        with    R1
+        add     R1
+        dec     R3
+        bne     :-
+        nop
+:
+.endmacro
+
 ALIAS_BUILD_RETURN             = ALIAS_STATE + $00
 ALIAS_FIND_RETURN              = ALIAS_STATE + $02
 ALIAS_APPEND_RETURN            = ALIAS_STATE + $04
@@ -282,8 +346,11 @@ BrushTransformPresent:
         lm      R1, (BRUSH_FIRST_TRANSFORM)
         with    R1
         add     R0
-        with    R1
+        from    R1
         add     R1
+        to      R1
+        add     R1                       ; Three-byte slot/u16 variant.
+        nop                             ; Keep downstream T4 windows fixed.
         iwt     R4, #BSP_BRUSH_VTRANS_ADDRESS
         with    R4
         add     R1
@@ -292,24 +359,20 @@ BrushTransformPresent:
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_BYTE R0
         sm      (BRUSH_CURRENT_SLOT), R0
-        BSP_ROM_LOAD_BYTE R0
+        BSP_ROM_LOAD_WORD R0
         sm      (BRUSH_CURRENT_LOCAL_VARIANT), R0
 
-        ; QBSE v2 entity descriptors begin after the 32-byte header:
-        ; entity u16, inline model/count bytes, then firstVariant u16.
+        ; QBSE v3 eight-byte descriptors follow the 32-byte header:
+        ; entity u16, model/pad bytes, variant count/firstVariant u16.
         lm      R0, (BRUSH_CURRENT_SLOT)
         move    R1, R0
         with    R1
         add     R1                       ; 2s
-        move    R2, R1
         with    R1
         add     R1                       ; 4s
         with    R1
-        add     R2                       ; 6s
-        iwt     R0, #32
-        with    R1
-        add     R0
-        iwt     R4, #BSP_BRUSH_REPLAY_ADDRESS
+        add     R1                       ; 8s
+        iwt     R4, #BSP_BRUSH_REPLAY_ADDRESS+32
         with    R4
         add     R1
         move    R0, #BSP_BRUSH_REPLAY_BANK
@@ -319,7 +382,12 @@ BrushTransformPresent:
         sm      (BRUSH_CURRENT_ENTITY), R0
         BSP_ROM_LOAD_BYTE R0
         sm      (BRUSH_CURRENT_INLINE_MODEL), R0
-        BSP_ROM_LOAD_BYTE R0             ; Variant count.
+        ; Skip the alignment byte and offline-validated variant count.
+        ; Folding the header offset and skipping these unused reads also
+        ; preserves the downstream address-sensitive technique-4 windows.
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
         BSP_ROM_LOAD_WORD R1
         lm      R0, (BRUSH_CURRENT_LOCAL_VARIANT)
         with    R1
@@ -370,7 +438,9 @@ BrushTransformFeatureReady:
         BSP_ROM_LOAD_WORD R0
         sm      (BRUSH_CURRENT_GEOMETRY_VARIANT), R0
 
+BrushReplayGeometryCall:
         jal     BrushBuildGeometryLinks
+.assert * - BrushReplayGeometryCall = 5, error, "Fly PVS JAL operand contract changed"
         nop
         GSU_ABSOLUTE_GOTO BrushTransformAdvance
 
@@ -493,7 +563,9 @@ BrushBucketPresent:
         moves   R2, R2
         bne     BrushBucketAdvance        ; Static world owns solid leaves.
         nop
+BrushBucketPainterCall:
         jal     BrushMarkPainterAncestors
+.assert * - BrushBucketPainterCall = 5, error, "Fly PVS JAL operand contract changed"
         nop
 BrushFragmentLoop:
         lm      R0, (BRUSH_CURRENT_FRAGMENT_COUNT)
@@ -829,62 +901,7 @@ BrushBoundsMulCeilQ6:
         ret
         nop
 
-.segment "GSU_TURBULENCE_HOT_CODE"
-
-; Fly mode augments the frozen replay snapshot with 38 signon-only baselines.
-; VSTATIC supplies entity identity and the exact QBSF geometry variant; the
-; unified runtime slot namespace is replay slots followed by static records.
-BrushBuildStaticLinks:
-        sm      (BRUSH_STATIC_RETURN), R11
-        move    R0, #0
-        sm      (BRUSH_TRANSFORM_CURSOR), R0
-BrushStaticLoop:
-        lm      R0, (BRUSH_TRANSFORM_CURSOR)
-        iwt     R1, #BSP_BRUSH_VSTATIC_COUNT
-        with    R0
-        cmp     R1
-        bne     BrushStaticPresent
-        nop
-        GSU_ABSOLUTE_GOTO BrushBuildStaticLinksDone
-BrushStaticPresent:
-        move    R1, R0
-        with    R1
-        add     R1
-        with    R1
-        add     R1
-        iwt     R4, #BSP_BRUSH_VSTATIC_ADDRESS
-        with    R4
-        add     R1
-        move    R0, #BSP_BRUSH_VSTATIC_BANK
-        romb
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_WORD R0
-        sm      (BRUSH_CURRENT_ENTITY), R0
-        BSP_ROM_LOAD_WORD R0
-        sm      (BRUSH_CURRENT_GEOMETRY_VARIANT), R0
-        lm      R0, (BRUSH_TRANSFORM_CURSOR)
-        iwt     R1, #BSP_BRUSH_ENTITY_SLOT_COUNT
-        with    R0
-        add     R1
-        sm      (BRUSH_CURRENT_SLOT), R0
-        jal     BrushBuildGeometryLinks
-        nop
-        lm      R0, (BRUSH_OVERFLOW)
-        moves   R0, R0
-        bne     BrushBuildStaticLinksDone
-        nop
-        lm      R0, (BRUSH_TRANSFORM_CURSOR)
-        inc     R0
-        sm      (BRUSH_TRANSFORM_CURSOR), R0
-        GSU_ABSOLUTE_GOTO BrushStaticLoop
-BrushBuildStaticLinksDone:
-.if BSP_EXTERNAL_BSP_FLY_STATIC_COUNT
-        jal     BrushBuildExternalStaticLinks
-        nop
-.endif
-        lm      R11, (BRUSH_STATIC_RETURN)
-        ret
-        nop
+; Cold static helpers live in DynamicBrushCachedSpan.sgs.
 
 .segment "GSU_BRUSH_CODE"
 
@@ -908,7 +925,9 @@ BrushExternalStaticLoop:
         moves   R0, R0
         beq     BrushBuildExternalStaticDone
         nop
+BrushExternalGeometryCall:
         jal     BrushBuildGeometryLinks
+.assert * - BrushExternalGeometryCall = 5, error, "Fly PVS JAL operand contract changed"
         nop
         lm      R0, (BRUSH_OVERFLOW)
         moves   R0, R0
@@ -1039,190 +1058,20 @@ AliasBuildGroupMarked:
 AliasBuildRowDone:
         GSU_ABSOLUTE_GOTO AliasBuildVisibilityRow
 
-; Stage QAV2 descriptors for the exact source pose. The generated directory is
-; source-row indexed, so the GSU pays no rate conversion. Repeated exact rows
-; resolve through a compact payload dictionary. Fully visible tokens retain
-; $ffff; hidden tokens use $fffe; partial entries point into the compact mask
-; arena immediately after the token descriptors.
-.segment "GSU_TEXTURE_TAIL_CODE"
-
-AliasBuildVisibilityRow:
-        move    R9, #$02
-        iwt     R8, #.loword(AliasBuildVisibilityRowROM)
-        from    R8
-        ljmp    R9
-        nop
-
-.segment "GSU_SKY_ROM_CODE"
-
-AliasBuildVisibilityRowROM:
-        ; Only live row ordinals can be referenced below. Avoid clearing the
-        ; full corpus maximum on the common one-to-few-entity frame.
-        lm      R12, (ALIAS_TOKEN_COUNT)
-        moves   R12, R12
-        beq     AliasVisibilityPointersReady
-        nop
-        iwt     R10, #GSU_ALIAS_VISIBILITY_POINTERS_OFFSET
-        iwt     R0, #$FFFF
-        iwt     R13, #AliasVisibilityClearPointers
-AliasVisibilityClearPointers:
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        loop
-        nop
-
-AliasVisibilityPointersReady:
-        lm      R0, (ALIAS_VISIBILITY_SOURCE_ROW)
-        iwt     R1, #BSP_ALIAS_VISIBILITY_SOURCE_ROW_COUNT
-        with    R0
-        cmp     R1
-        bcc     AliasVisibilityRowPresent
-        nop
-        GSU_ABSOLUTE_GOTO AliasVisibilityMarkFlyPointers
-AliasVisibilityRowPresent:
-        lm      R0, (BRUSH_OVERLAY_FLAGS)
-        with    R0
-        and     #BSP_OVERLAY_DYNAMIC_BRUSHES
-        beq     AliasVisibilityDisabledBase
-        nop
-        iwt     R1, #BSP_ALIAS_VISIBILITY_ENABLED_ADDRESS
-        bra     AliasVisibilityBaseReady
-        nop
-AliasVisibilityDisabledBase:
-        iwt     R1, #BSP_ALIAS_VISIBILITY_DISABLED_ADDRESS
-AliasVisibilityBaseReady:
-        sm      (ALIAS_VISIBILITY_BASE_ADDRESS), R1
-        lm      R0, (ALIAS_VISIBILITY_SOURCE_ROW)
-        with    R0
-        add     R0
-        iwt     R4, #BSP_ALIAS_VISIBILITY_DIRECTORY_OFFSET
-        with    R4
-        add     R0
-        with    R4
-        add     R1
-        move    R0, #BSP_ALIAS_VISIBILITY_ENABLED_BANK
-        romb
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_WORD R0            ; Dictionary ID and record count.
-        move    R1, R0
-        with    R1
-        and     #BSP_ALIAS_VISIBILITY_ROW_RECORD_MASK
-        sm      (ALIAS_VISIBILITY_RECORD_COUNT), R1
-        moves   R1, R1
-        bne     AliasVisibilityPayloadPresent
-        nop
-        GSU_ABSOLUTE_GOTO AliasBuildVisibilityDone
-AliasVisibilityPayloadPresent:
-        move    R4, R0
-  .repeat BSP_ALIAS_VISIBILITY_ROW_RECORD_BITS
-        with    R4
-        lsr
-  .endrepeat
-        dec     R4                      ; One-based dictionary ID.
-        with    R4
-        add     R4
-        iwt     R0, #BSP_ALIAS_VISIBILITY_DICTIONARY_OFFSET
-        with    R4
-        add     R0
-        lm      R0, (ALIAS_VISIBILITY_BASE_ADDRESS)
-        with    R4
-        add     R0
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_WORD R4            ; Absolute halfbank payload offset.
-        lm      R0, (ALIAS_VISIBILITY_BASE_ADDRESS)
-        with    R4
-        add     R0
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        move    R0, #0
-        sm      (ALIAS_VISIBILITY_RECORD_CURSOR), R0
-        iwt     R0, #GSU_ALIAS_VISIBILITY_MASKS_OFFSET
-        sm      (ALIAS_VISIBILITY_MASK_CURSOR), R0
-AliasVisibilityRecordLoop:
-        lm      R0, (ALIAS_VISIBILITY_RECORD_CURSOR)
-        lm      R1, (ALIAS_VISIBILITY_RECORD_COUNT)
-        with    R0
-        cmp     R1
-        beq     AliasBuildVisibilityDone
-        nop
-        BSP_ROM_LOAD_BYTE R0
-        move    R6, R0                   ; QBA1 token ordinal.
-        BSP_ROM_LOAD_BYTE R7             ; QAV2 record kind.
-        BSP_ROM_LOAD_WORD R8             ; Candidate texel count.
-        move    R0, R6
-        with    R0
-        add     R0
-        iwt     R10, #GSU_ALIAS_VISIBILITY_POINTERS_OFFSET
-        with    R10
-        add     R0
-        move    R0, #BSP_ALIAS_VISIBILITY_HIDDEN
-        with    R7
-        cmp     R0
-        bne     AliasVisibilityPartialRecord
-        nop
-        iwt     R0, #$FFFE
-        movew   (R10), R0
-        bra     AliasVisibilityRecordAdvance
-        nop
-AliasVisibilityPartialRecord:
-        lm      R0, (ALIAS_VISIBILITY_MASK_CURSOR)
-        movew   (R10), R0
-        move    R9, R0
-        move    R0, R8
-        with    R0
-        add     #7
-  .repeat 3
-        with    R0
-        lsr
-  .endrepeat
-        move    R12, R0
-        iwt     R13, #AliasVisibilityMaskCopy
-AliasVisibilityMaskCopy:
-        BSP_ROM_LOAD_BYTE R0
-        move    R10, R9
-        moveb   (R10), R0
-        inc     R9
-        loop
-        nop
-        sm      (ALIAS_VISIBILITY_MASK_CURSOR), R9
-AliasVisibilityRecordAdvance:
-        lm      R0, (ALIAS_VISIBILITY_RECORD_CURSOR)
-        inc     R0
-        sm      (ALIAS_VISIBILITY_RECORD_CURSOR), R0
-        GSU_ABSOLUTE_GOTO AliasVisibilityRecordLoop
-AliasBuildVisibilityDone:
-        lm      R8, (ALIAS_BUILD_RETURN)
-        move    R9, #$70
-        from    R8
-        ljmp    R9
-        nop
-
-AliasVisibilityMarkFlyPointers:
-        ; Fly rows have no QAV2 payload. Mark each live token with a signed
-        ; sentinel so the billboard setup can select live BSP tracing without
-        ; adding work to fully visible or hidden ordered tokens.
-        lm      R12, (ALIAS_TOKEN_COUNT)
-        moves   R12, R12
-        beq     AliasBuildVisibilityDone
-        nop
-        iwt     R10, #GSU_ALIAS_VISIBILITY_POINTERS_OFFSET
-        iwt     R0, #$8000
-        iwt     R13, #AliasVisibilityMarkFlyPointerLoop
-AliasVisibilityMarkFlyPointerLoop:
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        loop
-        nop
-        GSU_ABSOLUTE_GOTO AliasBuildVisibilityDone
+.include "quake/AliasVisibilityArchive.sgs"
 
 ; Locate the current traversal leaf in the generated bounded compact table.
 ; Keep the leaf, remaining count and record pointer in registers: this lookup
-; runs once per visited leaf, including leaves without an alias group. Cache
-; the whole scan so its RAM instruction fetches do not compete with records.
+; runs once per visited leaf, including leaves without an alias group. Empty
+; scans keep the painter traversal's cache. A longer scan caches its loop only
+; after the first nonmatch, so the common empty/first-match returns do not evict
+; that window. Both CACHE changes replace NOP bytes, retaining the overlay ABI.
 ; Return the alias count in R0 and retain first/count for the append pass.
 .segment "GSU_TEXTURE_TAIL_CODE"
-GSU_CACHE_KERNEL_BEGIN AliasFindCurrentLeaf
+        .align  GSU_CACHE_LINE_BYTES
+AliasFindCurrentLeaf:
+        .assert .loword(AliasFindCurrentLeaf) = $3810, lderror, "Alias leaf entry moved"
+        nop
         sm      (ALIAS_FIND_RETURN), R11
         move    R0, #0
         sm      (ALIAS_CURRENT_COUNT), R0
@@ -1230,6 +1079,7 @@ GSU_CACHE_KERNEL_BEGIN AliasFindCurrentLeaf
         lm      R4, (BRUSH_CURRENT_LEAF)
         iwt     R10, #GSU_ALIAS_GROUPS_OFFSET
 AliasFindLeafLoop:
+        .assert .loword(AliasFindLeafLoop) = $3826, lderror, "Alias delayed-cache target moved"
         moves   R2, R2
         beq     AliasFindLeafDone
         nop
@@ -1242,7 +1092,7 @@ AliasFindLeafLoop:
         add     #6
         dec     R2
         bra     AliasFindLeafLoop
-        nop
+        cache                           ; Target R15 selects CBR $3820.
 AliasFindLeafMatch:
         inc     R10
         inc     R10
@@ -1257,7 +1107,9 @@ AliasFindLeafDone:
         lm      R11, (ALIAS_FIND_RETURN)
         ret
         nop
-GSU_CACHE_KERNEL_END AliasFindCurrentLeaf
+AliasFindCurrentLeafEnd:
+        .assert .loword(AliasFindCurrentLeafEnd) = $3853, lderror, "Alias leaf helper footprint changed"
+        .assert AliasFindCurrentLeafEnd - (AliasFindLeafLoop & $FFFFF0) <= GSU_CACHE_BYTES, lderror, "Alias loop escapes its delayed cache window"
 
 .segment "GSU_BRUSH_CODE"
 
@@ -1312,6 +1164,7 @@ BrushAppendActiveLinkDone:
         nop
 
 BrushMergePainterTokens:
+        .assert .loword(BrushMergePainterTokens) = $9183, lderror, "Painter traversal cache target moved"
         sm      (BRUSH_MERGE_RETURN), R11
         iwt     R10, #BRUSH_TRAVERSAL_STACK
         move    R0, #BSP_WORLD_ROOT_NODE
@@ -1541,7 +1394,12 @@ BrushMergePainterDone:
 ; the sort returns directly to BrushBuildMixedTokens.
 AliasMergeAndSortPainterTokens:
         sm      (ALIAS_RENDER_SORT_RETURN), R11
-        jal     BrushMergePainterTokens
+        ; JAL owns an implicit NOP delay. Spell out the same six-byte call and
+        ; continuation so CACHE occupies that delay, while LINK still returns
+        ; to the final NOP. No renderer or overlay address changes.
+        link    #4
+        GSU_ABSOLUTE_GOTO BrushMergePainterTokens, shared_delay
+        cache                           ; Target R15 selects CBR $9180.
         nop
         lm      R0, (BRUSH_OVERFLOW)
         moves   R0, R0

@@ -57,8 +57,12 @@ add_executable(quake_bsp_reference_renderer
     live_demo.cpp
     ordered_replay.cpp
     packed_brushes.cpp
+    particles.cpp
+    particle_tests.cpp
     report.cpp
     main.cpp
+    presentation_hdma.cpp
+    presentation_warp.cpp
     sky.cpp
     sky_tests.cpp
     tests_reports.cpp
@@ -161,7 +165,7 @@ if(NOT REFERENCE_RENDERER_PYTHON)
     )
 endif()
 set(REFERENCE_RENDERER_FORMATTER
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/commands/snes_quake/format_quake_bsp_reference.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/snes_tooling_cli.py"
 )
 if(REFERENCE_RENDERER_CLANG_FORMAT AND REFERENCE_RENDERER_PYTHON)
     add_custom_target(quake_bsp_reference_format
@@ -169,6 +173,7 @@ if(REFERENCE_RENDERER_CLANG_FORMAT AND REFERENCE_RENDERER_PYTHON)
             "${CMAKE_COMMAND}" -E time
             "${REFERENCE_RENDERER_PYTHON}"
             "${REFERENCE_RENDERER_FORMATTER}"
+            quake.format-quake-bsp-reference
             --clang-format "${REFERENCE_RENDERER_CLANG_FORMAT}"
             --style-file "${CMAKE_CURRENT_SOURCE_DIR}/.clang-format"
             -- ${REFERENCE_RENDERER_FORMAT_FILES}
@@ -185,6 +190,7 @@ if(REFERENCE_RENDERER_CLANG_FORMAT AND REFERENCE_RENDERER_PYTHON)
             "${CMAKE_COMMAND}" -E time
             "${REFERENCE_RENDERER_PYTHON}"
             "${REFERENCE_RENDERER_FORMATTER}"
+            quake.format-quake-bsp-reference
             --clang-format "${REFERENCE_RENDERER_CLANG_FORMAT}"
             --style-file "${CMAKE_CURRENT_SOURCE_DIR}/.clang-format"
             --check -- ${REFERENCE_RENDERER_FORMAT_FILES}

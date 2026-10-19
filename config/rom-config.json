@@ -1,5 +1,8 @@
 {
   "schema": "quake-snes-rom-build-v1",
+  "warp": {
+    "sourceFocal": 52
+  },
   "bspBuild": {
     "source": "ericw-map",
     "mapEntry": "maps/e1m3.bsp",
@@ -60,11 +63,11 @@
     "path": "demo1.dem"
   },
   "playback": {
-    "sampleRateHz": 20
+    "sampleRateHz": 30
   },
   "aliasSprites": {
-    "halfbankCount": 17,
-    "mdlWorldUnitsPerTexel": 1.7
+    "halfbankCount": 18,
+    "mdlWorldUnitsPerTexel": 1.74
   },
   "externalBsp": {
     "enabled": true,

@@ -133,15 +133,23 @@ inline constexpr int kUntexturedRampColors = 64;
 inline constexpr std::uint8_t kUntexturedBrightIndex = kUntexturedRampColors - 1;
 inline constexpr std::uint8_t kUntexturedDiagnosticIndex = 239;
 inline constexpr std::uint8_t kUntexturedQuakeTailFirstIndex = 240;
-inline constexpr std::array<int, 32> kSinTable = {
-    0, 12,  24,  36,  45,  53,  59,  63,  64,  63,  59,  53,  45,  36,  24,  12,
-    0, -12, -24, -36, -45, -53, -59, -63, -64, -63, -59, -53, -45, -36, -24, -12,
-};
+inline const std::array<int, 256> kSinTable = [] {
+    std::array<int, 256> values{};
+    for (std::size_t i = 0; i < values.size(); ++i)
+    {
+        values[i] = static_cast<int>(std::lround(std::sin(static_cast<double>(i) * std::acos(-1.0) / 128.0) * 64.0));
+    }
+    return values;
+}();
 
-inline constexpr std::array<int, 32> kCosTable = {
-    64,  63,  59,  53,  45,  36,  24,  12,  0, -12, -24, -36, -45, -53, -59, -63,
-    -64, -63, -59, -53, -45, -36, -24, -12, 0, 12,  24,  36,  45,  53,  59,  63,
-};
+inline const std::array<int, 256> kCosTable = [] {
+    std::array<int, 256> values{};
+    for (std::size_t i = 0; i < values.size(); ++i)
+    {
+        values[i] = kSinTable[(i + 64) & 255];
+    }
+    return values;
+}();
 
 struct Rgb
 {

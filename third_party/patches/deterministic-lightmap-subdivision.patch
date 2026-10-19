@@ -26,13 +26,19 @@ diff --git a/common/threads.cc b/common/threads.cc
 diff --git a/light/trace_embree.cc b/light/trace_embree.cc
 --- a/light/trace_embree.cc
 +++ b/light/trace_embree.cc
-@@ -660,3 +660,7 @@
+@@ -660,3 +660,13 @@
 -    device = rtcNewDevice(NULL);
-+    // Pin the qualified ISA so Windows and Linux produce identical lightmaps.
-+    device = rtcNewDevice("isa=avx2");
-+    if (device == nullptr) {
-+        Error("AVX2 is unavailable; use the qualified-assets build fallback");
++    // Select an explicit reproducible path; SSE2 is the x64 release baseline.
++    const char *requestedIsa = std::getenv("SNES_QUAKE_EMBREE_ISA");
++    const std::string isa = requestedIsa ? requestedIsa : "sse2";
++    if (isa != "sse2" && isa != "avx2") {
++        Error("SNES_QUAKE_EMBREE_ISA must be sse2 or avx2");
 +    }
++    device = rtcNewDevice(("isa=" + isa).c_str());
++    if (device == nullptr) {
++        Error("requested Embree ISA is unavailable");
++    }
++    logging::print("SNES Quake Embree ISA: {}\n", isa);
      rtcSetDeviceErrorFunction(
          device, ErrorCallback, nullptr); // mxd. Changed from rtcDeviceSetErrorFunction to silence compiler warning...
 diff --git a/include/qbsp/faces.hh b/include/qbsp/faces.hh

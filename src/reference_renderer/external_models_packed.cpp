@@ -79,9 +79,9 @@ void compose_packed_external_bsp_models(
             }
         }
         const auto model_key = static_cast<std::uint16_t>(kExternalBspModelOwnershipBase + entity.model_slot);
-        for (int y = 0; y < kLogicalHeight; ++y)
+        for (int y = 0; y < render_height(); ++y)
         {
-            for (int x = 0; x < kLogicalWidth; ++x)
+            for (int x = 0; x < render_width(); ++x)
             {
                 const auto ray = external_bsp_local_ray(basis, entity.origin, view_ray(view, x, y));
                 const auto hit = model.bvh->nearest(ray, visible_faces);

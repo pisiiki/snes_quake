@@ -1,0 +1,164 @@
+; Fly alias brush masks consume coverage and Q6 depth only. Reuse the exact
+; QBSF stream, Q2 decode, camera transform and outcode rules of
+; BrushBuildFragmentView, omitting material/UV work. Zero S/T preserves the
+; shared ten-byte clipping/projected-record ABI; neither coordinate feeds the
+; mask depth test. Ordinary brush rendering keeps its existing textured entry.
+; R13 retains the ROM bank and R9 the cursor across the shared RAM helpers.
+.segment "GSU_TEXTURE_TAIL_CODE"
+
+FlyBrushBuildDepthView:
+        sm      (BRUSH_VERTEX_RETURN), R11
+        ; Resolve the first occurrence's bank/address once. Subsequent records
+        ; advance R14 sequentially until its exact zero wrap selects a new bank.
+        lm      R3, (BRUSH_FRAGMENT_FIRST_VERTEX_LO)
+        move    R1, R3
+  .repeat 13
+        with    R1
+        lsr
+  .endrepeat
+        lm      R0, (BRUSH_FRAGMENT_FIRST_VERTEX_HI)
+        with    R0
+        and     #1
+  .repeat 3
+        with    R0
+        add     R0
+  .endrepeat
+        with    R1
+        add     R0
+        iwt     R2, #BSP_BRUSH_FRAGMENT_VERTICES_FIRST_BANK
+        with    R1
+        add     R2
+        move    R13, R1
+        move    R0, R13
+        romb
+
+        iwt     R5, #$1FFF
+        with    R3
+        and     R5
+        with    R3
+        add     R3
+        with    R3
+        add     R3
+        iwt     R4, #$8000
+        with    R4
+        add     R3
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+
+        iwt     R9, #TEXTURE_VIEW_A
+        move    R0, #0
+        sm      (TEXTURE_CLIP_OUTCODE), R0
+        move    R0, #15
+        sm      (TEXTURE_CLIP_AND_OUTCODE), R0
+        lm      R0, (BRUSH_FRAGMENT_VERTEX_COUNT)
+        sm      (CONVEX_OUTPUT_COUNT), R0
+        sm      (CONVEX_EDGE_COUNT), R0
+FlyBrushDepthVertexLoop:
+        BSP_ROM_LOAD_WORD R4
+        BSP_ROM_LOAD_WORD R7
+        ; BSP_ROM_LOAD_WORD ends with INC R14, leaving Z set only at $0000.
+        move    R1, R4
+        bne     FlyBrushDepthVertexAddressReady
+        nop
+        inc     R13
+        move    R0, R13
+        romb
+        iwt     R0, #$8000
+        GSU_SET_ROM_BUFFER_ADDRESS R0
+FlyBrushDepthVertexAddressReady:
+        ; Decode signed-byte bases plus two residual bits per axis exactly once.
+        with    R1
+        sex
+        move    R2, R4
+        with    R2
+        hib
+        with    R2
+        sex
+        move    R3, R7
+        with    R3
+        sex
+        with    R7
+        hib
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        move    R0, R7
+        with    R0
+        and     #3
+        with    R1
+        add     R0
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        move    R0, R7
+  .repeat 2
+        with    R0
+        lsr
+  .endrepeat
+        with    R0
+        and     #3
+        with    R2
+        add     R0
+        with    R3
+        add     R3
+        with    R3
+        add     R3
+        move    R0, R7
+  .repeat 4
+        with    R0
+        lsr
+  .endrepeat
+        with    R0
+        and     #3
+        with    R3
+        add     R0
+
+        jal     ClipTransformQ2Registers
+        nop
+        jal     ClassifyClipOutcode
+        nop
+        move    R2, R0
+        lm      R1, (TEXTURE_CLIP_OUTCODE)
+        with    R1
+        or      R2
+        sm      (TEXTURE_CLIP_OUTCODE), R1
+        lm      R1, (TEXTURE_CLIP_AND_OUTCODE)
+        with    R1
+        and     R2
+        sm      (TEXTURE_CLIP_AND_OUTCODE), R1
+
+        lm      R0, (CLIP_RIGHT)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        lm      R0, (CLIP_UP)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        lm      R0, (CLIP_DEPTH)
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        move    R0, #0                   ; Unused S/T remain deterministic.
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        beq     FlyBrushDepthVertexDone
+        nop
+        GSU_ABSOLUTE_GOTO FlyBrushDepthVertexLoop
+
+FlyBrushDepthVertexDone:
+        sm      (CONVEX_OUTPUT_CURSOR), R9
+        lm      R11, (BRUSH_VERTEX_RETURN)
+        ret
+        nop
+
+.assert * - AliasInitializeAxis <= GSU_TEXTURE_TAIL_CODE_CAPACITY, error, "Fly brush depth view exceeds the texture-tail overlay"

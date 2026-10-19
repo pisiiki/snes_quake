@@ -1,29 +1,80 @@
+; Exact perspective denominator lookup shared by the ordinary and T4 edge
+; overlays. R8/R9 retain numerator/denominator and R11 is the factor return.
+; T4 row writes share this slot; generic rows and right-edge completion use
+; the hidden code tail so this repeated lookup and quotient stay resident.
+.macro DEFINE_TEXTURE_EDGE_PERSPECTIVE_LOOKUP entry
+entry:
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES+1
+        with    R2
+        cmp     R4
+        bcs     TextureEdgePerspectiveMirrorMiss
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_OFFSET-GSU_DIVIDE_Q12_RECIPROCAL_ENTRY_BYTES
+        with    R4
+        add     R2
+        move    R0, #0
+        ramb
+        movew   R6, (R4)
+        inc     R4
+        inc     R4
+        movew   R13, (R4)
+        inc     R0                      ; RAM loads left the zero bank value live
+        ramb
+        GSU_ABSOLUTE_GOTO TextureDivideQ12EdgeLoadedCached
+.endmacro
+
 ; Exact signed Q12 products for a factor already scaled by eight in R6.
 ; Because the caller handles factor 4096 as unity, R6 stays nonnegative.
-; Doubling LMULT's high word and shifting bit 15 out of its low word forms
+; MOVE and arithmetic instructions restore the default R0 source/destination;
+; omit WITH R0 only after that reset, preserving carry and branch-delay prefixes.
+; Doubling the multiply's high word with low bit 15 from carry forms
 ; floor(source*factor/4096). The truncating form corrects a negative result
 ; toward zero whenever the remaining low 15 product bits are nonzero.
 .macro BSP_SIGNED_MUL_SCALED8_SHIFT12 source
-        move    R0, source
-        with    R0
-        lmult
-        with    R4
-        add     R4
-        with    R0
-        adc     R0
+        from    source
+        fmult
+        rol
 .endmacro
 
 .macro BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 source
         .local Done
-        BSP_SIGNED_MUL_SCALED8_SHIFT12 source
-        moves   source, source
+        from    source
+        lmult
+        ; LMULT exposes low-product bit 15 in carry, so ROL extracts the
+        ; Q15 quotient without touching the low word on the common path.
+        rol
+        ; ROL leaves the floor product's sign live. With factor < 4096 the
+        ; product cannot overflow; a nonnegative floor needs no correction.
         bpl     Done
         nop
-        move    R1, R4
-        with    R1
+        with    R4
+        add     R4
+        with    R4
         sub     #1
-        with    R0
         adc     #0
+Done:
+.endmacro
+
+; Exact toward-zero product for a proven interpolation factor in [0,4096].
+; Keep the unity endpoint separate so the scaled signed multiplier never
+; wraps negative. R0 receives the product; only R4/R6 are scratch registers.
+.macro BSP_SIGNED_MUL_UNIT_FACTOR_TRUNC12 source, factor
+        .local Scaled, Done
+        move    R6, factor
+  .repeat 3
+        with    R6
+        add     R6
+  .endrepeat
+        bpl     Scaled
+        nop
+        move    R0, source
+        bra     Done
+        nop
+Scaled:
+        BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 source
 Done:
 .endmacro
 
@@ -68,8 +119,8 @@ TextureRasterRowLoop:
         lm      R10, (CONVEX_FORWARD_PTR)
         lm      R12, (CONVEX_SCREEN_COUNT)
 TextureRasterForwardAdvance:
-        move    R9, R10
-        with    R9
+        to      R9
+        from    R10
         add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
         lm      R0, (CONVEX_SCREEN_END_PTR)
         with    R9
@@ -83,8 +134,8 @@ TextureRasterForwardNextReady:
         inc     R8
         movew   R1, (R8)
         lm      R0, (CONVEX_SAMPLE_Y)
-        move    R2, R1
-        with    R2
+        to      R2
+        from    R1
         sub     R0
         moves   R2, R2
         bmi     TextureRasterForwardStep
@@ -125,8 +176,8 @@ TextureRasterReverseAdvance:
         bra     TextureRasterReverseNextReady
         nop
 TextureRasterReverseNoWrap:
-        move    R9, R10
-        with    R9
+        to      R9
+        from    R10
         sub     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
 TextureRasterReverseNextReady:
         move    R8, R9
@@ -134,8 +185,8 @@ TextureRasterReverseNextReady:
         inc     R8
         movew   R1, (R8)
         lm      R0, (CONVEX_SAMPLE_Y)
-        move    R2, R1
-        with    R2
+        to      R2
+        from    R1
         sub     R0
         moves   R2, R2
         bpl     TextureRasterReverseNonNegative
@@ -162,8 +213,7 @@ TextureRasterReverseNonNegative:
 
         lm      R1, (CONVEX_MIN_X)
         lm      R0, (CONVEX_MAX_X)
-        move    R2, R0
-        with    R2
+        to      R2
         sub     R1
         bpl     TextureRasterXOrderReady
         nop
@@ -197,9 +247,8 @@ TextureRasterFirstReady:
         with    R3
         sub     R0
         BSP_ARITH_SHIFT7 R3, R4
-        move    R0, #127
-        move    R4, R0
-        with    R4
+        move    R0, #BSP_VIEW_WIDTH-1
+        to      R4
         sub     R3
         bpl     TextureRasterLastReady
         nop
@@ -238,8 +287,13 @@ TextureRasterDone:
         .local LightmapStageUnavailable, LightmapSpan, ReplayAvailable
         .local DirectLeftFallback, DirectRightFallback
         .local T4ReplayAvailable
+        .local ChunkWalkersSaved
 entry:
         sm      (TEXTURE_RASTER_RETURN), R11
+    .if (fixed_lightmap = 1) && (edge_register_outputs = 1)
+        move    R0, #0
+        sm      (T4_LIGHTMAP_CHUNK_ACTIVE), R0
+    .endif
         ; Technique 4 stages edge intersections, then replays compact rows
         ; through the unchanged lightmap span kernel.
     .if fixed_lightmap = 0
@@ -257,6 +311,9 @@ entry:
         sub     R1
         bpl     LightmapStageUnavailable
         nop
+    .if (fixed_lightmap = 1) && (edge_register_outputs = 1)
+T4LightmapStageBegin:
+    .endif
         jal     edge_cache
         nop
         iwt     R0, #GSU_LIGHTMAP_ROW_STAGE_OFFSET
@@ -275,15 +332,24 @@ entry:
         nop
 LightmapStageUnavailable:
     .if edge_register_outputs = 1
+      .if fixed_lightmap = 1
+        ; Only the height guard reaches this T4 path. Chunk the rejected face
+        ; without changing the per-row edge or projective endpoint equations.
+        GSU_ABSOLUTE_GOTO T4LightmapChunkBegin
+      .else
         iwt     R0, #$FFFF
         sm      (TEXTURE_COORD_PTR), R0
         iwt     R0, #T4TextureStageLightmapFallback
         sm      (TEXTURE_LIGHTMAP_FAST_ROUTINE), R0
+      .endif
     .else
         iwt     R0, #$FFFF
         sm      (TEXTURE_LIGHTMAP_FAST_ROUTINE), R0
     .endif
 RowLoop:
+    .if (fixed_lightmap = 1) && (edge_register_outputs = 1)
+T4LightmapRasterRowLoop:
+    .endif
         lm      R0, (CONVEX_RASTER_Y)
         BSP_SCALE_LOGICAL_TO_Q7 R0
         iwt     R1, #64
@@ -294,8 +360,8 @@ RowLoop:
         lm      R10, (CONVEX_FORWARD_PTR)
         lm      R12, (CONVEX_SCREEN_COUNT)
 ForwardAdvance:
-        move    R9, R10
-        with    R9
+        to      R9
+        from    R10
         add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
         lm      R0, (CONVEX_SCREEN_END_PTR)
         with    R9
@@ -309,13 +375,13 @@ ForwardNextReady:
         inc     R8
         movew   R1, (R8)
         lm      R0, (CONVEX_SAMPLE_Y)
-        move    R2, R1
-        with    R2
-        sub     R0
-        moves   R2, R2
-        bmi     ForwardStep
-        nop
-        beq     ForwardStep
+        to      R2
+        from    R0
+        sub     R1
+        ; Projected Y is clamped to center +/- focal length. Subtracting
+        ; a visible row center cannot overflow; one signed branch includes
+        ; equality and advances every edge whose endpoint is at/before it.
+        bpl     ForwardStep
         nop
         sm      (CONVEX_FORWARD_PTR), R10
         iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET
@@ -377,8 +443,8 @@ ReverseAdvance:
         bra     ReverseNextReady
         nop
 ReverseNoWrap:
-        move    R9, R10
-        with    R9
+        to      R9
+        from    R10
         sub     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
 ReverseNextReady:
         move    R8, R9
@@ -386,11 +452,10 @@ ReverseNextReady:
         inc     R8
         movew   R1, (R8)
         lm      R0, (CONVEX_SAMPLE_Y)
-        move    R2, R1
-        with    R2
-        sub     R0
-        moves   R2, R2
-        bpl     ReverseNonNegative
+        to      R2
+        from    R0
+        sub     R1
+        bmi     ReverseNonNegative
         nop
 ReverseStep:
         move    R10, R9
@@ -399,8 +464,6 @@ ReverseStep:
         nop
         GSU_ABSOLUTE_GOTO Done
 ReverseNonNegative:
-        beq     ReverseStep
-        nop
         sm      (CONVEX_REVERSE_PTR), R10
         iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET+GSU_TEXTURE_EDGE_DIVIDE_CACHE_ENTRY_BYTES
         jal     edge_intersect
@@ -440,8 +503,7 @@ DirectRightFallback:
 
         lm      R1, (CONVEX_MIN_X)
         lm      R0, (CONVEX_MAX_X)
-        move    R2, R0
-        with    R2
+        to      R2
         sub     R1
         bpl     XOrderReady
         nop
@@ -481,9 +543,8 @@ FirstReady:
         with    R3
         sub     R0
         BSP_ARITH_SHIFT7 R3, R4
-        move    R0, #127
-        move    R4, R0
-        with    R4
+        move    R0, #BSP_VIEW_WIDTH-1
+        to      R4
         sub     R3
         bpl     LastReady
         nop
@@ -521,6 +582,10 @@ LightmapStageRow:
         nop
         bra     NextRow
         nop
+        ; Preserve the row-replay and following overlay entry addresses.
+  .repeat 6
+        nop
+  .endrepeat
   .if edge_register_outputs = 1
 T4TextureRasterNextRow:
   .endif
@@ -543,7 +608,11 @@ Done:
         cmp     R12
         beq     T4ReplayAvailable
         nop
+      .if fixed_lightmap = 1
+        GSU_ABSOLUTE_GOTO T4LightmapChunkAbort
+      .else
         GSU_ABSOLUTE_GOTO Return
+      .endif
 T4ReplayAvailable:
         lm      R10, (TEXTURE_COORD_PTR)
         iwt     R12, #GSU_LIGHTMAP_ROW_STAGE_OFFSET
@@ -565,8 +634,27 @@ T4ReplayAvailable:
 ReplayAvailable:
         bne     ReplayLoop
         nop
+    .if (fixed_lightmap = 1) && (edge_register_outputs = 1)
+        ; Every visited raw row advances the stage cursor before X clipping.
+        ; Zero records retain the original edge-exhaustion return semantics.
+        GSU_ABSOLUTE_GOTO T4LightmapChunkAbort
+    .else
         GSU_ABSOLUTE_GOTO Return
+    .endif
 ReplayLoop:
+    .if (fixed_lightmap = 1) && (edge_register_outputs = 1)
+        ; Replay retires the walker pointers as row-stream cursors. Preserve
+        ; them only while another chunk can need the same polygon edges.
+        lm      R0, (T4_LIGHTMAP_CHUNK_ACTIVE)
+        moves   R0, R0
+        beq     ChunkWalkersSaved
+        nop
+        lm      R0, (CONVEX_FORWARD_PTR)
+        sm      (T4_LIGHTMAP_CHUNK_FORWARD_PTR), R0
+        lm      R0, (CONVEX_REVERSE_PTR)
+        sm      (T4_LIGHTMAP_CHUNK_REVERSE_PTR), R0
+ChunkWalkersSaved:
+    .endif
         ; CONVEX_RASTER_Y is the final staged row. Derive the first row from
         ; the contiguous count, then reuse the retired edge pointers as the
         ; replay cursor while span-local scratch remains untouched.
@@ -612,9 +700,8 @@ ReplayFirstReady:
         with    R3
         sub     R0
         BSP_ARITH_SHIFT7 R3, R4
-        move    R0, #127
-        move    R4, R0
-        with    R4
+        move    R0, #BSP_VIEW_WIDTH-1
+        to      R4
         sub     R3
         bpl     ReplayLastReady
         nop
@@ -696,7 +783,13 @@ ReplayNext:
 ReplayClearEndpoints:
         move    R0, #0
         sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+    .if (fixed_lightmap = 1) && (edge_register_outputs = 1)
+        GSU_ABSOLUTE_GOTO T4LightmapChunkResume
+    .endif
 Return:
+    .if (fixed_lightmap = 1) && (edge_register_outputs = 1)
+T4LightmapRasterReturn:
+    .endif
         lm      R11, (TEXTURE_RASTER_RETURN)
         ret
         nop
@@ -710,6 +803,7 @@ Return:
 .endmacro
 
 ; General retained lightmap raster.
+.res GSU_T4_RASTER_CODE_OFFSET - GSU_CODE_OFFSET - (* - GSU_SelectVisibility)
 DEFINE_TEXTURE_SHADED_RASTER TextureRasterPolygonShaded, 0, TextureCacheActiveEdgeShaded, TextureIntersectActiveEdgeShaded, TextureStageLightmapRow, 0
 
 ; R10 and R9 name the upper and lower 8-byte screen records. Return Q7 x in
@@ -735,8 +829,7 @@ TextureIntersectActiveEdgeShaded:
         sm      (TEXTURE_BASE_T), R12
         inc     R10
         inc     R10
-        movew   R11, (R10)
-        sm      (TEXTURE_BASE_DEPTH), R11
+        movew   R11, (R10)             ; base depth stays live through division
 
         movew   R6, (R9)
         inc     R9
@@ -745,33 +838,27 @@ TextureIntersectActiveEdgeShaded:
         inc     R9
         inc     R9
         movew   R0, (R9)
-        with    R0
         sub     R8
         sm      (TEXTURE_DELTA_S), R0
         inc     R9
         inc     R9
         movew   R0, (R9)
-        with    R0
         sub     R12
         sm      (TEXTURE_DELTA_T), R0
         inc     R9
         inc     R9
         movew   R0, (R9)
-        with    R0
         sub     R11
         sm      (TEXTURE_DELTA_DEPTH), R0
 
         lm      R0, (CONVEX_SAMPLE_Y)
-        move    R1, R0
-        with    R1
+        to      R1
         sub     R5
-        move    R0, R7
-        with    R0
+        from    R7
         sub     R5
         move    R2, R0
         sm      (CONVEX_BASE_RIGHT), R4
-        move    R0, R6
-        with    R0
+        from    R6
         sub     R4
         sm      (CONVEX_DELTA_RIGHT), R0
         ; Preserve the already-loaded upper depth across the cached edge divide
@@ -788,8 +875,14 @@ TextureIntersectActiveEdgeShaded:
         with    R3
         and     R1
         sm      (CONVEX_FACTOR), R3
+        bra     TextureShadeIntersectModeDispatch
+        nop
+  .repeat $1E98 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 TextureShadeIntersectModeDispatch:
-        jal     TexturePerspectiveFactorQ12BaseLoaded
+        iwt     R13, #TextureEdgePerspectiveLookup
+        jal     TexturePerspectiveFactorQ12Products
         move    R6, R3
         bra     TextureShadeIntersectScaleFactor
         nop
@@ -804,10 +897,11 @@ TextureShadeIntersectScaleFactor:
         with    R6
         add     R6
   .endrepeat
-        moves   R6, R6
         bpl     TextureShadeIntersectScaledDepth
         nop
         GSU_ABSOLUTE_GOTO TextureShadeIntersectUnityAttributes
+        ; Keep the depth overlay address fixed as the scale dispatch shrinks.
+        .res GSU_T4_EDGE_DEPTH_OFFSET - GSU_T4_EDGE_PATCH_OFFSET - (* - TextureShadeIntersectModeDispatch)
 TextureShadeIntersectScaledDepth:
         ; Perspective modes retain the helper's live depth endpoints.
         BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
@@ -817,51 +911,16 @@ TextureShadeIntersectScaledDepth:
         bra     TextureShadeIntersectScaledAttributes
         nop
 TextureShadeIntersectDepthEnd:
-        ; Vacant former affine-shading jump; the retained paths are projective.
-        .res    4
+        ; Keep the row-writer overlay pinned after the shorter depth product.
+        .res GSU_T4_STAGE_CODE_OFFSET - 4 - GSU_T4_EDGE_PATCH_OFFSET - (* - TextureShadeIntersectModeDispatch)
+TextureEdgePerspectiveMirrorMiss:
+        GSU_ABSOLUTE_GOTO TextureEdgePerspectiveMirrorMissCold
+.assert TextureEdgePerspectiveMirrorMiss - TextureShadeIntersectModeDispatch >= GSU_T4_EDGE_DEPTH_OFFSET - GSU_T4_EDGE_PATCH_OFFSET + GSU_T4_EDGE_DEPTH_CAPACITY, error, "Perspective fallback overlaps the T4 depth overlay"
 TextureStageLightmapRow:
-        ; One record per logical row: raw min/max X followed by exact left and
-        ; right S/T/depth. Convex rows are contiguous, so Y is reconstructed
-        ; from the final raster row and the record count during replay.
-        lm      R10, (TEXTURE_COORD_PTR)
-        lm      R1, (CONVEX_MIN_X)
-        lm      R3, (CONVEX_MAX_X)
-        movew   (R10), R1
-        inc     R10
-        inc     R10
-        movew   (R10), R3
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_LEFT_S)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_RIGHT_S)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_LEFT_T)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_RIGHT_T)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_LEFT_SHADE)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_RIGHT_SHADE)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        sm      (TEXTURE_COORD_PTR), R10
-        lm      R0, (TEXTURE_LIGHTMAP_FAST_ROUTINE)
-        inc     R0
-        sm      (TEXTURE_LIGHTMAP_FAST_ROUTINE), R0
-        ret
-        nop
+        GSU_ABSOLUTE_GOTO TextureStageLightmapRowCold
+        .res 32 - (* - TextureStageLightmapRow)
+DEFINE_TEXTURE_EDGE_PERSPECTIVE_LOOKUP TextureEdgePerspectiveLookup
+        .res GSU_T4_STAGE_CODE_CAPACITY - (* - TextureStageLightmapRow)
 TextureShadeIntersectScaledAttributes:
         lm      R5, (TEXTURE_BASE_S)
         lm      R7, (TEXTURE_DELTA_S)
@@ -877,6 +936,9 @@ TextureShadeIntersectScaledAttributes:
         sm      (TEXTURE_EDGE_T), R5
         bra     TextureShadeIntersectScreenX
         nop
+  .repeat $47 - (* - TextureShadeIntersectScaledAttributes)
+        nop
+  .endrepeat
 TextureShadeIntersectUnityAttributes:
         GSU_ABSOLUTE_GOTO TextureShadeIntersectUnityAttributesCold
   .repeat GSU_T4_EDGE_OUTPUT_CAPACITY - (* - TextureShadeIntersectScaledAttributes)
@@ -892,15 +954,14 @@ TextureShadeIntersectScreenX:
         add     R6
   .endrepeat
         BSP_SIGNED_MUL_SCALED8_SHIFT12 R7
-        with    R5
-        add     R0
-        move    R0, R5
+        add     R5
         lm      R11, (TEXTURE_EDGE_RETURN)
         ret
         nop
 
 ; Put the recurring edge reciprocal-cache hit and miss dispatch in the shaded
 ; kernel's former $DE10 padding; the same fly-valid code runs cold for brushes.
+        .res 37 - (* - TextureShadeIntersectScreenX)
 TextureDivideQ12EdgeCachedWindow:
         move    R8, R0
         move    R9, R2
@@ -925,7 +986,12 @@ TextureDivideQ12EdgeCachedWindowMiss:
 ; TEXTURE_BASE_DEPTH and TEXTURE_BASE_DEPTH+TEXTURE_DELTA_DEPTH.
 TexturePerspectiveFactorQ12:
         lm      R5, (TEXTURE_BASE_DEPTH)
+; Ordinary spans retain their selected lookup/loaded pair. The edge overlays
+; enter Products with a cache-local lookup in R13; arithmetic preserves R10/R13.
 TexturePerspectiveFactorQ12BaseLoaded:
+        lm      R10, (TEXTURE_Q12_LOADED_ROUTINE)
+        lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
+TexturePerspectiveFactorQ12Products:
         ; Three doubles scale Q12 to Q15 without wrapping for factors below
         ; unity. The only negative result is exactly 4096, handled directly.
         move    R6, R3
@@ -933,7 +999,6 @@ TexturePerspectiveFactorQ12BaseLoaded:
         with    R6
         add     R6
   .endrepeat
-        moves   R6, R6
         bpl     TexturePerspectiveFactorScaledProducts
         nop
         GSU_ABSOLUTE_GOTO TexturePerspectiveFactorUnityProductsCold
@@ -947,29 +1012,29 @@ TexturePerspectiveFactorScaledProducts:
         move    R1, R0
         bra     TexturePerspectiveFactorProductsReady
         nop
+  .repeat 4
+        nop
+  .endrepeat
 TexturePerspectiveFactorProductsReady:
-        move    R2, R5
-        move    R0, R7
-        with    R2
-        add     R0
+        to      R2
+        from    R5
+        add     R7
         with    R2
         sub     R1
 
-        move    R0, R12
-        with    R0
+        from    R12
         cmp     R2
         bne     TexturePerspectiveFactorDivide
         nop
         iwt     R3, #4096
         ret
         nop
+        nop                             ; Preserve the divide entry address.
 TexturePerspectiveFactorDivide:
-        ; This is the sole ordinary-divide caller. Enter the cached lookup
-        ; directly instead of paying a cold call/trampoline round trip.
-        move    R8, R0
+        ; Dispatch the exact quotient using the caller's resident cache.
+        move    R8, R12
         move    R9, R2
-        lm      R10, (TEXTURE_Q12_LOADED_ROUTINE)
-        lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
+        ; R13 retains the caller-selected lookup; R10 is its loaded continuation.
         jmp     R13
         nop
 
@@ -977,18 +1042,16 @@ TexturePerspectiveFactorDivide:
 ; hit quotient multiply in that same window while R6=high and R13=low remain
 ; live from the cache record. Misses use the same edge-specific fill path in
 ; both ordered playback and ordinary fly rendering.
+        .res 97 - (* - TexturePerspectiveFactorQ12)
 TextureDivideQ12EdgeLoadedCached:
-        move    R0, R8
-        with    R0
+        from    R8
         lmult
         move    R3, R4
         move    R6, R13
-        move    R0, R8
-        with    R0
+        from    R8
         lmult
         with    R4
         add     R4
-        with    R0
         adc     R0
         with    R3
         add     R0
@@ -1013,10 +1076,8 @@ TexturePerspectiveSampleSpan:
         sm      (TEXTURE_PERSPECTIVE_RETURN), R11
         BSP_SCALE_LOGICAL_TO_Q7 R0
         iwt     R1, #64
-        with    R0
         add     R1
         lm      R1, (CONVEX_MIN_X)
-        with    R0
         sub     R1
         bpl     TexturePerspectiveSampleNumeratorPositive
         nop
@@ -1032,8 +1093,7 @@ TexturePerspectiveSampleNumeratorPositive:
         bra     TexturePerspectiveSampleFactorReady
         nop
 TexturePerspectiveSampleDenReady:
-        move    R4, R0
-        with    R4
+        to      R4
         sub     R2
         bmi     TexturePerspectiveSampleDivide
         nop
@@ -1085,6 +1145,7 @@ TexturePerspectiveSampleCoordinatesReady:
         lm      R11, (TEXTURE_PERSPECTIVE_RETURN)
         ret
         nop
+        .res 167 - (* - TexturePerspectiveSampleSpan)
 TextureDrawSpanLightmappedPrepared:
         sm      (TEXTURE_SPAN_RETURN), R11
         iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
@@ -1145,7 +1206,6 @@ TexturePerspectiveReciprocalReady:
         romb
         lm      R0, (TEXTURE_SPAN_X)
         lm      R1, (TEXTURE_SPAN_END_X)
-        with    R0
         cmp     R1
         bne     TextureLightmapBlockSetup
         nop
@@ -1153,13 +1213,12 @@ TexturePerspectiveReciprocalReady:
         GSU_ABSOLUTE_GOTO TextureLightmapSpanLoop
 TextureLightmapBlockSetup:
         lm      R0, (TEXTURE_SPAN_X)
-        move    R4, R0
-        with    R4
+        to      R4
         add     #8
         lm      R1, (TEXTURE_SPAN_END_X)
         move    R8, R4
-        move    R2, R4
-        with    R2
+        to      R2
+        from    R4
         sub     R1
         bpl     TextureLightmapBlockFinalSetup
         nop
@@ -1179,19 +1238,22 @@ TextureLightmapBlockEndReady:
         move    R10, R6
         lm      R0, (TEXTURE_BLOCK_END_X)
         lm      R1, (TEXTURE_SPAN_X)
-        with    R0
         sub     R1
         sm      (TEXTURE_SPAN_DEN), R0
-        move    R1, R0
-        with    R1
+        to      R1
         sub     #8
         bne     TextureLightmapShortBlockSetup
         nop
         GSU_ABSOLUTE_GOTO TextureLightmapBlock8Setup
 TextureLightmapShortBlockSetup:
+        move    R1, #3
+        cmp     R1
+        bcs     TextureLightmapLongerBlockSetup
+        nop
+        GSU_ABSOLUTE_GOTO TextureLightmapBlockOneOrTwo
+TextureLightmapLongerBlockSetup:
         move    R0, R5
         lm      R1, (TEXTURE_SPAN_S)
-        with    R0
         sub     R1
         move    R4, #1
         moves   R0, R0
@@ -1210,7 +1272,6 @@ TextureLightmapBlockSPositive:
         move    R9, R3
         move    R0, R10
         lm      R1, (TEXTURE_SPAN_T)
-        with    R0
         sub     R1
         move    R4, #1
         moves   R0, R0
@@ -1248,6 +1309,9 @@ TextureLightmapCoordinateBlockReady:
 ; Pick one direct pixel loop per projective block when both the face sampler
 ; and lightmap mode are known. All uncommon faces and checked blocks retain the
 ; established indirect sampler/decoder route.
+  .repeat $2214 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 TextureLightmapSelectBlockRoutine:
         ; Restore the texture ROM bank only once preparation has finished.
         lm      R0, (TEXTURE_ROM_BANK)
@@ -1342,13 +1406,13 @@ LoadProjectedPacketState:
         with    R0
         sex
         sm      (CAMERA_Z), R0
-        GSU_LOAD_SIGNED_TABLE R0, GSU_SIN_OFFSET, R4
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_SIN_OFFSET, R4
         sm      (YAW_SIN), R0
-        GSU_LOAD_SIGNED_TABLE R0, GSU_COS_OFFSET, R4
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_COS_OFFSET, R4
         sm      (YAW_COS), R0
-        GSU_LOAD_SIGNED_TABLE R0, GSU_SIN_OFFSET, R5
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_SIN_OFFSET, R5
         sm      (PITCH_SIN), R0
-        GSU_LOAD_SIGNED_TABLE R0, GSU_COS_OFFSET, R5
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_COS_OFFSET, R5
         sm      (PITCH_COS), R0
         ; Selector admission already populated PROJECTED and VALID for every
         ; accepted local vertex. Retain only the camera state needed by the
@@ -1358,7 +1422,7 @@ LoadProjectedPacketState:
 ; Place the uncommon pitch transform in the retired span window while
 ; preserving all downstream technique-4 sampler overlay addresses.
 PacketProjectPitchedVertex:
-        cache
+        nop
         BSP_SIGNED_MUL_SHIFT R12, R3, R9, 2
         lm      R5, (PACKET_VIEW_FORWARD)
         BSP_SIGNED_MUL_SHIFT R7, R5, R9, 6
@@ -1379,10 +1443,12 @@ PacketProjectPitchedVertex:
 TextureSampleAbsolute:
         lm      R5, (TEXTURE_SPAN_S)
         lm      R6, (TEXTURE_SPAN_T)
+  .repeat $24F1 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 TextureSampleAbsoluteRegisters:
         lm      R0, (TEXTURE_WRAP_FLAGS)
         move    R7, R0
-        with    R0
         and     #BSP_WORLD_TEXTURE_FLAG_POWER_OF_TWO_AXES
         moves   R0, R0
         beq     TextureSampleAbsoluteSNegative
@@ -1406,14 +1472,16 @@ TextureSampleAbsoluteSNegative:
         nop
 TextureSampleAbsoluteSHigh:
         lm      R1, (TEXTURE_WIDTH_Q4)
-        move    R0, R5
-        with    R0
+        from    R5
         sub     R1
         bmi     TextureSampleAbsoluteSDone
         nop
         move    R5, R0
         bra     TextureSampleAbsoluteSHigh
         nop
+  .repeat $2527 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 TextureSampleAbsoluteSDone:
 TextureSampleAbsoluteTNegative:
         moves   R6, R6
@@ -1426,8 +1494,7 @@ TextureSampleAbsoluteTNegative:
         nop
 TextureSampleAbsoluteTHigh:
         lm      R1, (TEXTURE_HEIGHT_Q4)
-        move    R0, R6
-        with    R0
+        from    R6
         sub     R1
         bmi     TextureSampleAbsoluteTDone
         nop
@@ -1437,6 +1504,9 @@ TextureSampleAbsoluteTHigh:
 TextureSampleAbsoluteTDone:
         bra     TextureSampleAbsoluteCoordinatesReady
         nop
+  .repeat $2546 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 TextureSample:
         lm      R5, (TEXTURE_SPAN_S)
         lm      R6, (TEXTURE_SPAN_T)
@@ -1458,9 +1528,7 @@ TextureSampleCoordinatesReady:
         beq     TextureSampleWidth256
         nop
         move    R0, R6
-        with    R0
         umult   R1
-        with    R0
         add     R5
         move    R5, R0
         bra     TextureSampleOffsetReady
@@ -1547,7 +1615,6 @@ TextureLightmapSkyPlotReady:
         ; PLOT advances only R1. R0 still holds the logical X used to address
         ; the coordinate map, so retain it through the boundary tests.
         lm      R1, (TEXTURE_SPAN_END_X)
-        with    R0
         cmp     R1
         bne     TextureLightmapSpanContinue
         inc     R0
@@ -1562,7 +1629,6 @@ TextureLightmapSpanContinue:
         inc     R10
         iwt     R8, #TEXTURE_SPAN_X
         lm      R1, (TEXTURE_SIGN_S)
-        with    R0
         cmp     R1
         beq     TextureLightmapSpanCheckBlock
         ; Publish X with a single STW in the boundary branch delay slot. R8's

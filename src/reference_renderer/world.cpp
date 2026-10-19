@@ -1255,8 +1255,7 @@ SourceWorld build_quantized_world(const fs::path& data_dir, const SourceWorld& s
         texture_coordinate_bytes.size() != index_bytes.size() / 2 * kPackedTextureCoordinateBytes ||
         face_texture_id_bytes.size() != static_cast<std::size_t>(source.face_count) ||
         texture_directory_bytes.empty() || texture_directory_bytes.size() % kPackedTextureDirectoryBytes != 0 ||
-        turbulence_table_bytes.size() != 128 ||
-        texture_pixel_bytes.empty())
+        turbulence_table_bytes.size() != 128 || texture_pixel_bytes.empty())
     {
         fail(
             "packed quantized-world stream has the wrong byte count: "

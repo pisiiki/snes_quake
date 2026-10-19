@@ -74,3 +74,4 @@ RuntimeMenuFont:
         RUNTIME_MENU_GLYPH $7C, $04, $08, $10, $20, $40, $7C, $00 ; Z
 RuntimeMenuFontEnd:
 .assert RuntimeMenuFontEnd - RuntimeMenuFont = RUNTIME_MENU_FONT_BYTES, error, "Runtime-menu font size changed"
+.assert VRAM_RUNTIME_MENU_TILES+RUNTIME_MENU_FONT_BYTES <= VRAM_TILES_B, error, "Runtime-menu font exceeds shared sprite VRAM"

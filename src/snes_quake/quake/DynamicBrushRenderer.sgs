@@ -11,14 +11,9 @@ DynamicBrushOverlayStart:
 .include "DynamicBrushRaster.sgs"
 .include "DynamicBrushArbiter.sgs"
 .include "DynamicBrushArbiterSpan.sgs"
-; Preserve the retained entry address while setup still fits its historical
-; window. New overlay features may consume that dead padding and move the cold
-; entry points earlier without changing their exported ABI.
-.if * - DynamicBrushOverlayStart < $1AAF
-  .repeat $1AAF - (* - DynamicBrushOverlayStart)
-        nop
-  .endrepeat
-.endif
+; Preserve the current entry and T4 fallback windows when shared arithmetic
+; shrinks. This space follows a returning helper and is never executed.
+.res $1BE9 - (* - DynamicBrushOverlayStart)
 
 GSU_BrushTextureCode:
         move    R0, #2

@@ -12,6 +12,10 @@ struct PackedTextureRaster;
 
 std::uint8_t quake_turbulence_phase(double surface_time);
 
+const std::array<std::uint8_t, kQuakeTurbulenceCycle>& source_quake_turbulence_table();
+
+std::uint8_t sample_source_turbulent_texture(const MipTexture& texture, double s, double t, double surface_time);
+
 std::pair<int, int> quake_turbulent_texel_coordinates(
     int s_q4,
     int t_q4,

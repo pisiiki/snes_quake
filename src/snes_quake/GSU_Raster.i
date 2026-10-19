@@ -15,6 +15,10 @@ __GSU_RASTER_I__ = 1
 GSU_RASTER_SCRATCH = $5F80
 .endif
 
+.ifndef BSP_VIEW_WIDTH
+BSP_VIEW_WIDTH = 128
+.endif
+
 GSU_TRI_X0          = GSU_RASTER_SCRATCH + $00
 GSU_TRI_Y0          = GSU_RASTER_SCRATCH + $02
 GSU_TRI_X1          = GSU_RASTER_SCRATCH + $04
@@ -353,7 +357,7 @@ GSU_DrawHLine:
         moves   R2, R2
         bmi     HLineDone
         nop
-        move    R0, #127
+        move    R0, #BSP_VIEW_WIDTH-1
         with    R0
         sub     R2
         bmi     HLineDone
@@ -373,7 +377,7 @@ HLineForward:
         moves   R3, R3
         bmi     HLineDone
         nop
-        move    R0, #127
+        move    R0, #BSP_VIEW_WIDTH-1
         with    R0
         sub     R1
         bmi     HLineDone
@@ -384,12 +388,12 @@ HLineForward:
         nop
         move    R1, #0
 HLineLeftReady:
-        move    R0, #127
+        move    R0, #BSP_VIEW_WIDTH-1
         with    R0
         sub     R3
         bpl     HLineRightReady
         nop
-        move    R3, #127
+        move    R3, #BSP_VIEW_WIDTH-1
 HLineRightReady:
   .endif
         move    R12, R3

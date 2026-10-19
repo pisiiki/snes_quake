@@ -7,6 +7,8 @@
 
 namespace quake_bsp_reference {
 
+Json texture_mapping_fidelity_json(const TextureMappingFidelity* fidelity, std::string_view contract);
+
 void write_json_report(
     const fs::path& path,
     const Options& options,

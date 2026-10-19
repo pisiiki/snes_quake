@@ -20,6 +20,8 @@ LOOP_LITERAL_PATTERN = re.compile(
 FX3_INCLUDE = "snes_fx3.i"
 INCOMPATIBLE_OPCODES = {
     "merge": "FX3 repurposes MERGE as its clear-command interface",
+    "bge": "libSFX encodes BGE as $07 (BLT on FX3); use a verified explicit branch encoding or BPL when overflow is impossible",
+    "blt": "libSFX encodes BLT as $06 (BGE on FX3); use a verified explicit branch encoding or BMI when overflow is impossible",
 }
 RAW_DELAY_SLOT_OPCODES = {
     "bcc",
@@ -206,9 +208,11 @@ def _scan(
     files.append(path)
     statements = 0
     delay_slot_branch: tuple[int, str] | None = None
-    for number, text in enumerate(
-        path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
-    ):
+    source_text = path.read_text(encoding="utf-8", errors="replace")
+    # libSFX.i also names its inactive S-CPU include graph. Its 65816 branch
+    # aliases are unrelated to the GSU assembler's reversed signed opcodes.
+    is_scpu_macros = path.name == "CPU.i" and source_text.startswith("; libSFX S-CPU Macros")
+    for number, text in enumerate(source_text.splitlines(), start=1):
         code = _strip_comment(text)
         include = INCLUDE_PATTERN.match(code)
         if include:
@@ -256,6 +260,8 @@ def _scan(
             (number, opcode) if opcode in RAW_DELAY_SLOT_OPCODES else None
         )
         reason = INCOMPATIBLE_OPCODES.get(opcode)
+        if is_scpu_macros and opcode in ("bge", "blt"):
+            reason = None
         if reason:
             violations.append(Fx3OpcodeViolation(path, number, opcode.upper(), reason))
         loop_literal = _unsafe_loop_literal(code)

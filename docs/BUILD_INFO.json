@@ -1,8 +1,8 @@
 {
   "defaultFeatureCoverage": {
     "declaration": {
-      "bytes": 11647,
-      "sha256": "26d5b6447c6692300b823da1d46a870bd4d83d5c3930c558172fd2f7c50ebff4"
+      "bytes": 11259,
+      "sha256": "c0cb54d6496f45507fd40bbf5412fd7a62fe59feb6319541cf0c76335e6ac406"
     },
     "defaultFeatures": {
       "dynamicBrushes": {
@@ -43,23 +43,23 @@
     },
     "evidence": {
       "schema": "quake-default-feature-semantic-evidence-v1",
-      "sha256": "d9e70727e2981f22e3e153e70336fa27c69fd1841ccb5d37ebfc84474fb0d273"
+      "sha256": "fdfdbb5537013037511c3257bcdb82bf75c815b4bbd55db50cd71c02fb2fc708"
     },
     "evidenceRoles": [
       "fly",
-      "ordered2",
-      "ordered20",
+      "ordered3",
+      "ordered30",
       "realtime",
       "referenceLaunch",
       "referenceSample101",
-      "referenceSample951",
+      "referenceSample1426",
       "releaseVideo",
       "runtimeMenu",
       "scenarioWorldFly",
       "scenarios"
     ],
     "releaseVideo": {
-      "frameCount": 4473,
+      "frameCount": 4483,
       "observedFeatureState": {
         "dynamicBrushes": true,
         "lightmap": true,
@@ -67,11 +67,11 @@
         "technique": 4,
         "textures": true
       },
-      "romSha256": "e29ac927c09491be760844dcdfe4ca06cc48ce9f3cc5ffbbddc55d12d935971e",
+      "romSha256": "b7c4294ab9e086f5032592b3d321bc29ee76851f17478d28fa17ba0b90b67456",
       "sequenceComplete": true,
       "video": {
-        "bytes": 9449440,
-        "sha256": "c7c6b994a1e9ef009cca4d4a9a7abfe32171d0b406e079b14c86382712a24590"
+        "bytes": 9865024,
+        "sha256": "e6c2fdfd4f9d9ea7aeddb6835e30908c4a4d6f02579088be348b2e33db44544d"
       }
     },
     "schema": "quake-default-feature-release-binding-v2",
@@ -79,22 +79,165 @@
   },
   "releaseSurface": {
     "build": {
-      "coverageDeclarationSha256": "26d5b6447c6692300b823da1d46a870bd4d83d5c3930c558172fd2f7c50ebff4",
+      "coverageDeclarationSha256": "c0cb54d6496f45507fd40bbf5412fd7a62fe59feb6319541cf0c76335e6ac406",
       "coverageEvidence": {
         "schema": "quake-default-feature-semantic-evidence-v1",
-        "sha256": "d9e70727e2981f22e3e153e70336fa27c69fd1841ccb5d37ebfc84474fb0d273"
+        "sha256": "fdfdbb5537013037511c3257bcdb82bf75c815b4bbd55db50cd71c02fb2fc708"
       },
-      "generatedAssetBytes": 5013243,
-      "generatedAssetCount": 170,
-      "generatedAssetSetSha256": "77b28515862f4c6999f12d672cf2f043c282107c855723a426fef98f2791f630",
+      "generatedAssetBytes": 7556115,
+      "generatedAssetCount": 248,
+      "generatedAssetSetSha256": "d8e73608f815c40e06f543482637af11d9de64b396f30e1c14988810ef4d7204",
+      "lightmapGeneration": {
+        "outputs": {
+          "bsp": {
+            "bytes": 1250504,
+            "sha256": "865ea403f6fd0a690e0752e41a9a7984913d34feb2636b14d0cbbf6591cf8ba7"
+          },
+          "lightmaps": {
+            "bytes": 181364,
+            "sha256": "88f93c96d28a96a25d29d72ae8d9e236d91d32a4e2e10cab066ec09d10c234a2"
+          }
+        },
+        "recipe": {
+          "commands": {
+            "light": [
+              "-threads",
+              "1",
+              "-quiet",
+              "e1m3.bsp"
+            ],
+            "qbsp": [
+              "-threads",
+              "1",
+              "-quiet",
+              "-nolog",
+              "-leaktest",
+              "-nosubdivide",
+              "-subdividearea",
+              "512",
+              "-subdivideareamodel",
+              "256",
+              "-tjunc",
+              "rotate",
+              "-chop",
+              "-notranswater",
+              "e1m3.map"
+            ],
+            "vis": [
+              "-threads",
+              "1",
+              "-quiet",
+              "-nostate",
+              "e1m3.bsp"
+            ]
+          },
+          "configuration": {
+            "bytes": 2084,
+            "sha256": "02af77498a50c9ec608e77a722cc47dc07fc2d75db3c2d1257a06d6c1916e65a"
+          },
+          "dependencies": {
+            "libraries": {
+              "embree4.dll": {
+                "bytes": 33839616,
+                "sha256": "4331e61ed8a0c222ed0ff8db26b8334a1d3066950b3329d0884e03c7a4591109"
+              },
+              "tbb12.dll": {
+                "bytes": 349696,
+                "sha256": "98ab2a7be51f877f3bb2afdcae39cf473e8df5f53a2729a2af12566bcde43a8e"
+              },
+              "tbbmalloc.dll": {
+                "bytes": 103424,
+                "sha256": "1a6e2ce8c13155307caf13d434f984bf1fac18afb897f8c9631336923f63a9a9"
+              }
+            },
+            "packages": {
+              "embree": {
+                "Version": "4.4.1"
+              },
+              "tbb": {
+                "Version": "2023.1.0"
+              }
+            }
+          },
+          "embreeIsa": "sse2",
+          "ericwCommit": "8b70fce25558f2662ebee0855c12d35fe21e7beb",
+          "generator": {
+            "bytes": 27509,
+            "sha256": "7f2da0021dcc33053343772049c048876b6142aa2838a8617ffd662c2f33683f"
+          },
+          "inputs": {
+            "map": {
+              "bytes": 648687,
+              "sha256": "5957cf40b15d5c4faba479e54f762cbe80e8d0ddfe270f95a63bcb66ca5f24fc"
+            },
+            "mapArchive": {
+              "bytes": 2408246,
+              "sha256": "377047edc41a74847f4c32bec86abf634aba089cc534d571a019c4300f2ae985"
+            },
+            "pak": {
+              "bytes": 18689235,
+              "sha256": "35a9c55e5e5a284a159ad2a62e0e8def23d829561fe2f54eb402dbc0a9a946af"
+            },
+            "patch": {
+              "bytes": 10792,
+              "sha256": "49943385e96bb90a3ff680052a85a3dd82333b09b03fd1f4921167254bbcc197"
+            },
+            "shippingBsp": {
+              "bytes": 1249944,
+              "sha256": "5941c37c67267ae11aff572fdba7f813148cc99da3cfc34d01eea81dc23edfd0"
+            }
+          },
+          "schema": "quake-lightmap-generation-recipe-v1",
+          "settings": {
+            "mapThreads": 1,
+            "maxInlineModelLightmapSamples": 256,
+            "maxWorldLightmapSamples": 512
+          },
+          "toolchain": {
+            "architecture": "amd64",
+            "compiler": {
+              "CMAKE_CXX_COMPILER_ARCHITECTURE_ID": "x64",
+              "CMAKE_CXX_COMPILER_ID": "MSVC",
+              "CMAKE_CXX_COMPILER_VERSION": "19.51.36260.0"
+            },
+            "flags": {
+              "CMAKE_CXX_FLAGS": "",
+              "CMAKE_CXX_FLAGS_RELEASE": "/MD /O2 /Ob2 /DNDEBUG",
+              "CMAKE_C_FLAGS": "",
+              "CMAKE_C_FLAGS_RELEASE": "/MD /O2 /Ob2 /DNDEBUG"
+            },
+            "host": "Windows"
+          },
+          "tools": {
+            "bsputil": {
+              "bytes": 866816,
+              "sha256": "254f47290e8c847eca37a369ed683b1237a19c87bf26956e2f7b5f0ff32af67c"
+            },
+            "light": {
+              "bytes": 1121280,
+              "sha256": "9bca03e07751f155f73530b8894b3d15e26adfa26e0db62c24bcda13337acf42"
+            },
+            "qbsp": {
+              "bytes": 1272832,
+              "sha256": "243e6875bb9d1103e91579ca20652b9bb1c90420f9f469718b5452034002b5cc"
+            },
+            "vis": {
+              "bytes": 708096,
+              "sha256": "2dc6827c9c662045b4a0abee507417e07708c27d9840efd7c41035d566d81aaa"
+            }
+          },
+          "vcpkgCommit": "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+        },
+        "recipeSha256": "95e7e3a01a3765460db305ffe4124fdd27e97e1f7fdae61573dd2431b9d873f4"
+      },
       "rom": {
         "bytes": 4194304,
-        "sha256": "e29ac927c09491be760844dcdfe4ca06cc48ce9f3cc5ffbbddc55d12d935971e"
+        "sha256": "b7c4294ab9e086f5032592b3d321bc29ee76851f17478d28fa17ba0b90b67456"
       },
-      "romConfigSha256": "66704ae1dcb0ae0e71d83ead3fbbf978581f615f779d64d638f21a906d4ae109",
+      "romConfigSha256": "02af77498a50c9ec608e77a722cc47dc07fc2d75db3c2d1257a06d6c1916e65a",
       "symbols": {
-        "bytes": 161245,
-        "sha256": "25a991b81bfc8677724f2d80c0def1b1470304f6c6e7e59845b66cdbd9c9a15f"
+        "bytes": 318635,
+        "sha256": "aa63f2b3decc16fd95e6c5a4da2c88642588ab12154c9243c7199f74e49899ca"
       }
     },
     "compatibility": [
@@ -103,26 +246,26 @@
     ],
     "features": [
       "Quake's original colors, textures and lighting",
-      "Animated skies and liquids, plus moving doors, lifts and other level objects in demo and fly modes",
+      "Animated skies and liquids, plus moving doors, lifts and other level objects in demo and fly modes. Demo entity movement is interpolated at 30 Hz, with cuts and animation poses preserved",
       "Detailed monster and item images, rotating weapon pickups, and sprite effects",
       "During demo playback, monsters, pickups and sprite effects are hidden correctly behind walls and moving doors",
       "Native SNES sound synchronized with realtime demo playback",
       "Realtime demo playback, step-by-step playback for comparisons, and a fly camera for exploring the level",
-      "A runtime menu for rendering, playback, level objects, monsters and items, colors, and sound"
+      "A runtime menu for rendering, playback, level objects, monsters and items, colors, and sound",
+      "X3 warp smooths camera movement between rendered frames using SNES Mode 7 and HDMA"
     ],
     "gameData": {
-      "bspSha256": "429117c30dd7eeae5a94bd1cf4cb626aed7525133ee7868d099370a0d602298c",
+      "bspSha256": "865ea403f6fd0a690e0752e41a9a7984913d34feb2636b14d0cbbf6591cf8ba7",
       "demo": "demo1.dem",
       "demoSha256": "893e5279e3a84fed0416a1101dfc2b6bca1ebd28787323daa8e22cefe54883c1",
       "map": "maps/e1m3.bsp",
-      "pakSha256": "46014ce39e2cee2672bfba0a1f2ce57d17bcce28fc1971ff8dcbd4a82b6d0644"
+      "pakSha256": "41d395bf5b2a1ad6762ea10995cb6ef61d2c08bfc2f030d74e59935586932317"
     },
     "limitations": [
       "This is a renderer demonstration, not a complete Quake game port.",
       "The included content path is the shareware demo1.dem on maps/e1m3.bsp; gameplay, AI, save games, networking, and the Quake console are not implemented.",
-      "Rendering is 128x112 indexed color presented at 256x224, so detail and frame rate vary substantially with scene complexity.",
-      "Interactive fly mode is a development camera and does not provide Quake movement or collision semantics.",
-      "In fly mode, sprites can appear through doors and other inline brush models."
+      "Rendering offers X2 (128x112) and X3 (85x74) indexed color at a 256x224 display. X3 warp smooths camera movement but does not increase completed-frame detail or animate entities between rendered frames. Detail and frame rate vary with scene complexity.",
+      "Interactive fly mode is a development camera and does not provide Quake movement or collision semantics."
     ],
     "media": {
       "capture": {
@@ -133,24 +276,28 @@
         "reference": [
           {
             "dimensions": [
-              768,
-              824
+              800,
+              840
             ],
             "includesUi": true,
             "path": "docs/media/reference-quake-hall.png",
             "renderer": "C++ source geometry and lightmaps",
-            "sourcePose": 300,
+            "sourcePose": 450,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 15.0,
             "technique": 4
           },
           {
             "dimensions": [
-              768,
-              824
+              800,
+              840
             ],
             "includesUi": true,
             "path": "docs/media/reference-quake-interior.png",
             "renderer": "C++ source geometry and lightmaps",
-            "sourcePose": 1208,
+            "sourcePose": 1812,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 60.4,
             "technique": 4
           }
         ],
@@ -159,49 +306,63 @@
             "flyCamera": null,
             "key": "menu",
             "menuOpen": true,
-            "sourcePose": 1208,
+            "sourcePose": 1812,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 60.4,
             "technique": 4
           },
           {
             "flyCamera": null,
             "key": "textures-lightmaps",
             "menuOpen": false,
-            "sourcePose": 1208,
+            "sourcePose": 1812,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 60.4,
             "technique": 4
           },
           {
             "flyCamera": null,
             "key": "textures-only",
             "menuOpen": false,
-            "sourcePose": 1208,
+            "sourcePose": 1812,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 60.4,
             "technique": 2
           },
           {
             "flyCamera": null,
             "key": "lightmaps-only",
             "menuOpen": false,
-            "sourcePose": 1208,
+            "sourcePose": 1812,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 60.4,
             "technique": 7
           },
           {
             "flyCamera": null,
             "key": "hall-textures-lightmaps",
             "menuOpen": false,
-            "sourcePose": 300,
+            "sourcePose": 450,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 15.0,
             "technique": 4
           },
           {
             "flyCamera": null,
             "key": "hall-textures-only",
             "menuOpen": false,
-            "sourcePose": 300,
+            "sourcePose": 450,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 15.0,
             "technique": 2
           },
           {
             "flyCamera": null,
             "key": "hall-lightmaps-only",
             "menuOpen": false,
-            "sourcePose": 300,
+            "sourcePose": 450,
+            "sourceSampleRateHz": 30,
+            "sourceTimeSeconds": 15.0,
             "technique": 7
           },
           {
@@ -247,103 +408,114 @@
       },
       "screenshots": [
         {
-          "bytes": 9114,
+          "bytes": 8925,
           "path": "docs/media/snes-quake-menu.png",
-          "sha256": "3df91a5d9f7fbd9cdacd019511b383f3c84fdfe768428acbe97cec28cc4795f2"
+          "sha256": "aac5515ec28894b203ee15cf926184683d0da5b323e9c04da205523560176aff"
         },
         {
-          "bytes": 10956,
+          "bytes": 10761,
           "path": "docs/media/snes-quake-textures-lightmaps.png",
-          "sha256": "b61031fe6aa6c2e786a83b46586c250d8c4a119f3e60cf86df184f4c14491bc9"
+          "sha256": "591f4e6e71f54d5140240770f3ddad412410a6ff7698bc0235dc98298b985e6b"
         },
         {
-          "bytes": 15883,
+          "bytes": 15799,
           "path": "docs/media/snes-quake-textures-only.png",
-          "sha256": "e6ec6f7453dc39cdd8111d39711ab95f6149adcd6c3bb63aaa8dcd9c5b826d96"
+          "sha256": "751461bc6efc78fdcfa3b5353f53eeed7b628b44d66665c4e6cf0f5f6fe60328"
         },
         {
-          "bytes": 5400,
+          "bytes": 5320,
           "path": "docs/media/snes-quake-lightmaps-only.png",
-          "sha256": "665732a07af35c89ec894b62b04a08c24b53781b0a0a9736de08ffd1f95ba23e"
+          "sha256": "fead92c3a301a77d09c140d5a4098380e4fca2f14149300bc3064053d25bf7d2"
         },
         {
-          "bytes": 11347,
+          "bytes": 11379,
           "path": "docs/media/snes-quake-hall-textures-lightmaps.png",
-          "sha256": "9000aa1df2bed243574a716b57604b446cb5c25923ab29810422a33cd164f809"
+          "sha256": "5f76b07c92044bacde627970c1766fdbe9174c36d74087c6185d93fe37579606"
         },
         {
-          "bytes": 12262,
+          "bytes": 12269,
           "path": "docs/media/snes-quake-hall-textures-only.png",
-          "sha256": "3ea4b407d7a578ab3f7e0264260c52c445dc39b2f1fb2a60a43fddaaa87014a7"
+          "sha256": "1311b723c371b07e6a137f356855b4b024560d6d69b9ea42c6ca7f44c106c5b7"
         },
         {
-          "bytes": 5696,
+          "bytes": 5681,
           "path": "docs/media/snes-quake-hall-lightmaps-only.png",
-          "sha256": "d44446f4f56f383db7657207edb02d88aa8bf2bbc1669f7f95c5ac0c90e254d5"
+          "sha256": "49a7986654c597ff1e347bf13f10be490cf784550135bcdfc8470b317169f026"
         },
         {
-          "bytes": 11990,
+          "bytes": 11953,
           "path": "docs/media/snes-quake-ending-textures-lightmaps.png",
-          "sha256": "7a769ce93fb9063dcee1e18c27ecc4f23fd2b5c6bc932ee9c1f9f5102ad18dd2"
+          "sha256": "a0417ab6348d821a2a2afb7736b2c4e7569214dc4222507694f0d2e31617f202"
         },
         {
-          "bytes": 11050,
+          "bytes": 11048,
           "path": "docs/media/snes-quake-ending-textures-only.png",
-          "sha256": "3306f7bb587ab21e6fe4d35c85fdd7beffde809587e3dec97796a0619d376609"
+          "sha256": "3356662ef56a25bfaf42207487f30d9d0331004038299c4adca00e7f11189475"
         },
         {
-          "bytes": 6323,
+          "bytes": 6364,
           "path": "docs/media/snes-quake-ending-lightmaps-only.png",
-          "sha256": "74004b99f72b229fb362c0f8a84caf3129ea525640fcf6bbd2804fe46c45a04b"
+          "sha256": "be9636d2e99b8c42cbaac86e6ffd42a29884a394e59feaa2f3dc77b28e8c2790"
         },
         {
-          "bytes": 27575,
+          "bytes": 29227,
           "path": "docs/media/reference-quake-hall.png",
-          "sha256": "53caab8c322ced1b9007d005d0044ac23f962d9f5186f402453992e70f68bb63"
+          "sha256": "33d91e8773a817b55fb90387b1683b9dcbd9bb0899a03ee56ac674b05cfa03ef"
         },
         {
-          "bytes": 26010,
+          "bytes": 27528,
           "path": "docs/media/reference-quake-interior.png",
-          "sha256": "8993425b6424850a86bbd61bb008209b63ad7b7dd70ad55f88e6d509174678c4"
+          "sha256": "22c197033e70a92e4bfc2951d34be79ecc152971d7f620b7937a8feab2dfe475"
         }
       ],
       "video": {
         "audio": "native SNES stereo AAC capture",
-        "bytes": 9449440,
+        "bytes": 9865024,
         "coverageRole": "releaseVideo",
         "distribution": "github-attachment",
-        "frames": 4473,
-        "sha256": "c7c6b994a1e9ef009cca4d4a9a7abfe32171d0b406e079b14c86382712a24590",
-        "url": "https://github.com/user-attachments/assets/f81515b4-ee59-49ed-8862-65d98dfe2881"
+        "frames": 4483,
+        "sha256": "e6c2fdfd4f9d9ea7aeddb6835e30908c4a4d6f02579088be348b2e33db44544d",
+        "url": "https://github.com/user-attachments/assets/a8d54d97-522d-41c7-b67d-ed66ce993661"
       },
-      "videoAttachmentUrl": "https://github.com/user-attachments/assets/f81515b4-ee59-49ed-8862-65d98dfe2881"
+      "videoAttachmentUrl": "https://github.com/user-attachments/assets/a8d54d97-522d-41c7-b67d-ed66ce993661",
+      "warpVideo": {
+        "audio": "native SNES stereo AAC capture",
+        "bytes": 9541966,
+        "distribution": "github-attachment",
+        "frames": 4442,
+        "playback": "realtime",
+        "presentation": "x3-warp",
+        "romSha256": "b7c4294ab9e086f5032592b3d321bc29ee76851f17478d28fa17ba0b90b67456",
+        "sha256": "010304924bfb5329252ce51021fda5defe444d9fe134bbb6c6f46e719385cd64",
+        "url": "https://github.com/user-attachments/assets/16994b60-3501-4f63-b970-c977e66cbcd5"
+      }
     },
     "performance": {
       "cold": {
-        "frames": 4536,
-        "freshFps": 1.9741452750198218
+        "frames": 5069,
+        "freshFps": 2.643920900632017
       },
       "contract": "ordered-presentation-timing-v1",
       "evidence": {
         "schema": "quake-demo-performance-semantic-evidence-v2",
-        "sha256": "de98baa7605eb82fcc0c753395c9aff23bdea18e4bf0e2bfca96d14b45f8e9d3"
+        "sha256": "80c989b329ed02b25db6824dac00f657bd0d0a12e2d6c5a13827b72070ffd0a0"
       },
-      "presentations": 149,
+      "presentations": 223,
       "realtime": {
-        "elapsedFrames": 4455,
-        "freshFps": 2.3742740488828997,
-        "freshPresentations": 176,
-        "playbackTicks": 4456,
+        "elapsedFrames": 4456,
+        "freshFps": 2.832304867839579,
+        "freshPresentations": 210,
+        "playbackTicks": 4457,
         "playheadDriftTicks": 0,
-        "samplesSkipped": 1307,
-        "sourceSamplesDue": 1483
+        "samplesSkipped": 2015,
+        "sourceSamplesDue": 2225
       },
-      "selectedRateHz": 2,
-      "sourceRateHz": 20,
+      "selectedRateHz": 3,
+      "sourceRateHz": 30,
       "sustained": {
-        "frames": 4486,
-        "freshFps": 1.982751706559867,
-        "transitions": 148
+        "frames": 5002,
+        "freshFps": 2.6673203185608445,
+        "transitions": 222
       }
     },
     "product": {
@@ -352,10 +524,10 @@
       "repository": "pisiiki/snes_quake",
       "romDistribution": "source-only",
       "romIncluded": false,
-      "version": "0.0.2"
+      "version": "0.0.3"
     },
     "schema": "snes-quake-public-release-surface-v1"
   },
   "schema": "snes-quake-public-build-info-v1",
-  "sourceRevision": "450ef0d24d1f406b6235dfd014fc5eb00ee16a9a"
+  "sourceRevision": "a16100b255b866b5848971fa2ef4c4edfa1df25b"
 }

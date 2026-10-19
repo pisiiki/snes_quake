@@ -52,7 +52,7 @@ std::vector<PackedBrushSection> load_brush_runtime_sections(const fs::path& data
     }
     auto banks = load_numbered_brush_banks(data_dir, "QuakeBSPBrushRuntime", bank_count);
     const auto& header = banks.front();
-    if (std::string_view(reinterpret_cast<const char*>(header.data()), 4) != "QBSA" || read_u16(header, 4) != 1 ||
+    if (std::string_view(reinterpret_cast<const char*>(header.data()), 4) != "QBSA" || read_u16(header, 4) != 2 ||
         read_u16(header, 6) != banks.size())
     {
         fail("unsupported QBSA runtime header");
@@ -243,22 +243,26 @@ PackedBrushAssets load_packed_brush_assets(const fs::path& data_dir)
         assets.vertices.push_back(decode_brush_q2_vertex(vertices, index * 4));
     }
     const auto& replay = packed_brush_section(assets, "REPLAY");
-    if (replay.bytes.size() < 32 || read_u16(replay.bytes, 4) != 2 ||
+    if (replay.bytes.size() < 32 || read_u16(replay.bytes, 4) != 3 || read_u16(replay.bytes, 30) != 1 ||
         std::string_view(reinterpret_cast<const char*>(replay.bytes.data()), 4) != "QBSE")
     {
         fail("unsupported compact brush replay");
     }
     const auto entity_count = read_u16(replay.bytes, 18);
-    require_range(replay.bytes, 32, static_cast<std::size_t>(entity_count) * 6, "QBSE entity directory");
+    if (replay.bytes.size() != 32 + static_cast<std::size_t>(entity_count) * 8)
+    {
+        fail("QBSE runtime entity directory has the wrong length");
+    }
+    require_range(replay.bytes, 32, static_cast<std::size_t>(entity_count) * 8, "QBSE entity directory");
     assets.entities.reserve(entity_count);
     for (std::size_t slot = 0; slot < entity_count; ++slot)
     {
-        const auto offset = 32 + slot * 6;
+        const auto offset = 32 + slot * 8;
         assets.entities.push_back(
             {read_u16(replay.bytes, offset),
              replay.bytes[offset + 2],
-             replay.bytes[offset + 3],
-             read_u16(replay.bytes, offset + 4)}
+             read_u16(replay.bytes, offset + 4),
+             read_u16(replay.bytes, offset + 6)}
         );
     }
     assets.external_entity_slot_first = assets.entities.size();
@@ -359,7 +363,7 @@ PackedBrushVisualState decode_packed_brush_visual_state(const PackedBrushAssets&
     const auto& states = packed_brush_section(assets, "VSTATES");
     const auto& transforms = packed_brush_section(assets, "VTRANS");
     const auto& textures = packed_brush_section(assets, "VTEX");
-    if (states.record_bytes != 8 || transforms.record_bytes != 2 || textures.record_bytes != 3 ||
+    if (states.record_bytes != 8 || transforms.record_bytes != 3 || textures.record_bytes != 3 ||
         state > states.record_count)
     {
         fail("QBSA visual-state directory is inconsistent");
@@ -373,9 +377,9 @@ PackedBrushVisualState decode_packed_brush_visual_state(const PackedBrushAssets&
     output.transforms.reserve(transform_count);
     for (std::size_t index = 0; index < transform_count; ++index)
     {
-        const auto entry = static_cast<std::size_t>(first_transform + index) * 2;
-        require_range(transforms.bytes, entry, 2, "QBSA VTRANS");
-        output.transforms.emplace_back(transforms.bytes[entry], transforms.bytes[entry + 1]);
+        const auto entry = static_cast<std::size_t>(first_transform + index) * 3;
+        require_range(transforms.bytes, entry, 3, "QBSA VTRANS");
+        output.transforms.emplace_back(transforms.bytes[entry], read_u16(transforms.bytes, entry + 1));
     }
     output.textures.reserve(texture_count);
     for (std::size_t index = 0; index < texture_count; ++index)

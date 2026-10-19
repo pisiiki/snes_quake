@@ -1,90 +1,4 @@
-; Quake sky marker sampler and post-opaque compositor.
-
-.segment "GSU_TURBULENCE_HOT_CODE"
-
-; The face-selected route arrives with signed absolute Q4 S/T in R5/R6.
-; Turbulent surfaces apply Quake's crossed-axis 128-step warp from RAM, sample
-; their guaranteed single-bank 64x64 level zero, and bypass light colormaps.
-; This complete sampler fits the reserved tail of the bank-$70 reciprocal
-; mirror, eliminating the former ROM-bank round trip for every liquid pixel.
-TurbulenceSamplerHot:
-        ; R2 and R7 remain live across every ordinary sampler call.  Resolve
-        ; T's displacement first and retain only that byte in volatile R12,
-        ; leaving the caller-live sampler ABI intact.  The phase-adjusted base
-        ; points into two adjacent copies, so the 7-bit coordinate wraps with
-        ; no per-pixel phase addition.
-        move    R1, R5
-  .repeat BSP_TURBULENCE_COORD_FRACTION_BITS
-        with    R1
-        lsr
-  .endrepeat
-        move    R4, #(BSP_TURBULENCE_CYCLE-1)
-        with    R1
-        and     R4
-        lm      R4, (GSU_TURBULENCE_TABLE_BASE_OFFSET)
-        with    R4
-        add     R1
-        move    R12, #0
-        moveb   R12, (R4)
-
-        ; Resolve S's displacement second. Reloading the phase-adjusted base is
-        ; cheaper than spilling a caller-live register and preserves every
-        ; direct lightmap, distance, and albedo span ABI.
-        move    R1, R6
-  .repeat BSP_TURBULENCE_COORD_FRACTION_BITS
-        with    R1
-        lsr
-  .endrepeat
-        move    R4, #(BSP_TURBULENCE_CYCLE-1)
-        with    R1
-        and     R4
-        lm      R4, (GSU_TURBULENCE_TABLE_BASE_OFFSET)
-        with    R4
-        add     R1
-        move    R0, #0
-        moveb   R0, (R4)
-        with    R5
-        add     R0
-  .repeat BSP_TURBULENCE_COORD_FRACTION_BITS
-        with    R5
-        lsr
-  .endrepeat
-        move    R1, #(BSP_TURBULENCE_TEXTURE_SIZE-1)
-        with    R5
-        and     R1
-
-        with    R6
-        add     R12
-  .repeat BSP_TURBULENCE_COORD_FRACTION_BITS
-        with    R6
-        lsr
-  .endrepeat
-        with    R6
-        and     R1
-        move    R1, #BSP_TURBULENCE_TEXTURE_SIZE
-        with    R6
-        umult   R1
-        with    R6
-        add     R5
-        lm      R4, (TEXTURE_ROM_ADDRESS)
-        with    R4
-        add     R6
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        to      R0
-        getb
-
-        lm      R12, (TEXTURE_TURBULENCE_EXIT)
-        iwt     R4, #GSU_TURBULENCE_PRESENT_OFFSET
-        from    R12
-        jmp     R12
-        ; Store R12's nonzero return address while the sampled color stays in
-        ; R0. FROM survives JMP and selects STW's source in the delay slot.
-        stw     (R4)
-TurbulenceAlbedoReturnHot:
-        jmp     R11
-        nop
-
-.assert * - __GSU_TURBULENCE_HOT_CODE_RUN__ <= GSU_TURBULENCE_HOT_CODE_CAPACITY, error, "Turbulence sampler exceeds the reciprocal-mirror tail"
+; Bank-$70 liquid sampler is emitted late in DynamicBrushCachedSpan.sgs.
 
 .segment "GSU_SKY_ROM_CODE"
 
@@ -118,13 +32,14 @@ SkyMarkerSamplerROM:
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_BYTE R7
 
-        ; TEXTURE_PLOT_Y uses the tiled PLOT permutation. Recover logical Y so
-        ; the cold compositor can bound its row scan without another table.
+        ; Invert this renderer's PLOT permutation before bounding the logical
+        ; sky rows. X3 uses 3*y mod 8, whose inverse is also 3*y mod 8.
         lm      R2, (TEXTURE_PLOT_Y)
         move    R0, R2
         with    R0
         and     #7
         move    R1, R0
+.if BSP_RENDER_SCALE = 2
         with    R1
         and     #1
         beq     @MappedRowEven
@@ -136,6 +51,14 @@ SkyMarkerSamplerROM:
 @MappedRowEven:
         with    R0
         lsr
+.else
+        with    R0
+        add     R0
+        with    R0
+        add     R1
+        with    R0
+        and     #7
+.endif
         iwt     R1, #$FFF8
         with    R2
         and     R1
@@ -302,7 +225,9 @@ SKY_TEXTURE_BANK             = SKY_STATE + $8C
 SKY_TEXTURE_ADDRESS          = SKY_STATE + $8E
 SKY_RUN_RETURN               = SKY_STATE + $90
 SKY_STEP_RETURN              = SKY_STATE + $92
-SKY_STATE_END                = SKY_STATE + $94
+SKY_FOCAL_PITCH_COS          = SKY_STATE + $94
+SKY_FOCAL_PITCH_SIN          = SKY_STATE + $96
+SKY_STATE_END                = SKY_STATE + $98
 
 .assert SKY_STATE_END <= GSU_SIN_OFFSET, error, "Sky compositor scratch reaches live trigonometry tables"
 .assert BSP_SKY_RAY_PRESERVE_EXACT_NUMERATORS = 1, error, "Sky projection may not truncate Q6 ray numerators"
@@ -323,10 +248,9 @@ SKY_STATE_END                = SKY_STATE + $94
   .assert BSP_WORLD_SKY_TEXTURE_ID < BSP_WORLD_TEXTURE_COUNT, error, "Sky texture ID escapes the world directory"
 .endif
 
-; Only the generated 256x128 sky and flagged turbulent textures reach this
-; cold selector in the pinned map. Technique 7 shares lightmap render mode one
-; with technique 4, but its collapsed colormap must consume the ordinary static
-; lightmap sample even on fullbright materials. The composed-surface admission
+; Non-square and special materials reach this cold selector. Technique 7 shares
+; lightmap render mode one with technique 4. Its collapsed colormap must consume
+; the ordinary static lightmap sample even on fullbright materials. The admission
 ; word distinguishes those two modes without taxing the hot span loop.
 SkySelectSampleRoutineROM:
         lm      R0, (TEXTURE_RENDER_MODE)
@@ -354,7 +278,7 @@ SkySelectSampleRoutineROM:
         bra     @TurbulenceLightmap
         nop
 @TurbulenceLightmap:
-        iwt     R1, #TextureLightmapSkyPlotReady
+        iwt     R1, #TurbulenceLightmapPlot
         bra     @TurbulenceExitReady
         nop
 @TurbulenceAlbedo:
@@ -367,8 +291,8 @@ SkySelectSampleRoutineROM:
         ; sampler.  The ordinary specialized loops call the static sampler
         ; directly, so leaving even one in this table produces a mixed static
         ; and warped surface.  Point all six routes at the bank-$70 sampler;
-        ; its RAM body samples and then returns straight to the fullbright plot
-        ; tail without paying the generic sampler/lightmap dispatch.
+        ; its RAM body and fullbright plot tail share one cache window without
+        ; paying the generic sampler/lightmap dispatch.
         sm      (TEXTURE_STEP_S), R1
         sm      (TEXTURE_STEP_T), R1
         sm      (TEXTURE_REM_S), R1
@@ -409,6 +333,51 @@ SkySelectSampleRoutineROM:
         iwt     R1, #TexturePrimeLightmapCache
         sm      (TEXTURE_SAMPLE_ROUTINE), R1
 @Return:
+        ; Mixed ordinary axes retain the generic block routes. Resolve their
+        ; invariant S-wrap/width/bank checks once per face, after sky and water
+        ; have selected their samplers. Both-power-of-two axes keep two masks.
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        bne     @SamplerReady
+        nop
+        lm      R0, (GSU_TEXTURE_COMPOSED_ALLOWED_OFFSET)
+        moves   R0, R0
+        beq     @SamplerReady
+        nop
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #TextureSampleAbsoluteRegisters
+        with    R0
+        cmp     R1
+        bne     @SamplerReady
+        nop
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        move    R1, #BSP_WORLD_TEXTURE_FLAG_SINGLE_BANK
+        with    R0
+        cmp     R1
+        bne     @SamplerReady
+        nop
+        lm      R0, (TEXTURE_WIDTH)
+        moves   R0, R0
+        beq     @SamplerReady
+        nop
+        iwt     R1, #256
+        with    R0
+        cmp     R1
+        bcs     @SamplerReady
+        nop
+        move    R1, R0
+        dec     R1
+        with    R0
+        and     R1
+        bne     @SamplerReady
+        nop
+        iwt     R1, #T4TextureSampleMixedPowerOfTwoSingleBank
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        ; Only the proven-interior world block uses this direct lightmap
+        ; continuation. Checked and cached-cell classes keep generic routes.
+        iwt     R1, #T4MixedInteriorSpanLoop
+        sm      (TEXTURE_ERR_T), R1
+@SamplerReady:
         iwt     R8, #TextureSelectSampleRoutineDone
         move    R9, #$70
         from    R8
@@ -480,6 +449,39 @@ SkyReturnToBank70:
 SkyCompositor:
         move    R0, #1
         ramb
+.if BSP_RENDER_SCALE = 3
+        ; Focal products are assembled for every possible quantized pitch.
+        ; Select once, then use the same two forward terms for every sky ray.
+        iwt     R8, #.loword(SkyFocalNormal)
+        lm      R0, (COMMAND+10)
+        moves   R0, R0
+        bpl     @OrdinaryFocal
+        nop
+        iwt     R8, #.loword(SkyFocalOverscan)
+@OrdinaryFocal:
+        move    R0, #2
+        romb
+        .repeat 2, axis
+          .if axis = 0
+            lm  R0, (PITCH_COS)
+          .else
+            lm  R0, (PITCH_SIN)
+          .endif
+          iwt   R1, #64
+          with  R0
+          add   R1
+          add   R0
+          move  R4, R8
+          with  R4
+          add   R0
+          GSU_SET_ROM_BUFFER_ADDRESS R4
+          getb
+          inc   R4
+          GSU_SET_ROM_BUFFER_ADDRESS R4
+          getbh
+          sm    (SKY_FOCAL_PITCH_COS+axis*2), R0
+        .endrepeat
+.endif
 
         ; Stage the immutable low23 phase into aligned scratch words.
         lm      R0, (GSU_SKY_PHASE_OFFSET)
@@ -521,7 +523,7 @@ SkyCompositor:
 
 @ScanPixel:
         lm      R0, (SKY_SCAN_X)
-        iwt     R1, #BSP_LOGICAL_WIDTH
+        iwt     R1, #BSP_VIEW_WIDTH
         with    R0
         cmp     R1
         bne     @ScanPixelPresent
@@ -608,7 +610,7 @@ SkyCompositor:
 
 @ExtendRun:
         lm      R0, (SKY_SCAN_X)
-        iwt     R1, #BSP_LOGICAL_WIDTH
+        iwt     R1, #BSP_VIEW_WIDTH
         with    R0
         cmp     R1
         beq     @RunAtRightEdge
@@ -632,7 +634,7 @@ SkyCompositor:
         GSU_ABSOLUTE_GOTO @ExtendRun
 
 @RunAtRightEdge:
-        move    R0, #BSP_LOGICAL_WIDTH-1
+        move    R0, #BSP_VIEW_WIDTH-1
         sm      (SKY_RUN_END), R0
         jal     SkyProcessRun
         nop
@@ -680,21 +682,46 @@ SkyCompositorDone:
 ; outputs are three signed 32-bit numerators in scratch.
 SkyBuildRayNumerators:
         sm      (SKY_RAY_RETURN), R11
+.if BSP_RENDER_SCALE = 3
         move    R2, R0
-        move    R3, #64
+        with    R0
+        add     R0
+        with    R0
+        add     R2
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2
+.endif
+        move    R2, R0
+.if BSP_RENDER_SCALE = 3
+        ; X3's center is 129. MOVE chooses sign-extending IBT for a byte-sized
+        ; immediate, which would turn this positive center into -127.
+        iwt     R3, #BSP_VIEW_CENTER_X * (2 * BSP_RENDER_SCALE - 3)
+.else
+        move    R3, #BSP_VIEW_CENTER_X * (2 * BSP_RENDER_SCALE - 3)
+.endif
         with    R2
         sub     R3
         sm      (SKY_DU), R2
-        move    R2, #56
+        move    R2, #BSP_VIEW_CENTER_Y * (2 * BSP_RENDER_SCALE - 3)
         with    R2
         sub     R1
         sm      (SKY_DV), R2
 
         ; Nx = 64*pc*yc - 64*du*ys - dv*ps*yc.
+.if BSP_RENDER_SCALE = 3
+        lm      R0, (SKY_FOCAL_PITCH_COS)
+        lm      R6, (YAW_COS)
+        with    R0
+        lmult
+.else
         lm      R0, (PITCH_COS)
         lm      R6, (YAW_COS)
         jal     SkyMultiplyScale64
         nop
+.endif
         sm      (SKY_NX_LO), R4
         sm      (SKY_NX_HI), R0
         lm      R0, (SKY_DU)
@@ -727,10 +754,17 @@ SkyBuildRayNumerators:
         sm      (SKY_NX_HI), R2
 
         ; Ny = 64*pc*ys + 64*du*yc - dv*ps*ys.
+.if BSP_RENDER_SCALE = 3
+        lm      R0, (SKY_FOCAL_PITCH_COS)
+        lm      R6, (YAW_SIN)
+        with    R0
+        lmult
+.else
         lm      R0, (PITCH_COS)
         lm      R6, (YAW_SIN)
         jal     SkyMultiplyScale64
         nop
+.endif
         sm      (SKY_NY_LO), R4
         sm      (SKY_NY_HI), R0
         lm      R0, (SKY_DU)
@@ -769,10 +803,17 @@ SkyBuildRayNumerators:
         lmult
         move    R1, R4
         move    R2, R0
+.if BSP_RENDER_SCALE = 3
+        lm      R0, (SKY_FOCAL_PITCH_SIN)
+        move    R6, #1
+        with    R0
+        lmult
+.else
         lm      R0, (PITCH_SIN)
         move    R6, #1
         jal     SkyMultiplyScale64
         nop
+.endif
         with    R1
         add     R4
         with    R2
@@ -919,10 +960,9 @@ SkyAccumulateSignedComponent:
         ret
         nop
 
-; Exact base-4 restoring square root of SUM[47:0]. A conservative bound over
-; every admitted fly yaw/pitch and screen endpoint is below 2^42, so consume
-; its top digit (bits 41..40) explicitly and iterate over the remaining 20.
-; This preserves a 21-bit floor root even though the generated corpus is 20b.
+; Exact base-4 restoring square root of SUM[47:0].
+; X2 rays fit 42 bits; X3's scaled rays require 43 bits and a 22-bit root.
+; Consume SUM>>40 explicitly, then iterate over the remaining 20 digits.
 ; The loop leaves the exact remainder SUM-root^2, allowing the accepted 3/4
 ; magnitude threshold to round without another square:
 ;   round up iff remainder >= root + ceil(root/2) + 1.
@@ -936,13 +976,17 @@ SkyFloorIsqrt48:
         move    R2, R4
         move    R3, R5
 
-        ; Consume the first base-4 digit exactly. For p in 1..3 the first
-        ; restoring step yields root=1 and remainder=p-1.
+        ; Seed floor(sqrt(p)) and p-root^2. X2 admits p=0..3; X3 admits
+        ; p=0..7, including p>=4 where the initial root is two, not one.
         move    R8, R6
         with    R8
         hib
         with    R8
+.if BSP_RENDER_SCALE = 3
+        and     #7
+.else
         and     #3
+.endif
         move    R9, #0
         move    R12, #0
         move    R13, #0
@@ -950,11 +994,22 @@ SkyFloorIsqrt48:
         beq     @TopDigitReady
         nop
         move    R12, #1
+.if BSP_RENDER_SCALE = 3
+        move    R0, R8
+        with    R0
+        and     #4
+        beq     @TopRootOne
+        nop
+        move    R12, #2
+        with    R8
+        sub     #3
+@TopRootOne:
+.endif
         dec     R8
 @TopDigitReady:
 
         ; Shift the low 40 bits left by one byte without paying eight serial
-        ; multiword shifts. Bits 47..42 are zero by the all-camera bound.
+        ; multiword shifts. The high digit was consumed above.
         with    R4
         lob
         with    R4
@@ -1070,34 +1125,30 @@ SkyFloorIsqrt48:
         nop
 
 ; Unsigned restoring NUMERATOR[47:0] / DENOMINATOR[31:0]. The audited result
-; fits 32 bits; the leading quotient shifts are therefore exact no-ops.
+; fits 32 bits, so the high numerator word is strictly below the denominator.
+; Seed that word as the remainder: the first 16 restoring steps cannot
+; subtract or set a quotient bit. Consume only the remaining low 32 bits.
+; R5:R4 holds the unconsumed numerator followed by the quotient bits already
+; produced. Each shift frees bit zero for the next quotient bit; after step
+; 32 no numerator bits remain. This saves a separate two-word quotient shift.
 SkyUnsignedDivide48By32:
         sm      (SKY_DIVIDE_RETURN), R11
         lm      R4, (SKY_NUMERATOR_LO)
         lm      R5, (SKY_NUMERATOR_MID)
-        lm      R6, (SKY_NUMERATOR_HI)
+        lm      R8, (SKY_NUMERATOR_HI)
         lm      R2, (SKY_DENOMINATOR_LO)
         lm      R3, (SKY_DENOMINATOR_HI)
-        move    R8, #0
         move    R9, #0
-        move    R12, #0
-        move    R13, #0
-        move    R7, #48
+        move    R7, #32
 @DivideLoop:
         with    R4
         add     R4
         with    R5
         adc     R5
-        with    R6
-        adc     R6
         with    R8
         rol
         with    R9
         rol
-        with    R12
-        add     R12
-        with    R13
-        adc     R13
 
         move    R0, R9
         with    R0
@@ -1116,16 +1167,19 @@ SkyUnsignedDivide48By32:
         sub     R2
         with    R9
         sbc     R3
-        inc     R12
+        inc     R4
 @DivideNext:
         dec     R7
         bne     @DivideLoop
         nop
-        sm      (SKY_QUOTIENT_LO), R12
-        sm      (SKY_QUOTIENT_HI), R13
+        sm      (SKY_QUOTIENT_LO), R4
+        sm      (SKY_QUOTIENT_HI), R5
         lm      R11, (SKY_DIVIDE_RETURN)
         ret
         nop
+
+        ; Preserve the following sky/brush code's measured instruction alignment.
+        .res 95 - (* - SkyUnsignedDivide48By32), $01
 
 ; Build abs(378*N)<<16 and divide by the floor magnitude, restoring N's sign.
 SkySignedQuotient:
@@ -1593,6 +1647,16 @@ SkyPlotSample:
         ret
         nop
 
+.if BSP_RENDER_SCALE = 3
+SkyFocalNormal:
+        .repeat 129, value
+          .word .loword((value-64)*128)
+        .endrepeat
+SkyFocalOverscan:
+        .repeat 129, value
+          .word .loword((value-64)*BSP_WARP_SOURCE_FOCAL*2)
+        .endrepeat
+.endif
 SkyRomCodeEnd:
 .assert ^SkyRomCodeStart = $82, lderror, "Sky compositor left GSU ROM bank $02"
 .assert ^(SkyRomCodeEnd-1) = $82, lderror, "Sky compositor crosses its executable ROM bank"

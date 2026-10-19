@@ -1,0 +1,36 @@
+; Finish one brush-mask sample in RAM, beside its existing Q12 helpers.
+; R0 is the clamped screen numerator; return the exact perspective depth in
+; R5. Combining the two helper calls avoids a ROM/RAM round trip per interior
+; sample and keeps the final signed interpolation out of the ROM pixel loop.
+; Preserve the trampoline's link across the nested calls in persistent mask
+; state. The denominator-zero, unity and rounding rules are unchanged.
+FlyBrushMaskDepth:
+        sm      (FLY_MASK_DEPTH_RETURN), R11
+        lm      R2, (BRUSH_ARBITER_SCREEN_DEN)
+        moves   R2, R2
+        bne     @DenominatorPresent
+        nop
+        move    R3, #0
+        bra     @FactorReady
+        nop
+@DenominatorPresent:
+        move    R4, R0
+        with    R4
+        sub     R2
+        bmi     @Divide
+        nop
+        iwt     R3, #4096
+        bra     @FactorReady
+        nop
+@Divide:
+        jal     TextureDivideQ12Prepared
+        nop
+@FactorReady:
+        jal     TexturePerspectiveFactorQ12
+        nop
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        lm      R11, (FLY_MASK_DEPTH_RETURN)
+        ret
+        nop

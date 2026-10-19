@@ -1,0 +1,146 @@
+; Bounds are cached only for the current frame. They reject disjoint polygons;
+; the shared clipped Q7 spans remain the authority for every occluding pixel.
+.macro FLY_WORLD_BOUNDS_ADDRESS
+        lm      R0, (FLY_MASK_LINK)
+        iwt     R1, #$7FFF
+        with    R0
+        and     R1
+        move    R1, R0
+        with    R0
+        add     R0
+        with    R0
+        add     R1
+        with    R0
+        add     R0
+        iwt     R10, #FLY_MASK_BOUNDS
+        with    R10
+        add     R0
+.endmacro
+
+FlyWorldMaskCheckBounds:
+        FLY_WORLD_BOUNDS_ADDRESS
+        movew   R0, (R10)
+        iwt     R1, #$FFFF
+        with    R0
+        cmp     R1
+        bne     FlyWorldBoundsCached
+        nop
+        GSU_ABSOLUTE_GOTO FlyWorldMaskCoarseBounds
+FlyWorldBoundsCached:
+        move    R3, R10
+        with    R3
+        add     #4
+        movew   R0, (R3)
+        lm      R1, (FLY_MASK_DEPTH)
+        with    R1
+        cmp     R0
+        FLY_SIGNED_BRANCH $07, FlyWorldBoundsMiss
+        nop
+        moveb   R0, (R10)
+        lob
+        lm      R1, (FLY_MASK_RECT_LAST_X)
+        with    R1
+        cmp     R0
+        FLY_SIGNED_BRANCH $07, FlyWorldBoundsMiss
+        nop
+        inc     R10
+        moveb   R0, (R10)
+        lob
+        lm      R1, (FLY_MASK_RECT_FIRST_X)
+        with    R0
+        cmp     R1
+        FLY_SIGNED_BRANCH $07, FlyWorldBoundsMiss
+        nop
+        inc     R10
+        moveb   R0, (R10)
+        lob
+        lm      R1, (FLY_MASK_RECT_LAST_Y)
+        with    R1
+        cmp     R0
+        FLY_SIGNED_BRANCH $07, FlyWorldBoundsMiss
+        nop
+        inc     R10
+        moveb   R0, (R10)
+        lob
+        lm      R1, (FLY_MASK_FIRST_Y)
+        with    R0
+        cmp     R1
+        FLY_SIGNED_BRANCH $07, FlyWorldBoundsMiss
+        nop
+FlyWorldBoundsOverlap:
+        move    R0, #1
+        ret
+        nop
+FlyWorldBoundsMiss:
+        move    R0, #0
+        ret
+        nop
+
+FlyWorldMaskStoreBounds:
+        move    R8, R0
+        FLY_WORLD_BOUNDS_ADDRESS
+        moves   R8, R8
+        bne     FlyWorldBoundsPolygon
+        nop
+        ; An empty polygon's inverted X interval rejects every visible alias.
+        iwt     R0, #$00FF
+        movew   (R10), R0
+        bra     FlyWorldBoundsStored
+        nop
+FlyWorldBoundsPolygon:
+        iwt     R3, #32767
+        iwt     R4, #-32768
+        iwt     R9, #TEXTURE_SCREEN
+        lm      R12, (CONVEX_SCREEN_COUNT)
+        iwt     R13, #FlyWorldBoundsVertex
+FlyWorldBoundsVertex:
+        movew   R0, (R9)
+        with    R0
+        cmp     R3
+        FLY_SIGNED_BRANCH $06, FlyWorldBoundsMinReady
+        nop
+        move    R3, R0
+FlyWorldBoundsMinReady:
+        with    R0
+        cmp     R4
+        FLY_SIGNED_BRANCH $07, FlyWorldBoundsMaxReady
+        nop
+        move    R4, R0
+FlyWorldBoundsMaxReady:
+        with    R9
+        add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
+        loop
+        nop
+  .repeat 7
+        with    R3
+        asr
+        with    R4
+        asr
+  .endrepeat
+        ; Conservative bounds only; no pixel is written by this rounding.
+        inc     R4
+        moves   R3, R3
+        bpl     FlyWorldBoundsLeftReady
+        nop
+        move    R3, #0
+FlyWorldBoundsLeftReady:
+        iwt     R1, #BSP_VIEW_WIDTH-1
+        with    R4
+        cmp     R1
+        FLY_SIGNED_BRANCH $07, FlyWorldBoundsRightReady
+        nop
+        move    R4, R1
+FlyWorldBoundsRightReady:
+        moveb   (R10), R3
+        inc     R10
+        moveb   (R10), R4
+        inc     R10
+        lm      R0, (CONVEX_RASTER_Y)
+        moveb   (R10), R0
+        inc     R10
+        lm      R0, (CONVEX_TOP_PTR)
+        moveb   (R10), R0
+FlyWorldBoundsStored:
+        move    R0, R8
+        ret
+        nop

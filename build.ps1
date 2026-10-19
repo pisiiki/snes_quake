@@ -18,8 +18,8 @@ if (Test-Path (Join-Path $PSScriptRoot ".git")) {
 & git -C $libSfx submodule update --init tools/cc65
 if ($LASTEXITCODE -ne 0) { throw "could not initialize the pinned cc65 source" }
 
-$releaseTool = Join-Path $PSScriptRoot "tools/commands/snes_quake/build_quake_release.py"
-& $Python $releaseTool --release-root $PSScriptRoot --preflight
+$releaseTool = Join-Path $PSScriptRoot "tools/snes_tooling_cli.py"
+& $Python $releaseTool quake.build-quake-release --release-root $PSScriptRoot --preflight
 if ($LASTEXITCODE -ne 0) { throw "SNES Quake release preflight failed" }
 
 $ca65 = Join-Path $libSfx "tools/cc65/bin/ca65.exe"
@@ -54,7 +54,7 @@ if (-not (Test-Path $ca65) -or -not (Test-Path $ld65)) {
     throw "pinned cc65 build did not provide ca65.exe and ld65.exe"
 }
 
-$arguments = @($releaseTool, "--release-root", $PSScriptRoot)
+$arguments = @($releaseTool, "quake.build-quake-release", "--release-root", $PSScriptRoot)
 if ($Check) { $arguments += "--check" }
 if ($AssetsOnly) { $arguments += "--assets-only" }
 if ($QualifiedAssets) { $arguments += "--qualified-assets" }

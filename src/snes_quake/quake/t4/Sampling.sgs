@@ -27,9 +27,9 @@ T4TextureLightmapSelectBlockRoutine:
         ; Four out of five prepared blocks are proven interior. Publish their
         ; direct route without indexing the six-entry general dispatch table.
         move    R0, #5
-        ; Mixed-axis faces publish a generic interior route in the same slot,
-        ; while square power-of-two faces publish the direct route. Load that
-        ; face-specific slot without rebuilding its table address per block.
+        ; Mixed-axis and square power-of-two faces publish their respective
+        ; interior continuations in this slot. Load the face-specific route
+        ; without rebuilding its table address per block.
         lm      R13, (TEXTURE_ERR_T)
         bra     T4TextureLightmapBlockRoutineReady
         nop
@@ -255,6 +255,138 @@ T4TextureStageLightmapSwapLoop:
         bne     T4TextureStageLightmapSwapLoop
         nop
         GSU_ABSOLUTE_GOTO T4TextureStageLightmapAdvance
+
+; Face admission proves S is power-of-two and the ordinary texture fits
+; one ROM bank. Keep exact signed T correction while retaining the caller's
+; lightmap cache; R8/R9 coordinates and R7/R10/R11/R13 stay live across sampling.
+T4TextureSampleMixedPowerOfTwoSingleBank:
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+        with    R5
+        and     R1
+        ; T correction never changes R1. One height load covers both loops,
+        ; including signed coordinates that require repeated wrapping.
+        lm      R1, (TEXTURE_HEIGHT_Q4)
+T4TextureSampleMixedTNegative:
+        moves   R6, R6
+        bpl     T4TextureSampleMixedTHigh
+        nop
+        with    R6
+        add     R1
+        bra     T4TextureSampleMixedTNegative
+        nop
+T4TextureSampleMixedTHigh:
+        move    R0, R6
+        with    R0
+        sub     R1
+        bmi     T4TextureSampleMixedTDone
+        nop
+        move    R6, R0
+        bra     T4TextureSampleMixedTHigh
+        nop
+T4TextureSampleMixedTDone:
+        ; Only the final shift writes the caller's coordinate register.
+        ; Each ordinary LSR resets its prefixes and continues through R0.
+        from    R5
+        lsr
+        lsr
+        lsr
+        to      R5
+        lsr
+        from    R6
+        lsr
+        lsr
+        lsr
+        to      R6
+        lsr
+        lm      R1, (TEXTURE_WIDTH)
+        from    R6
+        umult   R1
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        add     R4
+        GSU_SET_ROM_BUFFER_ADDRESS R0
+        BSP_ROM_LOAD_BYTE R0
+        ret
+        nop
+  .repeat 3
+        nop
+  .endrepeat
+T4TextureSampleMixedEnd:
+.assert .loword(T4TextureSampleMixedPowerOfTwoSingleBank) = $F93B, lderror, "Mixed sampler moved away from the auxiliary prefix"
+.assert T4TextureSampleMixedEnd - T4TextureSampleMixedPowerOfTwoSingleBank = 64, error, "Mixed sampler changed its bounded footprint"
+
+; Face admission published this route only for mixed ordinary axes. Negative
+; FAST already proves the full world block stays within the lightmap bounds;
+; T4 block setup initialized R7 to the existing texel-to-plot continuation.
+T4MixedInteriorSpanLoop:
+.assert .loword(T4MixedInteriorSpanLoop) = $F97B, lderror, "Mixed interior continuation moved away from the auxiliary sampler"
+        move    R8, R5
+        move    R9, R6
+        jal     T4TextureSampleMixedPowerOfTwoSingleBank
+        move    R12, R0
+        GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect, shared_delay
+        with    R8
+
+; Only T4 faces too tall for the existing 92-row arena enter this lifecycle.
+; Replaying a chunk consumes the endpoint stream before the next is staged,
+; so the existing fixed arenas and exact per-row interpolation stay intact.
+T4LightmapChunkBegin:
+        lm      R1, (CONVEX_TOP_PTR)
+        sm      (T4_LIGHTMAP_CHUNK_FINAL_Y), R1
+        move    R0, #1
+        sm      (T4_LIGHTMAP_CHUNK_ACTIVE), R0
+        GSU_ABSOLUTE_GOTO T4LightmapChunkSetTop
+T4LightmapChunkSetTop:
+        lm      R0, (CONVEX_RASTER_Y)
+        iwt     R1, #GSU_LIGHTMAP_TALL_CHUNK_ROWS-1
+        with    R0
+        add     R1
+        lm      R1, (T4_LIGHTMAP_CHUNK_FINAL_Y)
+        cmp     R1
+        bcc     T4LightmapChunkTopReady
+        nop
+        move    R0, R1
+T4LightmapChunkTopReady:
+        sm      (CONVEX_TOP_PTR), R0
+        GSU_ABSOLUTE_GOTO T4LightmapStageBegin
+T4LightmapChunkResume:
+        lm      R0, (T4_LIGHTMAP_CHUNK_ACTIVE)
+        moves   R0, R0
+        bne     T4LightmapChunkActive
+        nop
+        GSU_ABSOLUTE_GOTO T4LightmapRasterReturn
+T4LightmapChunkActive:
+        ; ReplayNext advanced Y exactly once beyond the last staged row.
+        lm      R0, (CONVEX_RASTER_Y)
+        lm      R1, (T4_LIGHTMAP_CHUNK_FINAL_Y)
+        cmp     R1
+        bcc     T4LightmapChunkMore
+        nop
+        beq     T4LightmapChunkMore
+        nop
+        sm      (CONVEX_TOP_PTR), R1
+        move    R0, #0
+        sm      (T4_LIGHTMAP_CHUNK_ACTIVE), R0
+        GSU_ABSOLUTE_GOTO T4LightmapRasterReturn
+T4LightmapChunkMore:
+        lm      R0, (T4_LIGHTMAP_CHUNK_FORWARD_PTR)
+        sm      (CONVEX_FORWARD_PTR), R0
+        lm      R0, (T4_LIGHTMAP_CHUNK_REVERSE_PTR)
+        sm      (CONVEX_REVERSE_PTR), R0
+        GSU_ABSOLUTE_GOTO T4LightmapChunkSetTop
+T4LightmapChunkAbort:
+        ; A zero raw-row count or invalid handler already terminated the old
+        ; whole-face path. Restore temporary bounds without retrying a chunk.
+        lm      R0, (T4_LIGHTMAP_CHUNK_ACTIVE)
+        moves   R0, R0
+        beq     T4LightmapChunkAbortReturn
+        nop
+        lm      R1, (T4_LIGHTMAP_CHUNK_FINAL_Y)
+        sm      (CONVEX_TOP_PTR), R1
+        move    R0, #0
+        sm      (T4_LIGHTMAP_CHUNK_ACTIVE), R0
+T4LightmapChunkAbortReturn:
+        GSU_ABSOLUTE_GOTO T4LightmapRasterReturn
 
 .assert .loword(T4TextureSelectPowerOfTwoStateReady) = GSU_T4_SAMPLE_AUX_OFFSET, error, "Technique-4 sampler auxiliaries moved away from their overlay window"
 .assert * - T4TextureSelectPowerOfTwoStateReady <= GSU_T4_SAMPLE_AUX_CAPACITY, error, "Technique-4 sampler auxiliaries exceed the projective-albedo span window"

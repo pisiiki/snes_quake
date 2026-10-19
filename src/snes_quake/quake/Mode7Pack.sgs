@@ -1,0 +1,301 @@
+; Convert completed swizzled 8bpp PLOT tiles to compact Mode 7 patterns.
+; Run from unused source rows 96+; the fixed renderer overlays stay identical.
+; Source tiles have stride 16, destination stride 11. Ascending order plus a
+; complete 64-byte scratch tile makes the in-place conversion overlap-safe.
+.segment "MODE7_PACK_CODE"
+.export Mode7PackFrame
+GSU_MODE7_PACK_STATE = GSU_MODE7_PACK_SCRATCH+64
+.assert GSU_MODE7_PACK_STATE+6 <= GSU_TEXTURE_VISIBLE_BYTES, error, "Mode 7 state overlaps renderer code"
+GSU_CACHE_KERNEL_BEGIN Mode7PackFrame
+        move    R0, #0
+        ramb
+        move    R0, #$11                ; Same row-major OBJ layout as PLOT.
+        cmode
+        move    R5, #0                  ; Tile X, in pixels.
+        move    R6, #0                  ; Tile Y, in pixels.
+        move    R7, #0                  ; Compact output address.
+        move    R11, R4                ; Preserve the palette's opaque black.
+        move    R1, #0
+        move    R2, #0
+        rpix                           ; Flush PLOT before direct planar reads.
+@Tile:
+        sm      (GSU_MODE7_PACK_STATE+0), R5
+        sm      (GSU_MODE7_PACK_STATE+2), R6
+        sm      (GSU_MODE7_PACK_STATE+4), R7
+        move    R0, R6
+        swap
+        lsr
+        move    R9, R0
+        move    R0, R5
+        umult   #8
+        with    R9
+        add     R0
+        iwt     R10, #GSU_MODE7_PACK_SCRATCH-1
+; Each word holds two planes. Retain it and its byte swap so R1..R8
+; expose all eight plane bits through bit 15 without re-reading source RAM.
+@DecodeRow:
+        to      R2
+        ldw     (R9)
+        move    R1, R2
+        with    R1
+        swap
+        with    R9
+        add     #15
+        inc     R9
+        to      R4
+        ldw     (R9)
+        move    R3, R4
+        with    R3
+        swap
+        with    R9
+        add     #15
+        inc     R9
+        to      R6
+        ldw     (R9)
+        move    R5, R6
+        with    R5
+        swap
+        with    R9
+        add     #15
+        inc     R9
+        to      R8
+        ldw     (R9)
+        move    R7, R8
+        with    R7
+        swap
+        from    R1
+        or      R2
+        or      R3
+        or      R4
+        or      R5
+        or      R6
+        or      R7
+        or      R8
+        bne     @DecodeNonblack
+        nop
+        move    R0, R11
+        swap
+        or      R11
+        inc     R10
+  .repeat 4, word
+        stw     (R10)
+        inc     R10
+    .if word < 3
+        inc     R10
+    .endif
+  .endrepeat
+        bra     @RowDone
+        nop
+@DecodeNonblack:
+        move    R12, #8
+        iwt     R13, #.loword(@DecodePixel)
+; Shift planes 7..0 into the low output byte. Each ADD supplies carry
+; to ROL; LOB discards the previous pixel and supplies the black-test flag.
+@DecodePixel:
+        with    R8
+        add     R8
+        rol
+        with    R7
+        add     R7
+        rol
+        with    R6
+        add     R6
+        rol
+        with    R5
+        add     R5
+        rol
+        with    R4
+        add     R4
+        rol
+        with    R3
+        add     R3
+        rol
+        with    R2
+        add     R2
+        rol
+        with    R1
+        add     R1
+        rol
+        lob
+        bne     :+
+        inc     R10
+        move    R0, R11
+:
+        stb     (R10)
+        loop
+        nop
+@RowDone:
+        iwt     R0, #GSU_MODE7_PACK_SCRATCH+63
+        cmp     R10
+        beq     @Decoded
+        nop
+        move    R8, #46
+        with    R9
+        sub     R8
+        iwt     R8, #.loword(@DecodeRow)
+        jmp     R8
+        nop
+@Decoded:
+        lm      R5, (GSU_MODE7_PACK_STATE+0)
+        lm      R6, (GSU_MODE7_PACK_STATE+2)
+        lm      R7, (GSU_MODE7_PACK_STATE+4)
+        move    R3, R7                 ; Destination tile for edge blanking.
+        move    R8, #0
+        move    R1, #24
+        move    R9, #63
+        move    R12, #8
+        iwt     R13, #.loword(@CopyRow)
+; Decode into ordinary row/column order, then apply the existing 3-mod-8
+; coordinate permutation while copying the complete tile to its destination.
+@CopyRow:
+        iwt     R10, #GSU_MODE7_PACK_SCRATCH
+        with    R10
+        add     R8
+        ldb     (R10)
+        stb     (R7)
+        inc     R7
+        with    R10
+        add     #3
+        ldb     (R10)
+        stb     (R7)
+        inc     R7
+        with    R10
+        add     #3
+        ldb     (R10)
+        stb     (R7)
+        inc     R7
+        with    R10
+        sub     #5
+        ldb     (R10)
+        stb     (R7)
+        inc     R7
+        with    R10
+        add     #3
+        ldb     (R10)
+        stb     (R7)
+        inc     R7
+        with    R10
+        add     #3
+        ldb     (R10)
+        stb     (R7)
+        inc     R7
+        with    R10
+        sub     #5
+        ldb     (R10)
+        stb     (R7)
+        inc     R7
+        with    R10
+        add     #3
+        ldb     (R10)
+        stb     (R7)
+        inc     R7
+        with    R8
+        add     R1
+        with    R8
+        and     R9
+        loop
+        nop
+        ; Blank destination padding after permutation. The whole source tile
+        ; has already been decoded, preserving ascending in-place safety.
+        iwt     R0, #80
+        cmp     R5
+        bne     @RightEdgeReady
+        nop
+        move    R10, R3
+        with    R10
+        add     #5
+        move    R12, #8
+        iwt     R13, #.loword(@BlankRight)
+        move    R0, #0
+@BlankRight:
+        stb     (R10)
+        inc     R10
+        stb     (R10)
+        inc     R10
+        stb     (R10)
+        with    R10
+        add     #6
+        loop
+        nop
+@RightEdgeReady:
+        iwt     R0, #72
+        cmp     R6
+        bne     @BottomEdgeReady
+        nop
+        move    R10, R3
+        with    R10
+        add     #15
+        inc     R10
+        move    R12, #24
+        iwt     R13, #.loword(@BlankBottom)
+        move    R0, #0
+@BlankBottom:
+        stw     (R10)
+        inc     R10
+        loop
+        inc     R10
+@BottomEdgeReady:
+        with    R5
+        add     #8
+        iwt     R0, #88
+        cmp     R5
+        beq     @NextTileRow
+        nop
+        iwt     R9, #.loword(@Tile)
+        jmp     R9
+        nop
+@NextTileRow:
+        move    R5, #0
+        with    R6
+        add     #8
+        iwt     R0, #80
+        cmp     R6
+        beq     @Done
+        nop
+        iwt     R9, #.loword(@Tile)
+        jmp     R9
+        nop
+@Done:
+        ; Packet reuse enters the next renderer directly. Its early mode and
+        ; Q12-route stores require the renderer completion ABI: RAMBR=1.
+        move    R0, #1
+        ramb
+        stop
+        nop
+GSU_CACHE_KERNEL_END Mode7PackFrame
+.assert .loword(Mode7PackFrame) = GSU_MODE7_PACK_CODE, lderror, "Mode 7 packer moved"
+
+; Define the 11x10 source tile rectangle before drawing. The five unused
+; columns in each 16-tile source row, resident code and scratch stay intact.
+; Transparent scene edges must not expose last frame's compact chunky bytes.
+.export Mode7ClearSource
+GSU_CACHE_KERNEL_BEGIN Mode7ClearSource
+        move    R0, #0
+        ramb
+        move    R1, #0
+        move    R2, #10
+        iwt     R3, #5*64
+@Row:
+        move    R12, #11*64/16
+        iwt     R13, #.loword(@Words)
+@Words:
+  .repeat 8
+        stw     (R1)
+        inc     R1
+        inc     R1
+  .endrepeat
+        loop
+        nop
+        with    R1
+        add     R3
+        dec     R2
+        bne     @Row
+        nop
+        ; Match renderer-entry RAM ownership after the initialization job.
+        move    R0, #1
+        ramb
+        stop
+        nop
+GSU_CACHE_KERNEL_END Mode7ClearSource
+.assert 10*16*64 <= GSU_MODE7_PACK_CODE, error, "Mode 7 source overlaps resident code"
+.assert * - Mode7PackFrame <= GSU_MODE7_PACK_SCRATCH-GSU_MODE7_PACK_CODE, error, "Mode 7 packer overlaps scratch"

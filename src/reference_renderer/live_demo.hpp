@@ -1,6 +1,9 @@
 #pragma once
 
 #include "world.hpp"
+#include "presentation_warp.hpp"
+#include <future>
+#include <tuple>
 #include "geometry.hpp"
 #include "instrumentation.hpp"
 #include "brushes.hpp"
@@ -8,6 +11,7 @@
 #include "external_models.hpp"
 #include "aliases.hpp"
 #include "textured_live.hpp"
+#include "particles.hpp"
 
 namespace quake_bsp_reference {
 
@@ -19,8 +23,8 @@ struct LiveDemoConfiguration
     PlaybackSpeed initial_playback_speed{PlaybackSpeed::Realtime};
     bool playback_speed_control{};
     PlaybackSchedule playback_schedule{PlaybackSchedule::NewestDue};
-    int initial_presentation_rate_hz{2};
-    int ordered_source_rate_hz{20};
+    int initial_presentation_rate_hz{3};
+    int ordered_source_rate_hz{30};
     ReferenceInstrumentationConfig instrumentation_config;
     const QuakeSoundAssets* sound_assets{};
     bool initial_sound_enabled{};
@@ -29,9 +33,14 @@ struct LiveDemoConfiguration
     bool brush_control{};
     bool entity_control{};
     bool external_bsp_model_control{};
+    bool particle_control{};
     bool initial_brushes{};
     bool initial_entities{};
     bool initial_external_bsp_models{};
+    bool initial_particles{};
+    std::function<ViewTransform(std::size_t)> camera_at_pose{};
+    bool scene_pose_control{};
+    std::function<void(std::optional<SourceCamera>)> capture_camera_setter{};
 };
 
 template <typename CameraType>
@@ -49,16 +58,16 @@ void validate_live_demo(
     {
         fail("demo track has too many poses for the playback slider");
     }
-    if (configuration.initial_presentation_rate_hz != 2 && configuration.initial_presentation_rate_hz != 20)
+    if (configuration.initial_presentation_rate_hz != 3 && configuration.initial_presentation_rate_hz != 30)
     {
-        fail("ordered playback rate must be 2 or 20 Hz");
+        fail("ordered playback rate must be 3 or 30 Hz");
     }
     if (configuration.playback_schedule != PlaybackSchedule::NewestDue &&
         (configuration.ordered_source_rate_hz < configuration.initial_presentation_rate_hz ||
          configuration.ordered_source_rate_hz % configuration.initial_presentation_rate_hz != 0 ||
-         configuration.ordered_source_rate_hz % 2 != 0 || configuration.ordered_source_rate_hz % 20 != 0))
+         configuration.ordered_source_rate_hz % 3 != 0 || configuration.ordered_source_rate_hz % 30 != 0))
     {
-        fail("ordered playback source rate must support exact 2 and 20 Hz strides");
+        fail("ordered playback source rate must support exact 3 and 30 Hz strides");
     }
     if (!is_supported_render_mode(configuration.initial_mode) || configuration.initial_legacy_material ||
         configuration.legacy_material_control)
@@ -124,11 +133,15 @@ class LiveDemoSession
     void initialize_state()
     {
         state_.mode = configuration_.initial_mode;
+        state_.scale = active_render_scale;
+        warp_settings_ = active_warp_settings;
         state_.legacy_material = configuration_.initial_legacy_material;
         state_.playback_speed = configuration_.initial_playback_speed;
         state_.brushes_enabled = configuration_.initial_brushes;
         state_.entities_enabled = configuration_.initial_entities;
         state_.external_bsp_models = configuration_.initial_external_bsp_models;
+        state_.particles_available = configuration_.particle_control;
+        state_.particles_enabled = state_.particles_available && configuration_.initial_particles;
         state_.sound_enabled = configuration_.initial_sound_enabled;
         state_.sound_volume = configuration_.initial_sound_volume;
         instrumentation_ =
@@ -149,33 +162,22 @@ class LiveDemoSession
         window_ = SDL_CreateWindow(
             initial_title.c_str(),
             kMinimumLiveClientWidth,
-            (kLogicalHeight * 4) + kPlaybackControlsHeight,
+            (kLogicalHeight * 4) + controls_height(),
             SDL_WINDOW_RESIZABLE
         );
         if (window_ == nullptr)
         {
             fail(std::string("cannot create SDL3 window: ") + SDL_GetError());
         }
-        SDL_SetWindowMinimumSize(window_, kMinimumLiveClientWidth, kLogicalHeight + kPlaybackControlsHeight);
+        SDL_SetWindowMinimumSize(window_, kMinimumLiveClientWidth, kLogicalHeight + controls_height());
         renderer_ = SDL_CreateRenderer(window_, nullptr);
         if (renderer_ == nullptr)
         {
             fail(std::string("cannot create SDL3 renderer: ") + SDL_GetError());
         }
         SDL_SetRenderVSync(renderer_, 1);
-        texture_ = SDL_CreateTexture(
-            renderer_,
-            SDL_PIXELFORMAT_XRGB8888,
-            SDL_TEXTUREACCESS_STREAMING,
-            kLogicalWidth,
-            kLogicalHeight
-        );
-        if (texture_ == nullptr)
-        {
-            fail(std::string("cannot create SDL3 texture: ") + SDL_GetError());
-        }
-        SDL_SetTextureScaleMode(texture_, SDL_SCALEMODE_NEAREST);
-        upload_texture();
+        pixels_dirty_ = true;
+        upload_pixels_if_dirty();
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
@@ -209,7 +211,7 @@ class LiveDemoSession
             SDL_SetWindowSize(
                 window_,
                 kMinimumLiveClientWidth,
-                (kLogicalHeight * (kMinimumLiveClientWidth / kLogicalWidth)) + kPlaybackControlsHeight
+                (kLogicalHeight * (kMinimumLiveClientWidth / kLogicalWidth)) + controls_height()
             );
             ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
         }
@@ -256,6 +258,8 @@ class LiveDemoSession
         if (commands.paused.has_value())
         {
             state_.paused = *commands.paused;
+            if (!state_.paused)
+                clear_capture_overrides();
         }
         if (commands.pace.has_value() && playback_schedule_ != PlaybackSchedule::NewestDue)
         {
@@ -276,9 +280,43 @@ class LiveDemoSession
         {
             state_.sound_enabled = *commands.sound_enabled;
         }
+        if (commands.particles_enabled.has_value() && state_.particles_enabled != *commands.particles_enabled)
+        {
+            state_.particles_enabled = *commands.particles_enabled;
+            frame_dirty_ = true;
+        }
         if (commands.sound_volume.has_value())
         {
             state_.sound_volume = *commands.sound_volume;
+        }
+        if (commands.render_scale.has_value() && state_.scale != *commands.render_scale)
+        {
+            state_.scale = *commands.render_scale;
+            frame_dirty_ = true;
+            view_pose_override_.reset();
+        }
+        if (commands.view_pose.has_value())
+            view_pose_override_ = commands.view_pose;
+        if (commands.warp_settings.has_value())
+            warp_settings_ = *commands.warp_settings;
+        if (commands.scene_pose.has_value())
+        {
+            scene_pose_override_ =
+                *commands.scene_pose < 0
+                    ? std::nullopt
+                    : std::optional<std::size_t>(static_cast<std::size_t>(*commands.scene_pose));
+            ++render_epoch_;
+            frame_dirty_ = true;
+        }
+        if (commands.capture_camera.has_value())
+        {
+            // Drain a previous async render before changing its captured camera.
+            if (pending_render_.valid())
+                static_cast<void>(pending_render_.get());
+            configuration_.capture_camera_setter(*commands.capture_camera);
+            capture_camera_active_ = commands.capture_camera->has_value();
+            ++render_epoch_;
+            frame_dirty_ = true;
         }
         if (commands.shutdown)
         {
@@ -312,6 +350,8 @@ class LiveDemoSession
         else if (key == SDLK_SPACE)
         {
             state_.paused = !state_.paused;
+            if (!state_.paused)
+                clear_capture_overrides();
         }
     }
 
@@ -329,6 +369,9 @@ class LiveDemoSession
         {
             return;
         }
+        ++render_epoch_;
+        frame_dirty_ = true;
+        view_pose_override_.reset();
         requested_pose_ = *commands.pose;
         playback_seconds_ = time_at_pose_(requested_pose_);
         reset_ordered_timing();
@@ -410,11 +453,9 @@ class LiveDemoSession
 
         int client_height{};
         SDL_GetWindowSize(window_, &client_width_, &client_height);
-        viewport_height_ = std::max(0, client_height - kPlaybackControlsHeight);
+        viewport_height_ = std::max(0, client_height - controls_height());
         ImGui::SetNextWindowPos(ImVec2{0.0F, static_cast<float>(viewport_height_)});
-        ImGui::SetNextWindowSize(
-            ImVec2{static_cast<float>(client_width_), static_cast<float>(kPlaybackControlsHeight)}
-        );
+        ImGui::SetNextWindowSize(ImVec2{static_cast<float>(client_width_), static_cast<float>(controls_height())});
         constexpr ImGuiWindowFlags controls_flags =
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
@@ -447,10 +488,17 @@ class LiveDemoSession
                playback_schedule_ == PlaybackSchedule::OrderedRenderCompletion;
     }
 
+    [[nodiscard]] int controls_height() const
+    {
+        return kPlaybackControlsHeight + (warp_settings_.hdma ? 23 : 0) +
+               (warp_settings_.hdma && !warp_settings_.inverse_depth_profile.empty() ? 23 : 0);
+    }
+
     void draw_controls()
     {
         draw_playback_controls();
         draw_rendering_controls();
+        draw_hdma_controls();
         draw_feature_controls();
         draw_audio_controls();
         draw_contract_control();
@@ -463,6 +511,8 @@ class LiveDemoSession
         if (ImGui::Button(state_.paused ? "Resume" : "Pause"))
         {
             state_.paused = !state_.paused;
+            if (!state_.paused)
+                clear_capture_overrides();
         }
         record_control("pause");
         ImGui::SameLine();
@@ -516,7 +566,7 @@ class LiveDemoSession
         record_control("pace");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(70.0F);
-        int selected_rate = presentation_rate_hz_ == 2 ? 0 : 1;
+        int selected_rate = presentation_rate_hz_ == 3 ? 0 : 1;
         if (ImGui::Combo(
                 "Rate",
                 &selected_rate,
@@ -524,7 +574,7 @@ class LiveDemoSession
                 static_cast<int>(kOrderedRateLabels.size())
             ))
         {
-            presentation_rate_hz_ = selected_rate == 0 ? 2 : 20;
+            presentation_rate_hz_ = selected_rate == 0 ? 3 : 30;
             reset_ordered_timing();
         }
         record_control("presentationRate");
@@ -551,6 +601,110 @@ class LiveDemoSession
         }
         record_control("lighting");
         ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90.0F);
+        int liquid_lighting = state_.mode.liquid_lighting == Lighting::None ? 0 : 1;
+        ImGui::BeginDisabled(!state_.mode.textures || state_.mode.lighting == Lighting::None);
+        if (ImGui::Combo("Liquid lighting", &liquid_lighting, supported_lighting_labels.data(), 2))
+        {
+            state_.mode.liquid_lighting = liquid_lighting == 0 ? Lighting::None : Lighting::LightMap;
+            frame_dirty_ = true;
+        }
+        record_control("liquidLighting");
+        ImGui::EndDisabled();
+        int liquid_turbulence = state_.mode.liquid_turbulence == LiquidTurbulence::SnesQ4 ? 1 : 0;
+        ImGui::SetNextItemWidth(90.0F);
+        ImGui::BeginDisabled(!state_.mode.textures);
+        if (ImGui::Combo("Liquid turbulence", &liquid_turbulence, "none\0snes-q4\0"))
+        {
+            state_.mode.liquid_turbulence = liquid_turbulence == 0 ? LiquidTurbulence::None : LiquidTurbulence::SnesQ4;
+            frame_dirty_ = true;
+        }
+        record_control("liquidTurbulence");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(100.0F);
+        int selected_scale = static_cast<int>(state_.scale);
+        if (ImGui::Combo(
+                "Scale",
+                &selected_scale,
+                kRenderScaleLabels.data(),
+                static_cast<int>(kRenderScaleLabels.size())
+            ))
+        {
+            state_.scale = static_cast<RenderScale>(selected_scale);
+            frame_dirty_ = true;
+            view_pose_override_.reset();
+        }
+        record_control("scale");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(100.0F);
+        int model = warp_settings_.hdma ? 2 : warp_settings_.projective ? 0 : 1;
+        if (ImGui::Combo("Warp", &model, "Projective\0Mode 7\0HDMA\0"))
+        {
+            warp_settings_.projective = model == 0;
+            warp_settings_.hdma = model == 2;
+        }
+        record_control("warpModel");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(85.0F);
+        float depth = static_cast<float>(warp_settings_.depth);
+        if (ImGui::DragFloat("Depth", &depth, 1.0F, 0.0F, 8192.0F, "%.0f") && std::isfinite(depth))
+            warp_settings_.depth = depth < 1.0F ? 0.0 : std::min(8192.0, static_cast<double>(depth));
+        record_control("warpDepth");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Quake units along the rendered forward axis. Zero uses rotation only.");
+    }
+
+    void draw_hdma_controls()
+    {
+        if (!warp_settings_.hdma)
+            return;
+        begin_control_row("hdma");
+        constexpr std::array counts{1, 8, 16, 32, 224};
+        int selected = static_cast<int>(std::find(counts.begin(), counts.end(), warp_settings_.bands) - counts.begin());
+        ImGui::SetNextItemWidth(115.0F);
+        if (ImGui::Combo("Bands", &selected, "1\0 8\0 16\0 32\0 Per scanline\0"))
+            warp_settings_.bands = counts[static_cast<std::size_t>(selected)];
+        record_control("warpBands");
+        ImGui::SameLine();
+        int shape =
+            warp_settings_.inverse_depth_profile.empty() ? 0
+            : warp_settings_.inverse_depth_profile.size() == 3
+                ? 1
+                : 2;
+        ImGui::SetNextItemWidth(115.0F);
+        if (ImGui::Combo("Depth profile", &shape, "Uniform\0Three values\0Five values\0"))
+        {
+            const int q =
+                std::clamp(static_cast<int>(std::nearbyint(65536.0 / std::max(16.0, warp_settings_.depth))), 8, 4096);
+            warp_settings_.inverse_depth_profile.assign(shape == 0 ? 0U : shape == 1 ? 3U : 5U, q);
+        }
+        record_control("warpProfile");
+        if (!warp_settings_.inverse_depth_profile.empty())
+        {
+            begin_control_row("depthProfile");
+            for (std::size_t i = 0; i < warp_settings_.inverse_depth_profile.size(); ++i)
+            {
+                if (i != 0)
+                    ImGui::SameLine();
+                auto& q = warp_settings_.inverse_depth_profile[i];
+                float value = q == 0 ? 8192.0F : 65536.0F / static_cast<float>(q);
+                ImGui::SetNextItemWidth(70.0F);
+                const auto label = "Depth " + std::to_string(i + 1);
+                if (ImGui::DragFloat(label.c_str(), &value, 1.0F, 16.0F, 8192.0F, "%.1f") && std::isfinite(value))
+                {
+                    for (auto& existing : warp_settings_.inverse_depth_profile)
+                        existing = std::max(8, existing);
+                    q = std::clamp(
+                        static_cast<int>(std::nearbyint(65536.0 / std::clamp(value, 16.0F, 8192.0F))),
+                        8,
+                        4096
+                    );
+                }
+                record_control("warpDepth" + std::to_string(i + 1));
+            }
+        }
     }
 
     void draw_surface_control()
@@ -569,7 +723,8 @@ class LiveDemoSession
     [[nodiscard]] bool has_feature_controls() const
     {
         return configuration_.brush_control || configuration_.entity_control ||
-               configuration_.external_bsp_model_control || configuration_.legacy_material_control;
+               configuration_.external_bsp_model_control || configuration_.legacy_material_control ||
+               configuration_.particle_control;
     }
 
     void draw_feature_controls()
@@ -587,16 +742,10 @@ class LiveDemoSession
             "dynamicBrushes",
             present
         );
-        draw_feature_toggle(
-            configuration_.entity_control,
-            "MDL/SPR entities",
-            state_.entities_enabled,
-            "mdlEntities",
-            present
-        );
+        draw_feature_toggle(configuration_.entity_control, "Entities", state_.entities_enabled, "mdlEntities", present);
         draw_feature_toggle(
             configuration_.external_bsp_model_control,
-            "External BSP models",
+            "Source BSP models",
             state_.external_bsp_models,
             "externalBspModels",
             present
@@ -606,6 +755,13 @@ class LiveDemoSession
             "Legacy material",
             state_.legacy_material,
             "legacyMaterial",
+            present
+        );
+        draw_feature_toggle(
+            configuration_.particle_control,
+            "Particles",
+            state_.particles_enabled,
+            "particles",
             present
         );
     }
@@ -658,6 +814,9 @@ class LiveDemoSession
         int requested_pose = static_cast<int>(requested_pose_);
         if (ImGui::SliderInt("##playback", &requested_pose, 0, static_cast<int>(cameras_.size()) - 1, ""))
         {
+            ++render_epoch_;
+            frame_dirty_ = true;
+            view_pose_override_.reset();
             requested_pose_ = static_cast<std::size_t>(requested_pose);
             playback_seconds_ = time_at_pose_(requested_pose_);
             reset_ordered_timing();
@@ -670,7 +829,7 @@ class LiveDemoSession
     {
         if (control_layout_.has_value())
         {
-            instrumentation_control_layout_ = control_layout_->finish(client_width_, kPlaybackControlsHeight);
+            instrumentation_control_layout_ = control_layout_->finish(client_width_, controls_height());
         }
         ImGui::End();
     }
@@ -684,58 +843,226 @@ class LiveDemoSession
         }
     }
 
+    void clear_capture_overrides()
+    {
+        view_pose_override_.reset();
+        if (capture_camera_active_)
+        {
+            if (pending_render_.valid())
+                static_cast<void>(pending_render_.get());
+            configuration_.capture_camera_setter(std::nullopt);
+            capture_camera_active_ = false;
+            ++render_epoch_;
+            frame_dirty_ = true;
+        }
+        if (scene_pose_override_.has_value())
+        {
+            scene_pose_override_.reset();
+            ++render_epoch_;
+            frame_dirty_ = true;
+        }
+    }
+
+    using RenderKey = std::tuple<RenderMode, bool, bool, bool, bool, RenderScale, std::optional<std::size_t>, bool>;
+
+    RenderKey render_key() const
+    {
+        return {
+            state_.mode,
+            state_.legacy_material,
+            state_.brushes_enabled,
+            state_.entities_enabled,
+            state_.external_bsp_models,
+            state_.scale,
+            scene_pose_override_,
+            state_.particles_enabled
+        };
+    }
+
     void refresh_render_if_dirty()
     {
-        if (!frame_dirty_)
+        if (state_.scale == RenderScale::X3Warp && !state_.paused)
         {
+            if (pending_render_.valid() &&
+                pending_render_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            {
+                auto render = pending_render_.get();
+                if (pending_key_ == render_key() && pending_loop_ == loop_ && pending_epoch_ == render_epoch_)
+                {
+                    accept_render(std::move(render), pending_pose_, pending_key_);
+                    ++frame_generation_;
+                    pixels_dirty_ = true;
+                }
+            }
+            if (!pending_render_.valid() &&
+                (frame_dirty_ || rendered_pose_ != current_pose_ || rendered_key_ != render_key()))
+            {
+                pending_pose_ = current_pose_;
+                pending_key_ = render_key();
+                pending_loop_ = loop_;
+                pending_epoch_ = render_epoch_;
+                pending_render_ = std::async(
+                    std::launch::async,
+                    [this,
+                     pose = current_pose_,
+                     scene = scene_pose_override_.value_or(current_pose_),
+                     mode = state_.mode,
+                     legacy = state_.legacy_material,
+                     brushes = state_.brushes_enabled,
+                     entities = state_.entities_enabled,
+                     external = state_.external_bsp_models,
+                     particles = state_.particles_enabled,
+                     scale = state_.scale] {
+                        const RenderViewportScope viewport(scale);
+                        return render_pose_(pose, scene, mode, legacy, brushes, entities, external, particles);
+                    }
+                );
+            }
             return;
         }
+        if (pending_render_.valid())
+            pending_render_.get();
+        if (!frame_dirty_ && rendered_key_ == render_key())
+            return;
         render_current_pose();
         ++frame_generation_;
         pixels_dirty_ = true;
     }
 
-    void render_current_pose()
+    void accept_render(LiveRenderResult render, std::size_t pose, const RenderKey& key)
     {
-        auto render = render_pose_(
-            current_pose_,
-            state_.mode,
-            state_.legacy_material,
-            state_.brushes_enabled,
-            state_.entities_enabled,
-            state_.external_bsp_models
-        );
-        current_indices_ = std::move(render.indices);
+        current_indices_ = compact_viewport(render.indices, std::get<RenderScale>(key));
         current_alias_inspection_ = std::move(render.alias_inspection);
         current_surface_inspection_ = std::move(render.surface_inspection);
         current_external_bsp_inspection_ = std::move(render.external_bsp_inspection);
-        if (current_indices_.size() != kLogicalPixels)
+        rendered_pose_ = pose;
+        rendered_scene_pose_ = std::get<std::optional<std::size_t>>(key).value_or(pose);
+        rendered_loop_ = loop_;
+        rendered_key_ = key;
+        rendered_view_ = listener_at_pose_(pose);
+    }
+
+    void render_current_pose()
+    {
+        const RenderViewportScope viewport(state_.scale);
+        accept_render(
+            render_pose_(
+                current_pose_,
+                scene_pose_override_.value_or(current_pose_),
+                state_.mode,
+                state_.legacy_material,
+                state_.brushes_enabled,
+                state_.entities_enabled,
+                state_.external_bsp_models,
+                state_.particles_enabled
+            ),
+            current_pose_,
+            render_key()
+        );
+    }
+
+    std::size_t presentation_pose() const
+    {
+        if (view_pose_override_.has_value())
+            return *view_pose_override_;
+        if (state_.scale == RenderScale::X3Warp && playback_schedule_ == PlaybackSchedule::OrderedTimed)
         {
-            fail("live frame is missing its selected color layer");
+            // Read the newest recorded source sample due between ordered images.
+            // Pausing freezes this clock; the image schedule still visits every row.
+            const auto ahead =
+                static_cast<std::size_t>(std::max(0.0, ordered_wall_seconds_) * configuration_.ordered_source_rate_hz);
+            return current_pose_ + std::min(ahead, cameras_.size() - 1 - current_pose_);
         }
+        return current_pose_;
     }
 
     void upload_pixels_if_dirty()
     {
-        if (!pixels_dirty_)
+        // A scale change keeps the old image until a matching render completes.
+        const auto image_scale = std::get<RenderScale>(rendered_key_);
+        if (pixels_dirty_)
+            update_live_pixels(state_, current_indices_, world_);
+        const auto view_pose = presentation_pose();
+        const auto view =
+            configuration_.camera_at_pose ? configuration_.camera_at_pose(view_pose) : listener_at_pose_(view_pose);
+        const bool enabled =
+            state_.scale == RenderScale::X3Warp && image_scale != RenderScale::X2 && rendered_loop_ == loop_;
+        const bool use_projective = enabled && warp_settings_.projective;
+        const bool use_hdma = enabled && warp_settings_.hdma;
+        const auto warp =
+            enabled && !use_projective && !use_hdma ? camera_warp(view, rendered_view_) : PresentationWarp{};
+        const auto hdma = use_hdma ? hdma_camera_warp(view, rendered_view_, warp_settings_) : HdmaWarp{};
+        const auto projective =
+            use_projective ? projective_camera_warp(view, rendered_view_, warp_settings_.depth) : ProjectiveWarp{};
+        const bool changed =
+            warp.x != applied_warp_.x || warp.y != applied_warp_.y || warp.zoom != applied_warp_.zoom ||
+            use_projective != applied_projective_enabled_ || projective != applied_projective_ || hdma != applied_hdma_;
+        applied_warp_ = warp;
+        applied_projective_ = projective;
+        applied_projective_enabled_ = use_projective;
+        applied_hdma_ = hdma;
+        if (pixels_dirty_ || changed)
         {
-            return;
+            if (image_scale != RenderScale::X2)
+                state_.display_pixels =
+                    use_hdma ? present_hdma_x3(state_.pixels, hdma)
+                    : use_projective
+                        ? present_projective_x3(state_.pixels, projective)
+                        : present_x3(state_.pixels, warp);
+            upload_texture(image_scale);
+            ++display_generation_;
         }
-        update_live_pixels(state_, current_indices_, world_);
-        upload_texture();
+        state_.presentation = Json{
+            {"scale", render_scale_name(state_.scale)},
+            {"imageScale", render_scale_name(image_scale)},
+            {"referenceProjection", image_scale == RenderScale::X2 ? "snes-x2-center64-v1" : kX3ProjectionContract},
+            {"imageCenter", image_scale == RenderScale::X2 ? Json::array({64, 56}) : Json::array({kX3CenterX, 37})},
+            {"imageFocal", image_scale == RenderScale::X2 ? 96 : 64},
+            {"warpModel", warp_model_name(warp_settings_)},
+            {"warpDepth", warp_settings_.depth},
+            {"warpBands", warp_settings_.bands},
+            {"inverseDepthProfileQ16", warp_settings_.inverse_depth_profile},
+            {"hdma", hdma_warp_json(hdma)},
+            {"projectiveActive", use_projective},
+            {"inverseHomography", projective.inverse},
+            {"projectiveValid", projective.valid},
+            {"renderedPose", rendered_pose_},
+            {"renderedScenePose", rendered_scene_pose_},
+            {"scenePoseControl", configuration_.scene_pose_control},
+            {"captureCameraControl", static_cast<bool>(configuration_.capture_camera_setter)},
+            {"captureCameraActive", capture_camera_active_},
+            {"scenePoseFrozen", scene_pose_override_.has_value()},
+            {"viewPose", view_pose},
+            {"displayGeneration", display_generation_},
+            {"renderPending", pending_render_.valid()},
+            {"interpolated", false},
+            {"renderedCamera", warp_camera_json(rendered_view_)},
+            {"viewCamera", warp_camera_json(view)},
+            {"shiftX", warp.x},
+            {"shiftY", warp.y},
+            {"zoom", warp.zoom}
+        };
     }
 
-    void upload_texture()
+    void upload_texture(RenderScale scale)
     {
-        if (!SDL_UpdateTexture(
-                texture_,
-                nullptr,
-                state_.pixels.data(),
-                kLogicalWidth * static_cast<int>(sizeof(std::uint32_t))
-            ))
+        const int width = scale == RenderScale::X2 ? 128 : 256;
+        const int height = scale == RenderScale::X2 ? 112 : 224;
+        if (texture_ == nullptr || texture_width_ != width || texture_height_ != height)
         {
-            fail(std::string("cannot upload SDL3 texture: ") + SDL_GetError());
+            if (texture_ != nullptr)
+                SDL_DestroyTexture(texture_);
+            texture_ =
+                SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, width, height);
+            if (texture_ == nullptr)
+                fail(std::string("cannot create SDL3 texture: ") + SDL_GetError());
+            SDL_SetTextureScaleMode(texture_, SDL_SCALEMODE_NEAREST);
+            texture_width_ = width;
+            texture_height_ = height;
         }
+        const auto& pixels = scale == RenderScale::X2 ? state_.pixels : state_.display_pixels;
+        if (!SDL_UpdateTexture(texture_, nullptr, pixels.data(), width * static_cast<int>(sizeof(std::uint32_t))))
+            fail(std::string("cannot upload SDL3 texture: ") + SDL_GetError());
     }
 
     void synchronize_audio()
@@ -759,7 +1086,7 @@ class LiveDemoSession
         {
             return state_.playback_speed == PlaybackSpeed::Realtime;
         }
-        return playback_schedule_ == PlaybackSchedule::OrderedTimed && presentation_rate_hz_ == 2;
+        return playback_schedule_ == PlaybackSchedule::OrderedTimed && presentation_rate_hz_ == 3;
     }
 
     [[nodiscard]] std::string audio_timing_reason() const
@@ -783,14 +1110,15 @@ class LiveDemoSession
         append_playback_title(title);
         append_render_title(title);
         append_feature_title(title, configuration_.brush_control, "dynamic brushes", state_.brushes_enabled);
-        append_feature_title(title, configuration_.entity_control, "MDL/SPR entities", state_.entities_enabled);
+        append_feature_title(title, configuration_.entity_control, "entities", state_.entities_enabled);
         append_feature_title(
             title,
             configuration_.external_bsp_model_control,
-            "external BSP models",
+            "source BSP models",
             state_.external_bsp_models
         );
         append_audio_title(title);
+        append_feature_title(title, configuration_.particle_control, "particles", state_.particles_enabled);
         title << " | loop " << loop_;
         if (state_.paused)
         {
@@ -862,9 +1190,9 @@ class LiveDemoSession
     {
         SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
         SDL_RenderClear(renderer_);
-        const int scale = std::max(1, std::min(client_width_ / kLogicalWidth, viewport_height_ / kLogicalHeight));
-        const float output_width = static_cast<float>(kLogicalWidth * scale);
-        const float output_height = static_cast<float>(kLogicalHeight * scale);
+        const int scale = std::max(1, std::min(client_width_ / texture_width_, viewport_height_ / texture_height_));
+        const float output_width = static_cast<float>(texture_width_ * scale);
+        const float output_height = static_cast<float>(texture_height_ * scale);
         const SDL_FRect destination{
             (static_cast<float>(client_width_) - output_width) * 0.5F,
             (static_cast<float>(viewport_height_) - output_height) * 0.5F,
@@ -884,7 +1212,7 @@ class LiveDemoSession
     void publish_instrumentation()
     {
         instrumentation_->publish(
-            current_pose_,
+            rendered_pose_,
             cameras_.size(),
             loop_,
             state_.paused,
@@ -906,12 +1234,14 @@ class LiveDemoSession
         if (playback_schedule_ == PlaybackSchedule::OrderedTimed ||
             playback_schedule_ == PlaybackSchedule::OrderedRenderCompletion)
         {
-            ordered_frame_presented_ = true;
+            ordered_frame_presented_ = rendered_pose_ == current_pose_ && rendered_key_ == render_key();
         }
     }
 
     void shutdown_presentation() noexcept
     {
+        if (pending_render_.valid())
+            pending_render_.wait();
         audio_.reset();
         if (imgui_renderer_initialized_)
         {
@@ -963,6 +1293,21 @@ class LiveDemoSession
     std::unique_ptr<ReferenceInstrumentationServer> instrumentation_;
     std::unique_ptr<QuakeAudioSession> audio_;
     LiveWindowState state_;
+    std::future<LiveRenderResult> pending_render_;
+    RenderKey pending_key_, rendered_key_;
+    std::size_t pending_pose_{}, rendered_pose_{};
+    std::optional<std::size_t> view_pose_override_;
+    std::optional<std::size_t> scene_pose_override_;
+    bool capture_camera_active_{};
+    std::size_t rendered_scene_pose_{};
+    std::uint64_t pending_loop_{}, rendered_loop_{}, pending_epoch_{}, render_epoch_{}, display_generation_{};
+    ViewTransform rendered_view_{};
+    PresentationWarp applied_warp_{};
+    WarpSettings warp_settings_;
+    ProjectiveWarp applied_projective_;
+    HdmaWarp applied_hdma_;
+    bool applied_projective_enabled_{};
+    int texture_width_{}, texture_height_{};
     std::vector<std::uint8_t> current_indices_;
     Json current_alias_inspection_;
     Json current_surface_inspection_;
@@ -1037,7 +1382,9 @@ int run_source_realtime_demo(
     const QuakeSoundAssets* sound_assets,
     bool sound_enabled,
     float sound_volume,
-    ReferenceInstrumentationConfig instrumentation
+    ReferenceInstrumentationConfig instrumentation,
+    const ParticleReplay* particles = nullptr,
+    bool particles_enabled = false
 );
 
 int run_packed_realtime_demo(

@@ -1,0 +1,569 @@
+; Keep the established tail helpers at their linked addresses. Append the
+; former reciprocal-tail support only after both general/F3 tails have ended.
+.segment "GSU_TEXTURE_TAIL_CODE"
+.assert .loword(AliasBuildVisibilityRow) = GSU_TEXTURE_TAIL_CODE_OFFSET, lderror, "Texture-tail start moved"
+.res $5E0 - (* - AliasBuildVisibilityRow)
+
+.segment "GSU_TEXTURE_TAIL_CODE"
+
+; Fly mode augments the frozen replay snapshot with 38 signon-only baselines.
+; VSTATIC supplies entity identity and the exact QBSF geometry variant; the
+; unified runtime slot namespace is replay slots followed by static records.
+BrushBuildStaticLinks:
+        sm      (BRUSH_STATIC_RETURN), R11
+        move    R0, #0
+        sm      (BRUSH_TRANSFORM_CURSOR), R0
+BrushStaticLoop:
+        lm      R0, (BRUSH_TRANSFORM_CURSOR)
+        iwt     R1, #BSP_BRUSH_VSTATIC_COUNT
+        with    R0
+        cmp     R1
+        bne     BrushStaticPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushBuildStaticLinksDone
+BrushStaticPresent:
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R4, #BSP_BRUSH_VSTATIC_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #BSP_BRUSH_VSTATIC_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_ENTITY), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_GEOMETRY_VARIANT), R0
+        lm      R0, (BRUSH_TRANSFORM_CURSOR)
+        iwt     R1, #BSP_BRUSH_ENTITY_SLOT_COUNT
+        with    R0
+        add     R1
+        sm      (BRUSH_CURRENT_SLOT), R0
+BrushStaticGeometryCall:
+        jal     BrushBuildGeometryLinks
+.assert * - BrushStaticGeometryCall = 5, error, "Fly PVS JAL operand contract changed"
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushBuildStaticLinksDone
+        nop
+        lm      R0, (BRUSH_TRANSFORM_CURSOR)
+        inc     R0
+        sm      (BRUSH_TRANSFORM_CURSOR), R0
+        GSU_ABSOLUTE_GOTO BrushStaticLoop
+BrushBuildStaticLinksDone:
+.if BSP_EXTERNAL_BSP_FLY_STATIC_COUNT
+        jal     BrushBuildExternalStaticLinks
+        nop
+.endif
+        lm      R11, (BRUSH_STATIC_RETURN)
+        ret
+        nop
+
+.segment "GSU_TEXTURE_TAIL_CODE"
+
+BrushLoadDirectSafety:
+        sm      (BRUSH_DIRECT_RETURN), R11
+        move    R9, #$02
+        iwt     R8, #.loword(BrushLoadDirectSafetyROM)
+        from    R8
+        ljmp    R9
+        nop
+
+; Safe rows never return: restore their leaf marker and enter the established
+; direct renderer. Exact rows return to the local-depth arbiter.
+BrushTryDirectSafeGroup:
+        lm      R0, (BRUSH_DIRECT_SAFE)
+        moves   R0, R0
+        bne     BrushDirectSafeGroup
+        nop
+        ret
+        nop
+BrushDirectSafeGroup:
+        lm      R0, (BRUSH_ARB_TOKEN_START)
+        sm      (BRUSH_TOKEN_CURSOR), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterDirectGroup
+
+; Reserved cold overlay window; the supported lightmapped path owns the
+; per-pixel arbitration code below.
+; Quake sky marker sampler and post-opaque compositor.
+
+.segment "GSU_TEXTURE_TAIL_CODE"
+
+; The face-selected route arrives with signed absolute Q4 S/T in R5/R6.
+; Turbulent surfaces apply Quake's crossed-axis 128-step warp from RAM, sample
+; their guaranteed single-bank 64x64 level zero, and bypass light colormaps.
+; This complete sampler remains in bank-$70 hidden framebuffer scanlines,
+; eliminating the former ROM-bank round trip for every liquid pixel.
+; Its fullbright direct-span tail stays in the same cache window. Repeated
+; sampler entries execute CACHE with the same CBR; only block setup leaves it.
+.align GSU_CACHE_LINE_BYTES
+TurbulenceSamplerHot:
+GSU_CACHE_KERNEL_BEGIN TurbulenceCachedSpan
+.assert TurbulenceSamplerHot = TurbulenceCachedSpan, error, "Shared turbulence sampler must enter its cache declaration"
+        ; R2 and R7 remain live across every ordinary sampler call.  Resolve
+        ; T's displacement first and retain only that byte in volatile R12,
+        ; leaving the caller-live sampler ABI intact.  The phase-adjusted base
+        ; points into two adjacent copies, so the 7-bit coordinate wraps with
+        ; no per-pixel phase addition.
+        move    R1, R5
+  .repeat BSP_TURBULENCE_COORD_FRACTION_BITS
+        with    R1
+        lsr
+  .endrepeat
+        move    R4, #(BSP_TURBULENCE_CYCLE-1)
+        with    R1
+        and     R4
+        lm      R4, (GSU_TURBULENCE_TABLE_BASE_OFFSET)
+        with    R4
+        add     R1
+        move    R12, #0
+        moveb   R12, (R4)
+
+        ; Resolve S's displacement second. Reloading the phase-adjusted base is
+        ; cheaper than spilling a caller-live register and preserves every
+        ; direct lightmap, distance, and albedo span ABI.
+        move    R1, R6
+  .repeat BSP_TURBULENCE_COORD_FRACTION_BITS
+        with    R1
+        lsr
+  .endrepeat
+        move    R4, #(BSP_TURBULENCE_CYCLE-1)
+        with    R1
+        and     R4
+        lm      R4, (GSU_TURBULENCE_TABLE_BASE_OFFSET)
+        with    R4
+        add     R1
+        move    R0, #0
+        moveb   R0, (R4)
+        with    R5
+        add     R0
+  .repeat BSP_TURBULENCE_COORD_FRACTION_BITS
+        with    R5
+        lsr
+  .endrepeat
+        move    R1, #(BSP_TURBULENCE_TEXTURE_SIZE-1)
+        with    R5
+        and     R1
+
+        with    R6
+        add     R12
+  .repeat BSP_TURBULENCE_COORD_FRACTION_BITS
+        with    R6
+        lsr
+  .endrepeat
+        with    R6
+        and     R1
+        move    R1, #BSP_TURBULENCE_TEXTURE_SIZE
+        with    R6
+        umult   R1
+        with    R6
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R6
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+
+        lm      R12, (TEXTURE_TURBULENCE_EXIT)
+        iwt     R4, #GSU_TURBULENCE_PRESENT_OFFSET
+        from    R12
+        jmp     R12
+        ; Store R12's nonzero return address while the sampled color stays in
+        ; R0. FROM survives JMP and selects STW's source in the delay slot.
+        stw     (R4)
+TurbulenceAlbedoReturnHot:
+        jmp     R11
+        nop
+
+; The direct technique-4/distance route has the same register-fed span ABI as
+; TextureLightmapSkyPlotReady. Keep its PLOT and in-block continuation beside
+; the sampler so every liquid pixel reuses the resident instruction lines.
+; The sampler still dispatches through TEXTURE_TURBULENCE_EXIT: albedo and any
+; caller-specific exit retain their original ownership and continuation.
+TurbulenceLightmapPlot:
+        color
+        lm      R0, (TEXTURE_SPAN_X)
+        iwt     R8, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R8
+        add     R0
+        moveb   R1, (R8)
+        lm      R2, (TEXTURE_PLOT_Y)
+        plot
+        lm      R1, (TEXTURE_SPAN_END_X)
+        cmp     R1
+        bne     TurbulenceLightmapContinue
+        inc     R0
+        GSU_ABSOLUTE_GOTO TextureLightmapSpanDone
+TurbulenceLightmapContinue:
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        iwt     R8, #TEXTURE_SPAN_X
+        lm      R1, (TEXTURE_SIGN_S)
+        cmp     R1
+        beq     TurbulenceLightmapCheckBlock
+        ; Publish logical X in the same boundary-test delay slot as T4.
+        stw     (R8)
+TurbulenceLightmapDispatch:
+        jmp     R13
+        nop
+TurbulenceLightmapCheckBlock:
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+        GSU_ABSOLUTE_GOTO TextureLightmapBlockSetup
+GSU_CACHE_KERNEL_END TurbulenceCachedSpan
+
+.assert .loword(TurbulenceCachedSpan) = $3E80, lderror, "Relocated turbulence cache entry moved"
+.assert .loword(*) = $3F20, lderror, "Relocated turbulence cache footprint changed"
+
+; Admit only the exact ordinary T4 interior route, once per coordinate block.
+; R4/R7/R8/R9/R11/R13 carry the pending signed DDA and remain untouched.
+; Original depth and row-shift dispatch words stay intact for every fallback.
+BrushCachedSpanAdmit:
+        lm      R0, (TEXTURE_RENDER_MODE)
+        dec     R0
+        beq     BrushCachedSpanModeReady
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedSpanFallback
+BrushCachedSpanModeReady:
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        moves   R0, R0
+        bpl     BrushCachedSpanOrdinary
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedSpanFallback
+BrushCachedSpanOrdinary:
+        lm      R0, (LIGHTMAP_BLOCK_FAST)
+        moves   R0, R0
+        bmi     BrushCachedSpanInterior
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedSpanFallback
+BrushCachedSpanInterior:
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        with    R0
+        cmp     R1
+        beq     BrushCachedSpanSamplerReady
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedSpanFallback
+BrushCachedSpanSamplerReady:
+        lm      R0, (BRUSH_ARBITER_DEPTH_ROUTINE)
+        iwt     R1, #BrushArbiterDepthConstant
+        with    R0
+        cmp     R1
+        beq     BrushCachedSpanConstantSelected
+        nop
+        iwt     R1, #BrushArbiterDepthBuffered
+        with    R0
+        cmp     R1
+        beq     BrushCachedSpanBufferedSelected
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedSpanFallback
+BrushCachedSpanConstantSelected:
+        iwt     R2, #BrushCachedDepthConstant
+        bra     BrushCachedSpanDepthSelected
+        nop
+BrushCachedSpanBufferedSelected:
+        iwt     R2, #BrushCachedDepthBuffered
+BrushCachedSpanDepthSelected:
+        ; All four original row continuations have the same two-byte stride.
+        ; Validate the published pointer before translating its private copy.
+        lm      R1, (TEXTURE_STEP_SHADE_Q8)
+        iwt     R3, #TextureSamplePowerOfTwoRowShift3
+        with    R1
+        sub     R3
+        move    R0, R1
+        with    R0
+        and     #1
+        bne     BrushCachedSpanFallback
+        nop
+        move    R3, #7
+        with    R1
+        cmp     R3
+        bcs     BrushCachedSpanFallback
+        nop
+        iwt     R3, #BrushCachedRowShift3
+        with    R1
+        add     R3
+        ; Private state is published only after every admission guard passed.
+        sm      (BRUSH_ARBITER_CACHED_ROW_SHIFT), R1
+        sm      (BRUSH_ARBITER_CACHED_DEPTH), R2
+        iwt     R0, #BrushCachedSpan
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
+BrushCachedSpanFallback:
+        iwt     R0, #BrushArbiterSpanPixel
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
+
+.assert * - __GSU_TEXTURE_TAIL_CODE_RUN__ <= GSU_TEXTURE_TAIL_CODE_CAPACITY, error, "Shared tail admission exceeds hidden scanlines"
+.assert TextureSamplePowerOfTwoRowShift2 - TextureSamplePowerOfTwoRowShift3 = 2, error, "Original row-shift stride changed"
+.assert TextureSamplePowerOfTwoRowShift1 - TextureSamplePowerOfTwoRowShift3 = 4, error, "Original row-shift stride changed"
+.assert TextureSamplePowerOfTwoRowReady - TextureSamplePowerOfTwoRowShift3 = 6, error, "Original row-shift stride changed"
+
+; The complete admitted pixel controller owns one cache window. No per-pixel
+; call changes CBR, and every next coordinate block returns to admission.
+.segment "GSU_TURBULENCE_HOT_CODE"
+GSU_CACHE_KERNEL_BEGIN BrushCachedSpan
+.assert .loword(BrushCachedSpan) = GSU_TURBULENCE_HOT_CODE_OFFSET, lderror, "Brush cache entry moved"
+BrushCachedPixel:
+        lm      R12, (BRUSH_ARBITER_CACHED_DEPTH)
+        jmp     R12
+        nop
+BrushCachedDepthReady:
+        lm      R0, (TEXTURE_SPAN_X)
+        with    R0
+        add     R0
+        iwt     R2, #GSU_BRUSH_ARBITER_WINNER_ROW_OFFSET
+        with    R2
+        add     R0
+        iwt     R10, #GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET
+        with    R10
+        add     R0
+        movew   R1, (R10)
+        with    R5
+        cmp     R1
+        bcc     BrushCachedWinner
+        nop
+        beq     BrushCachedDepthTie
+        movew   R0, (R2)
+        GSU_ABSOLUTE_GOTO BrushCachedAdvance
+BrushCachedDepthTie:
+        lm      R1, (BRUSH_ARB_CANDIDATE_CURSOR)
+        with    R1
+        cmp     R0
+        bcc     BrushCachedWinner
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedAdvance
+BrushCachedWinner:
+        movew   (R10), R5
+        lm      R0, (BRUSH_ARB_CANDIDATE_CURSOR)
+        movew   (R2), R0
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        lm      R8, (TEXTURE_SPAN_S)
+        lm      R9, (TEXTURE_SPAN_T)
+        move    R5, R8
+        move    R6, R9
+
+        ; Exact equal-axis, single-bank sampler. The private row continuation
+        ; changes neither the per-face router nor its caller-visible state.
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+        with    R5
+        and     R1
+  .repeat 4
+        with    R5
+        lsr
+  .endrepeat
+        with    R6
+        and     R1
+        lm      R12, (BRUSH_ARBITER_CACHED_ROW_SHIFT)
+        jmp     R12
+        with    R6
+BrushCachedRowShift3:
+        add     R6
+        with    R6
+BrushCachedRowShift2:
+        add     R6
+        with    R6
+BrushCachedRowShift1:
+        add     R6
+        with    R6
+BrushCachedRowReady:
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R6
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+        move    R12, R0
+
+        ; Strict-interior decode uses the same signed block bytes, Q8
+        ; fractions, and prebiased lightmap base as the ordinary sampler.
+        with    R8
+        to      R3
+        with    R8
+        hib
+        with    R8
+        sex
+        iwt     R1, #$00F0
+        with    R3
+        and     R1
+        move    R5, R9
+        with    R9
+        hib
+        with    R9
+        sex
+        with    R5
+        and     R1
+        lm      R1, (LIGHTMAP_WIDTH)
+        with    R9
+        mult    R1
+        with    R8
+        add     R9
+        move    R6, R8
+        lm      R4, (LIGHTMAP_ADJUSTED_ADDRESS)
+        with    R4
+        add     R6
+        move    R8, #0
+        moveb   R8, (R4)
+        moves   R3, R3
+        beq     BrushCachedUpperRightSame
+        inc     R4
+        move    R9, #0
+        moveb   R9, (R4)
+        bra     BrushCachedUpperReady
+        dec     R4
+BrushCachedUpperRightSame:
+        dec     R4
+        move    R9, R8
+BrushCachedUpperReady:
+        moves   R5, R5
+        beq     BrushCachedLowerSame
+        with    R4
+        add     R1
+        move    R6, #0
+        moveb   R6, (R4)
+        moves   R3, R3
+        beq     BrushCachedLowerRightSame
+        inc     R4
+        move    R11, #0
+        moveb   R11, (R4)
+        bra     BrushCachedLowerReady
+        nop
+BrushCachedLowerRightSame:
+        move    R11, R6
+        bra     BrushCachedLowerReady
+        nop
+BrushCachedLowerSame:
+        move    R6, R8
+        move    R11, R9
+BrushCachedLowerReady:
+        iwt     R2, #128
+        moves   R3, R3
+        beq     BrushCachedHorizontalZero
+        nop
+        move    R1, #0
+        with    R1
+        sub     R3
+        move    R4, R8
+        with    R4
+        umult   R1
+        move    R0, R9
+        umult   R3
+        with    R4
+        add     R0
+        with    R4
+        add     R2
+        with    R4
+        hib
+        with    R6
+        umult   R1
+        move    R0, R11
+        umult   R3
+        with    R6
+        add     R0
+        with    R6
+        add     R2
+        with    R6
+        hib
+        bra     BrushCachedHorizontalInterpolated
+        with    R5
+BrushCachedHorizontalZero:
+        move    R4, R8
+        with    R5
+BrushCachedHorizontalInterpolated:
+        from    R5
+        beq     BrushCachedMap
+        nop
+        move    R1, #0
+        with    R1
+        sub     R5
+        move    R0, R4
+        umult   R1
+        move    R4, R6
+        with    R4
+        umult   R5
+        with    R4
+        add     R0
+        with    R4
+        add     R2
+        with    R4
+        hib
+BrushCachedMap:
+        with    R4
+        swap
+        with    R4
+        add     R12
+        moveb   R0, (R4)
+        color
+        lm      R0, (TEXTURE_SPAN_X)
+        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R10
+        add     R0
+        moveb   R1, (R10)
+        lm      R2, (TEXTURE_PLOT_Y)
+        plot
+BrushCachedAdvance:
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        beq     BrushCachedDone
+        inc     R0
+        sm      (TEXTURE_SPAN_X), R0
+        lm      R10, (TEXTURE_COORD_PTR)
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        sm      (TEXTURE_COORD_PTR), R10
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+        lm      R1, (TEXTURE_BLOCK_END_X)
+        with    R0
+        cmp     R1
+        beq     BrushCachedAtBlockEnd
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedPixel
+BrushCachedAtBlockEnd:
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        bne     BrushCachedBuildNextBlock
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedPixel
+BrushCachedBuildNextBlock:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockSetup
+BrushCachedDone:
+        lm      R11, (BRUSH_ARBITER_SPAN_RETURN)
+        ret
+        nop
+BrushCachedDepthConstant:
+        lm      R5, (TEXTURE_BASE_DEPTH)
+        GSU_ABSOLUTE_GOTO BrushCachedDepthReady
+BrushCachedDepthBuffered:
+        lm      R10, (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET)
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET), R10
+        GSU_ABSOLUTE_GOTO BrushCachedDepthReady
+BrushCachedBodyEnd:
+.assert * - BrushCachedSpan <= GSU_CACHE_BYTES, error, "Brush closure exceeds its cache window"
+; This final padding is unreachable after each depth helper's absolute jump.
+.res GSU_CACHE_BYTES - (* - BrushCachedSpan)
+GSU_CACHE_KERNEL_END BrushCachedSpan
+
+.assert BrushCachedRowShift2 - BrushCachedRowShift3 = 2, error, "Cached row-shift stride changed"
+.assert BrushCachedRowShift1 - BrushCachedRowShift3 = 4, error, "Cached row-shift stride changed"
+.assert BrushCachedRowReady - BrushCachedRowShift3 = 6, error, "Cached row-shift stride changed"
+.assert * - __GSU_TURBULENCE_HOT_CODE_RUN__ = GSU_TURBULENCE_HOT_CODE_CAPACITY, error, "Brush cache reservation must fill the reciprocal tail"

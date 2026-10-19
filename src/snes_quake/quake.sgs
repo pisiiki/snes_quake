@@ -4,6 +4,7 @@
 .include "GSU_Cache.i"
 .include "GSU_Primitives.i"
 .include "MemoryMap.i"
+.include "quake/Viewport.i"
 
 ; Prefer the GSU's shorter equivalent encoding whenever a direct word access
 ; resolves to an even low-RAM address. Forward or high addresses retain LM/SM.
@@ -42,7 +43,7 @@
 .include "quake/FlatRasterAndKernels.sgs"
 .include "quake/ProjectiveAlbedoSpan.sgs"
 ClassifyClipOutcode:
-        BSP_CLASSIFY_CLIP_OUTCODE
+        BSP_CLASSIFY_CLIP_OUTCODE SharedClipRightScale, SharedClipUpScale
         ret
         nop
 .include "quake/DynamicBrushRenderer.sgs"
@@ -57,7 +58,20 @@ ClassifyClipOutcode:
 ; Fly-only painter code has a deferred overlay so ordered boot does not copy
 ; code it cannot execute. Its run address follows the qualified brush image.
 .include "quake/FlyAliasVisibility.sgs"
+.include "quake/fly_full/Renderer.sgs"
+.include "quake/fly_full/BrushDepthView.sgs"
 .include "quake/t4/Faces.sgs"
 .include "quake/t4/Raster.sgs"
 .include "quake/t4/Sampling.sgs"
 .include "quake/t4/DynamicBrush.sgs"
+.include "quake/fly_full/BrushPVS.sgs"
+.include "quake/DynamicBrushCachedSpan.sgs"
+
+; Both copies assemble at the established RAM overlay addresses. Only their
+; ROM load images and private symbols differ; the selected image is installed
+; at a fly-resolution transition while the GSU is stopped.
+.include "Data/Fly3x/quake.sgs.inc"
+.if BSP_RENDER_SCALE = 2
+.include "quake/Mode7Pack.sgs"
+.include "quake/WarpFocalPatch.sgs"
+.endif

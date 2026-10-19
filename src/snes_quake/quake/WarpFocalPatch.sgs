@@ -1,0 +1,58 @@
+; Preassembled replacement for the existing X3 projection multiply. Installed
+; only at an FOV transition; no vertex tests flags or applies a second scale.
+; q is signed half-Q7 at focal 64. The full product keeps floor(q*focal/64).
+.segment "FLY_VIEWPORT_DATA"
+.export WarpFocalPatch
+.export F3_ConvexProjectScale
+WarpFocalPatch:
+.if BSP_WARP_SOURCE_FOCAL = 64
+        move    R0, R3
+        add     R0
+        add     R0
+.else
+        iwt     R6, #BSP_WARP_SOURCE_FOCAL*512
+        from    R3
+        lmult
+        with    R4
+        add     R4
+        adc     R0
+        move    R3, R0
+        add     R0
+        add     R0
+.endif
+        ret
+        nop
+        .res BSP_WARP_FOCAL_PATCH_BYTES-(*-WarpFocalPatch), $01
+.assert F3_ConvexRasterPolygon-F3_ConvexProjectScale >= BSP_WARP_FOCAL_PATCH_BYTES, lderror, "Focal patch exceeds its projection window"
+
+.if BSP_WARP_SOURCE_FOCAL < F3_BSP_VIEW_CENTER_X
+; The old +/-depth guard covers the 85x74 viewport only at focal >= 43.
+; These fixed-size patches are installed with the focal multiply at a stopped
+; GSU transition. There is no per-vertex mode branch or focal division.
+.export WarpClipAxisScalePatch, WarpClipDepthScalePatch, WarpClipNoScalePatch
+.export WarpProjectClampScalePatch, WarpProjectWideClampPatch, WarpProjectNormalClampPatch
+.export F3_PacketClipRightScale, F3_PacketClipUpScale
+.export F3_SharedClipRightScale, F3_SharedClipUpScale
+.export F3_ConvexClipAxisScale, F3_ConvexProjectClampScale, F3_ConvexProjectClampLimit, F3_AliasClipDepthScale
+WarpClipAxisScalePatch:
+        with    R5
+        asr
+WarpClipDepthScalePatch:
+        with    R2
+        add     R2
+WarpClipNoScalePatch:
+        nop
+        nop
+WarpProjectClampScalePatch:
+        lsr
+WarpProjectWideClampPatch:
+        iwt     R3, #4096
+WarpProjectNormalClampPatch:
+        iwt     R3, #2048
+.assert WarpClipDepthScalePatch-WarpClipAxisScalePatch = 2, error, "Axis clip patch changed size"
+.assert WarpClipNoScalePatch-WarpClipDepthScalePatch = 2, error, "Depth clip patch changed size"
+.assert WarpProjectClampScalePatch-WarpClipNoScalePatch = 2, error, "Normal clip patch changed size"
+.assert WarpProjectWideClampPatch-WarpProjectClampScalePatch = 1, error, "Clamp scale patch changed size"
+.assert WarpProjectNormalClampPatch-WarpProjectWideClampPatch = 3, error, "Wide clamp patch changed size"
+.assert *-WarpProjectNormalClampPatch = 3, error, "Normal clamp patch changed size"
+.endif

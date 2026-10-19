@@ -46,8 +46,10 @@ AliasEndpointCoordinate:
         move    R4, R0
         with    R0
         add     R0
+.if BSP_RENDER_SCALE = 2
         with    R0
         add     R4
+.endif
         with    R0
         add     R2
   .repeat 6
@@ -61,13 +63,31 @@ AliasEndpointCoordinate:
         move    R3, R0
         with    R0
         add     R0
+.if BSP_RENDER_SCALE = 2
         with    R0
         add     R3
+.endif
         with    R0
         add     R4
+.if BSP_RENDER_SCALE = 2
         iwt     R1, #(ALIAS_X_AXIS + 64)
         with    R1
         sub     R10
+.else
+        iwt     R1, #ALIAS_X_AXIS
+        with    R1
+        cmp     R10
+        beq     @XAxis
+        nop
+        move    R1, #BSP_VIEW_CENTER_Y
+        move    R2, #BSP_VIEW_HEIGHT
+        bra     @CenterReady
+        nop
+@XAxis:
+        move    R1, #BSP_VIEW_CENTER_X
+        move    R2, #BSP_VIEW_WIDTH
+@CenterReady:
+.endif
         with    R0
         add     R1
         ret
@@ -162,5 +182,118 @@ T4TextureShadeIntersectUnityOutputsCold:
         with    R9
         add     R0
         GSU_ABSOLUTE_GOTO TextureShadeIntersectScreenX
+
+TextureStageLightmapRowCold:
+        ; One record per logical row: raw min/max X followed by exact left and
+        ; right S/T/depth. Convex rows are contiguous, so Y is reconstructed
+        ; from the final raster row and the record count during replay.
+        lm      R10, (TEXTURE_COORD_PTR)
+        lm      R1, (CONVEX_MIN_X)
+        lm      R3, (CONVEX_MAX_X)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        movew   (R10), R3
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_LEFT_S)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_RIGHT_S)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_LEFT_T)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_RIGHT_T)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_LEFT_SHADE)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (TEXTURE_RIGHT_SHADE)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        sm      (TEXTURE_COORD_PTR), R10
+        lm      R0, (TEXTURE_LIGHTMAP_FAST_ROUTINE)
+        inc     R0
+        sm      (TEXTURE_LIGHTMAP_FAST_ROUTINE), R0
+        ret
+        nop
+
+T4TextureStageLightmapRight:
+        ; R10 is base+14. The right X is already staged and no longer needs
+        ; to survive the overwhelmingly common orientation comparison.
+        with    R10
+        sub     #14
+        movew   R1, (R10)
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        with    R0
+        sub     R1
+        bpl     T4TextureStageLightmapOrdered
+        nop
+        GSU_ABSOLUTE_GOTO T4TextureStageLightmapReverseCold
+T4TextureStageLightmapOrdered:
+        with    R10
+        add     #14
+T4TextureStageLightmapAdvance:
+        sm      (TEXTURE_COORD_PTR), R10
+        GSU_ABSOLUTE_GOTO T4TextureRasterNextRow
+
+
+TextureDivideQ12EdgePerspectiveLoaded:
+        move    R6, R12
+        GSU_ABSOLUTE_GOTO TextureDivideQ12EdgeLoadedCached
+
+TextureEdgePerspectiveMirrorMissCold:
+        iwt     R10, #TextureDivideQ12EdgePerspectiveLoaded
+        GSU_ABSOLUTE_GOTO TextureEndpointDivideHotMirrorMissCold
+
+; Width-one blocks need only the endpoint. Width-two blocks additionally need
+; base+trunc(delta/2), exactly the signed quotient/remainder DDA's first step.
+; R0=width, R5/R6=endpoint. Preserve those endpoints while writing the midpoint.
+TextureLightmapBlockOneOrTwo:
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        dec     R0
+        beq     TextureLightmapStoreShortEndpoints
+        nop
+        lm      R1, (TEXTURE_SPAN_S)
+        from    R5
+        sub     R1
+        asr
+        bpl     TextureLightmapHalfSReady
+        nop
+        adc     #0
+TextureLightmapHalfSReady:
+        add     R1
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R1, (TEXTURE_SPAN_T)
+        from    R6
+        sub     R1
+        asr
+        bpl     TextureLightmapHalfTReady
+        nop
+        adc     #0
+TextureLightmapHalfTReady:
+        add     R1
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+TextureLightmapStoreShortEndpoints:
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        movew   (R10), R6
+        GSU_ABSOLUTE_GOTO TextureLightmapCoordinateBlockReady
 
 .assert * - AliasInitializeAxis <= GSU_TEXTURE_TAIL_CODE_CAPACITY, error, "Texture-tail GSU helpers exceed hidden scanlines"

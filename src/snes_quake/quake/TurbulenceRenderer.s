@@ -174,11 +174,7 @@ StageTurbulenceCommand:
 
 PresentTurbulenceStateFromSlot:
         RW_assume a16i16
-        ldx     #0
-        lda     upload_slot
-        beq     :+
-        ldx     #4
-:
+        ; PresentSkyStateFromSlot leaves the immutable slot's Q16 offset in X.
         lda     slot_turbulence_phase_q16+0,x
         sta     presented_turbulence_phase_q16+0
         lda     slot_turbulence_phase_q16+2,x

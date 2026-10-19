@@ -1,0 +1,177 @@
+; An unclipped polygon can use the selector's existing integer projections
+; for a conservative rejection before repeating its exact Q7 projection.
+; Proven outward margins cover reciprocal/depth quantization: 16 pixels
+; below depth 128, then 8 below 256, 5 below 512, and 4 through depth 16375.
+; Clipped or farther vertices always use the exact path.
+FlyWorldMaskCoarseBounds:
+        sm      (BRUSH_VERTEX_RETURN), R11
+        lm      R0, (FLY_MASK_LINK)
+        iwt     R1, #$7FFF
+        with    R0
+        and     R1
+        move    R1, R0
+  .repeat 2
+        with    R0
+        add     R0
+  .endrepeat
+        with    R0
+        add     R1
+        iwt     R10, #FACES
+        with    R10
+        add     R0
+        jal     LoadPacketFaceFirstIndex
+        move    R1, #0
+        moveb   R1, (R10)
+        sm      (CONVEX_EDGE_COUNT), R1
+        with    R0
+        add     R0
+        iwt     R9, #INDICES
+        with    R9
+        add     R0
+        iwt     R3, #32767
+        iwt     R4, #-32768
+        move    R5, R3
+        move    R6, R4
+        move    R7, R3
+FlyWorldCoarseVertex:
+        movew   R8, (R9)
+        inc     R9
+        inc     R9
+        move    R0, R8
+  .repeat 3
+        with    R0
+        add     R0
+  .endrepeat
+        iwt     R10, #PACKET_VIEW_CACHE+6
+        with    R10
+        add     R0
+        movew   R0, (R10)
+        moves   R0, R0
+        bne     FlyWorldCoarseUnknown
+        nop
+        dec     R10
+        dec     R10
+        movew   R0, (R10)
+        iwt     R1, #64
+        with    R0
+        cmp     R1
+        bcc     FlyWorldCoarseUnknown
+        nop
+        iwt     R1, #16376
+        with    R0
+        cmp     R1
+        bcs     FlyWorldCoarseUnknown
+        nop
+        with    R0
+        cmp     R7
+        bcs     FlyWorldCoarseDepthReady
+        nop
+        move    R7, R0
+FlyWorldCoarseDepthReady:
+        with    R8
+        add     R8
+        with    R8
+        add     R8
+        iwt     R10, #PROJECTED
+        with    R10
+        add     R8
+        movew   R0, (R10)
+        with    R0
+        cmp     R3
+        FLY_SIGNED_BRANCH $06, FlyWorldCoarseMinX
+        nop
+        move    R3, R0
+FlyWorldCoarseMinX:
+        with    R0
+        cmp     R4
+        FLY_SIGNED_BRANCH $07, FlyWorldCoarseMaxX
+        nop
+        move    R4, R0
+FlyWorldCoarseMaxX:
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        with    R0
+        cmp     R5
+        FLY_SIGNED_BRANCH $06, FlyWorldCoarseMinY
+        nop
+        move    R5, R0
+FlyWorldCoarseMinY:
+        with    R0
+        cmp     R6
+        FLY_SIGNED_BRANCH $07, FlyWorldCoarseMaxY
+        nop
+        move    R6, R0
+FlyWorldCoarseMaxY:
+        lm      R0, (CONVEX_EDGE_COUNT)
+        dec     R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        beq     FlyWorldCoarseStore
+        nop
+        GSU_ABSOLUTE_GOTO FlyWorldCoarseVertex
+FlyWorldCoarseUnknown:
+        move    R0, #1
+        lm      R11, (BRUSH_VERTEX_RETURN)
+        ret
+        nop
+
+.macro FLY_COARSE_CLAMP register, negative, limit
+  .if negative
+        move    R1, #0
+        with    R1
+        sub     R2
+  .else
+        move    R1, R2
+  .endif
+        with    register
+        add     R1
+        bpl     :+
+        nop
+        move    register, #0
+:
+        iwt     R1, #limit
+        with    register
+        cmp     R1
+        bcc     :+
+        nop
+        move    register, R1
+:
+.endmacro
+
+FlyWorldCoarseStore:
+        move    R2, #4
+        iwt     R1, #512
+        with    R7
+        cmp     R1
+        bcs     FlyWorldCoarsePaddingReady
+        nop
+        move    R2, #5
+        iwt     R1, #256
+        with    R7
+        cmp     R1
+        bcs     FlyWorldCoarsePaddingReady
+        nop
+        move    R2, #8
+        iwt     R1, #128
+        with    R7
+        cmp     R1
+        bcs     FlyWorldCoarsePaddingReady
+        nop
+        iwt     R2, #16
+FlyWorldCoarsePaddingReady:
+        FLY_COARSE_CLAMP R3, 1, BSP_VIEW_WIDTH-1
+        FLY_COARSE_CLAMP R4, 0, BSP_VIEW_WIDTH-1
+        FLY_COARSE_CLAMP R5, 1, BSP_VIEW_HEIGHT-1
+        FLY_COARSE_CLAMP R6, 0, BSP_VIEW_HEIGHT-1
+        FLY_WORLD_BOUNDS_ADDRESS
+        moveb   (R10), R3
+        inc     R10
+        moveb   (R10), R4
+        inc     R10
+        moveb   (R10), R5
+        inc     R10
+        moveb   (R10), R6
+        inc     R10
+        movew   (R10), R7
+        lm      R11, (BRUSH_VERTEX_RETURN)
+        GSU_ABSOLUTE_GOTO FlyWorldMaskCheckBounds

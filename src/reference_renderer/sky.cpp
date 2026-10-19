@@ -113,10 +113,10 @@ QuakeSkyTile make_quake_sky_tile(const MipTexture& texture, const QuakeSkyClock&
 
 std::array<std::int32_t, 2> quake_sky_uv_to_st(const ViewTransform& view, int u, int v, const QuakeSkyClock& clock)
 {
-    constexpr float screen_extent =
-        static_cast<float>(kLogicalWidth >= kLogicalHeight ? kLogicalWidth : kLogicalHeight);
-    const float wu = 8192.0F * static_cast<float>(u - (kLogicalWidth >> 1)) / screen_extent;
-    const float wv = 8192.0F * static_cast<float>((kLogicalHeight >> 1) - v) / screen_extent;
+    const float screen_extent =
+        static_cast<float>(render_width() >= render_height() ? render_width() : render_height());
+    const float wu = 8192.0F * static_cast<float>(u - render_center_x()) / screen_extent;
+    const float wv = 8192.0F * static_cast<float>(render_center_y() - v) / screen_extent;
     float end_x = 4096.0F * static_cast<float>(view.forward.x) + wu * static_cast<float>(view.screen_right.x) +
                   wv * static_cast<float>(view.up.x);
     float end_y = 4096.0F * static_cast<float>(view.forward.y) + wu * static_cast<float>(view.screen_right.y) +
@@ -172,7 +172,7 @@ void draw_quake_sky_span(
     int last_x
 )
 {
-    if (indices.size() != kLogicalPixels || y < 0 || y >= kLogicalHeight || first_x < 0 || last_x >= kLogicalWidth ||
+    if (indices.size() != kLogicalPixels || y < 0 || y >= render_height() || first_x < 0 || last_x >= render_width() ||
         first_x > last_x)
     {
         fail("Quake sky span escapes the logical framebuffer");
@@ -238,10 +238,10 @@ QuakeSkyPresentation render_quake_sky_presentation(
     int sky_pixels = 0;
     int changed_sky_pixels = 0;
     int sky_spans = 0;
-    for (int y = 0; y < kLogicalHeight; ++y)
+    for (int y = 0; y < render_height(); ++y)
     {
         int x = 0;
-        while (x < kLogicalWidth)
+        while (x < render_width())
         {
             const auto pixel = logical_pixel_index(x, y);
             const auto face = faces[pixel];
@@ -252,7 +252,7 @@ QuakeSkyPresentation render_quake_sky_presentation(
                 continue;
             }
             const int first_x = x;
-            while (++x < kLogicalWidth)
+            while (++x < render_width())
             {
                 const auto next = logical_pixel_index(x, y);
                 if (entities[next] != 0 || faces[next] != face)

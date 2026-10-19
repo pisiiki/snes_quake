@@ -1,6 +1,7 @@
 #pragma once
 
 #include "world.hpp"
+#include "viewport.hpp"
 
 namespace quake_bsp_reference {
 
@@ -283,6 +284,7 @@ class Bvh
 
 struct Camera
 {
+    // Native SNES orientation: 256 steps per turn, signed pitch.
     int x{};
     int y{};
     int z{};
@@ -296,6 +298,7 @@ struct SourceCamera
     double pitch{};
     double yaw{};
     double roll{};
+    std::optional<std::array<Vec3, 3>> capture_basis{};
 };
 
 struct ViewTransform
@@ -321,6 +324,10 @@ struct ReferenceFrame
     std::vector<std::uint8_t> indices;
     std::vector<std::uint8_t> material_indices;
     std::vector<std::uint8_t> texture_indices;
+    std::vector<std::uint8_t> turbulent_pixels;
+    std::vector<std::uint8_t> turbulent_texture_indices;
+    std::vector<std::uint8_t> turbulent_lightmap_texture_indices;
+    double surface_time{};
     std::vector<double> texture_s;
     std::vector<double> texture_t;
     std::vector<std::uint8_t> lightmap_texture_indices;
@@ -365,11 +372,14 @@ struct ExactTextureSample
     double distance{};
     double s{};
     double t{};
+    bool turbulent{};
+    std::uint8_t turbulent_index{};
 };
 
 double projection_plane_distance(double ray_depth);
 
-ExactTextureSample sample_exact_texture(const SourceWorld& world, std::uint16_t face, const Ray& ray);
+ExactTextureSample
+sample_exact_texture(const SourceWorld& world, std::uint16_t face, const Ray& ray, double surface_time = 0.0);
 
 std::uint8_t
 sample_bsp_lightmap_level(const FaceLightmap& lightmap, std::span<const std::uint8_t> lighting, double s, double t);
@@ -386,7 +396,12 @@ std::uint8_t remap_texture_index(
     std::uint8_t identity_level
 );
 
-void shade_exact_texture_frame(ReferenceFrame& frame, const SourceWorld& world, const ViewTransform& view);
+void shade_exact_texture_frame(
+    ReferenceFrame& frame,
+    const SourceWorld& world,
+    const ViewTransform& view,
+    double surface_time = 0.0
+);
 
 std::vector<Camera> load_demo_track(const fs::path& path);
 
@@ -396,10 +411,10 @@ std::vector<SourceCamera> load_precise_demo_track(const fs::path& path);
 
 std::size_t demo_pose_at_tick(const std::vector<std::uint16_t>& ticks, std::uint16_t tick);
 
-inline constexpr int kPlaybackControlsHeight = 152;
-inline constexpr int kMinimumLiveClientWidth = 768;
+inline constexpr int kPlaybackControlsHeight = 168;
+inline constexpr int kMinimumLiveClientWidth = 800;
 inline constexpr double kNtscFramesPerSecond = 60.0988138974405;
-inline constexpr double kStepDemoFramesPerSecond = 2.0;
+inline constexpr double kStepDemoFramesPerSecond = 3.0;
 
 enum class PlaybackSpeed {
     Realtime,
@@ -425,8 +440,8 @@ inline constexpr std::array<const char*, 2> kOrderedPaceLabels{
 };
 
 inline constexpr std::array<const char*, 2> kOrderedRateLabels{
-    "2 Hz",
-    "20 Hz",
+    "3 Hz",
+    "30 Hz",
 };
 
 constexpr double playback_speed_scale(PlaybackSpeed speed)
@@ -474,10 +489,14 @@ inline constexpr std::array<const char*, 2> kLightingLabels{
     "LightMap",
 };
 
+enum class LiquidTurbulence { None, SnesQ4 };
+
 struct RenderMode
 {
     bool textures{true};
     Lighting lighting{Lighting::LightMap};
+    Lighting liquid_lighting{Lighting::LightMap};
+    LiquidTurbulence liquid_turbulence{LiquidTurbulence::None};
 
     auto operator<=>(const RenderMode&) const = default;
 };
@@ -489,10 +508,15 @@ int render_mode_technique(RenderMode mode);
 struct LiveWindowState
 {
     std::vector<std::uint32_t> pixels;
+    std::vector<std::uint32_t> display_pixels;
+    RenderScale scale{RenderScale::X2};
+    Json presentation;
     bool paused{};
     bool brushes_enabled{};
     bool entities_enabled{};
     bool external_bsp_models{};
+    bool particles_available{};
+    bool particles_enabled{};
     bool sound_enabled{};
     float sound_volume{0.7F};
     bool legacy_material{};
@@ -515,9 +539,21 @@ ReferenceFrame render_material_reference(
     std::span<const int> painter_ranks = {}
 );
 
-ReferenceFrame render_source_reference(const SourceWorld& world, const Bvh& bvh, const Camera& camera, bool flat);
+ReferenceFrame render_source_reference(
+    const SourceWorld& world,
+    const Bvh& bvh,
+    const Camera& camera,
+    bool flat,
+    double surface_time = 0.0
+);
 
-ReferenceFrame render_source_reference(const SourceWorld& world, const Bvh& bvh, const SourceCamera& camera, bool flat);
+ReferenceFrame render_source_reference(
+    const SourceWorld& world,
+    const Bvh& bvh,
+    const SourceCamera& camera,
+    bool flat,
+    double surface_time = 0.0
+);
 
 struct ViewVertex
 {

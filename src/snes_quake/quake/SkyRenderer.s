@@ -234,22 +234,17 @@ SnapshotRenderedSkyState:
 
 PresentSkyStateFromSlot:
         RW_assume a16i16
-        ldx     #0
-        lda     upload_slot
-        beq     :+
-        ldx     #4
-:
+        ; PublishUploadSlotState supplies its word offset (0/2). Return the
+        ; Q16 offset (0/4) for the immediately following turbulence commit.
+        lda     slot_sky_present,x
+        sta     presented_sky_present
+        txa
+        asl
+        tax
         lda     slot_sky_phase_q16+0,x
         sta     presented_sky_phase_q16+0
         lda     slot_sky_phase_q16+2,x
         sta     presented_sky_phase_q16+2
-        ldx     #0
-        lda     upload_slot
-        beq     :+
-        ldx     #2
-:
-        lda     slot_sky_present,x
-        sta     presented_sky_present
         rts
 
 .segment "LORAM"

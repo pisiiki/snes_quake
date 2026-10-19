@@ -1,5 +1,6 @@
 #include "geometry.hpp"
 #include "world.hpp"
+#include "turbulence.hpp"
 
 namespace quake_bsp_reference {
 
@@ -52,15 +53,15 @@ Camera preset_camera(std::string_view name)
 {
     if (name == "spawn" || name == "return-spawn")
     {
-        return {-46, -80, -7, 24, 0};
+        return {-46, -80, -7, 192, 0};
     }
     if (name == "near")
     {
-        return {-45, -91, -6, 25, 0};
+        return {-45, -91, -6, 200, 0};
     }
     if (name == "far")
     {
-        return {-77, -41, -13, 8, 0};
+        return {-77, -41, -13, 64, 0};
     }
     if (name == "yaw")
     {
@@ -68,15 +69,15 @@ Camera preset_camera(std::string_view name)
     }
     if (name == "pitch")
     {
-        return {-46, -80, -7, 24, 3};
+        return {-46, -80, -7, 192, 24};
     }
     fail("unknown camera preset: " + std::string(name));
 }
 
 int table_index(int value)
 {
-    value %= 32;
-    return value < 0 ? value + 32 : value;
+    value %= 256;
+    return value < 0 ? value + 256 : value;
 }
 
 ViewTransform packed_view_transform(const SourceWorld& world, const Camera& camera)
@@ -95,6 +96,8 @@ ViewTransform packed_view_transform(const SourceWorld& world, const Camera& came
 
 ViewTransform source_view_transform(const SourceCamera& camera)
 {
+    if (camera.capture_basis)
+        return {camera.origin, (*camera.capture_basis)[0], (*camera.capture_basis)[1], (*camera.capture_basis)[2]};
     constexpr double degrees_to_radians = std::numbers::pi / 180.0;
     const double pitch = camera.pitch * degrees_to_radians;
     const double yaw = camera.yaw * degrees_to_radians;
@@ -121,8 +124,8 @@ ViewTransform source_view_transform(const SourceCamera& camera)
 
 Ray view_ray(const ViewTransform& view, int x, int y)
 {
-    const double right = (static_cast<double>(x) + 0.5 - 64.0) / kFocalLength;
-    const double up = (56.0 - (static_cast<double>(y) + 0.5)) / kFocalLength;
+    const double right = (static_cast<double>(x) + 0.5 - render_center_x()) / render_focal_length();
+    const double up = (render_center_y() - (static_cast<double>(y) + 0.5)) / render_focal_length();
     return {view.origin, view.forward + view.screen_right * right + view.up * up};
 }
 
@@ -142,7 +145,7 @@ bool face_is_visible(const SourceWorld& world, const Camera& camera, const Vec3&
         auto camera_dot = wrap_i16(static_cast<int>(plane.x) * camera.x * coordinate_scale);
         camera_dot = wrap_i16(static_cast<int>(camera_dot) + static_cast<int>(plane.y) * camera.y * coordinate_scale);
         camera_dot = wrap_i16(static_cast<int>(camera_dot) + static_cast<int>(plane.z) * camera.z * coordinate_scale);
-        return wrap_i16(static_cast<int>(camera_dot) - plane.distance) < 0;
+        return wrap_i16(static_cast<int>(camera_dot) - plane.distance) <= 0;
     }
     const auto& plane = world.visibility_planes.at(face);
     return dot(source_camera, plane.normal) - plane.distance > kFaceVisibilityEpsilon;
@@ -195,9 +198,9 @@ ReferenceFrame render_reference_with_view(
         }
     }
     std::set<std::uint16_t> unique_faces;
-    for (int y = 0; y < kLogicalHeight; ++y)
+    for (int y = 0; y < render_height(); ++y)
     {
-        for (int x = 0; x < kLogicalWidth; ++x)
+        for (int x = 0; x < render_width(); ++x)
         {
             const auto ray = view_ray(view, x, y);
             const auto hit =
@@ -257,10 +260,8 @@ std::size_t wrapped_texel(double coordinate, std::uint32_t dimension)
     {
         fail("texture coordinate is non-finite or has a zero-sized axis");
     }
-    const auto texel = static_cast<std::int64_t>(std::floor(coordinate));
-    const auto size = static_cast<std::int64_t>(dimension);
-    const auto wrapped = ((texel % size) + size) % size;
-    return static_cast<std::size_t>(wrapped);
+    const double texel = std::floor(std::fmod(coordinate, static_cast<double>(dimension)));
+    return static_cast<std::size_t>(texel < 0 ? texel + dimension : texel);
 }
 
 double projection_plane_distance(double ray_depth)
@@ -272,7 +273,8 @@ double projection_plane_distance(double ray_depth)
     return ray_depth / kWorldScale;
 }
 
-ExactTextureSample sample_exact_texture(const SourceWorld& world, std::uint16_t face, const Ray& ray)
+ExactTextureSample
+sample_exact_texture(const SourceWorld& world, std::uint16_t face, const Ray& ray, double surface_time)
 {
     const auto face_index = static_cast<std::size_t>(face);
     if (face_index >= world.face_texture_infos.size() || face_index >= world.visibility_planes.size())
@@ -306,7 +308,15 @@ ExactTextureSample sample_exact_texture(const SourceWorld& world, std::uint16_t 
     const double t = dot(info.t_axis, point) + info.t_offset;
     const auto u = wrapped_texel(s, texture.width);
     const auto v = wrapped_texel(t, texture.height);
-    return {texture.level_zero[v * texture.width + u], projection_plane_distance(depth), s, t};
+    const auto index = texture.level_zero[v * texture.width + u];
+    return {
+        index,
+        projection_plane_distance(depth),
+        s,
+        t,
+        texture.turbulent,
+        texture.turbulent ? sample_source_turbulent_texture(texture, s, t, surface_time) : index
+    };
 }
 
 std::uint8_t
@@ -466,33 +476,46 @@ std::uint8_t remap_texture_index(
                : world.texture_colormap.at(colormap_level).at(texture_index);
 }
 
-void shade_exact_texture_frame(ReferenceFrame& frame, const SourceWorld& world, const ViewTransform& view)
+void shade_exact_texture_frame(
+    ReferenceFrame& frame,
+    const SourceWorld& world,
+    const ViewTransform& view,
+    double surface_time
+)
 {
     if (frame.faces.size() != kLogicalPixels)
     {
         fail("exact texture frame has an invalid owner plane");
     }
     frame.texture_indices.assign(frame.faces.size(), kUnwrittenIndex);
+    frame.turbulent_pixels.assign(frame.faces.size(), 0);
+    frame.turbulent_texture_indices.assign(frame.faces.size(), kUnwrittenIndex);
+    frame.turbulent_lightmap_texture_indices.assign(frame.faces.size(), kUnwrittenIndex);
+    frame.surface_time = surface_time;
     frame.texture_s.resize(frame.faces.size());
     frame.texture_t.resize(frame.faces.size());
     frame.lightmap_texture_indices.assign(frame.faces.size(), kUnwrittenIndex);
     frame.lightmap_texture_levels.resize(frame.faces.size());
     frame.untextured_lightmap_indices.assign(frame.faces.size(), kUntexturedDiagnosticIndex);
-    for (int y = 0; y < kLogicalHeight; ++y)
+    for (int y = 0; y < render_height(); ++y)
     {
-        for (int x = 0; x < kLogicalWidth; ++x)
+        for (int x = 0; x < render_width(); ++x)
         {
             const auto pixel = logical_pixel_index(x, y);
             const auto face = frame.faces[pixel];
             if (face != kMissFace)
             {
-                const auto sample = sample_exact_texture(world, face, view_ray(view, x, y));
+                const auto sample = sample_exact_texture(world, face, view_ray(view, x, y), surface_time);
                 frame.texture_indices[pixel] = sample.index;
+                frame.turbulent_texture_indices[pixel] = sample.turbulent_index;
+                frame.turbulent_pixels[pixel] = static_cast<std::uint8_t>(sample.turbulent);
                 frame.texture_s[pixel] = sample.s;
                 frame.texture_t[pixel] = sample.t;
                 const auto lightmap_level = sample_bsp_lightmap_level(world, face, sample.s, sample.t);
                 frame.lightmap_texture_levels[pixel] = lightmap_level;
                 frame.lightmap_texture_indices[pixel] = remap_texture_index(world, sample.index, lightmap_level, 0);
+                frame.turbulent_lightmap_texture_indices[pixel] =
+                    remap_texture_index(world, sample.turbulent_index, lightmap_level, 0);
                 frame.untextured_lightmap_indices[pixel] = untextured_lightmap_index(lightmap_level);
             }
         }
@@ -702,10 +725,11 @@ ReferenceFrame render_material_reference(
     return frame;
 }
 
-ReferenceFrame render_source_reference(const SourceWorld& world, const Bvh& bvh, const Camera& camera, bool flat)
+ReferenceFrame
+render_source_reference(const SourceWorld& world, const Bvh& bvh, const Camera& camera, bool flat, double surface_time)
 {
     auto frame = render_material_reference(world, bvh, camera, flat);
-    shade_exact_texture_frame(frame, world, packed_view_transform(world, camera));
+    shade_exact_texture_frame(frame, world, packed_view_transform(world, camera), surface_time);
     return frame;
 }
 
@@ -722,12 +746,18 @@ Camera packed_position_for_material_shading(const SourceWorld& world, const Sour
 }
 } // namespace
 
-ReferenceFrame render_source_reference(const SourceWorld& world, const Bvh& bvh, const SourceCamera& camera, bool flat)
+ReferenceFrame render_source_reference(
+    const SourceWorld& world,
+    const Bvh& bvh,
+    const SourceCamera& camera,
+    bool flat,
+    double surface_time
+)
 {
     const auto view = source_view_transform(camera);
     auto frame = render_reference_with_view(world, bvh, view, nullptr, flat, {}, {});
     shade_material_frame(frame, world, packed_position_for_material_shading(world, camera), flat);
-    shade_exact_texture_frame(frame, world, view);
+    shade_exact_texture_frame(frame, world, view, surface_time);
     return frame;
 }
 
@@ -771,15 +801,21 @@ ProjectedVertex project_packed_vertex(const SourceWorld& world, const PackedVert
     }
     const int depth_q4 = std::max(4, (view.depth_q6 + 8) >> 4);
     const int reciprocal_q12 = world.reciprocal_table.at(static_cast<std::size_t>(depth_q4));
-    result.screen.x = wrap_i16(64 + ((view.right_q6 * reciprocal_q12) >> 12));
-    result.screen.y = wrap_i16(56 - ((view.up_q6 * reciprocal_q12) >> 12));
+    result.screen.x = wrap_i16(
+        render_center_x() +
+        static_cast<int>((static_cast<std::int64_t>(view.right_q6) * reciprocal_q12 * render_focal_length() / 96) >> 12)
+    );
+    result.screen.y = wrap_i16(
+        render_center_y() -
+        static_cast<int>((static_cast<std::int64_t>(view.up_q6) * reciprocal_q12 * render_focal_length() / 96) >> 12)
+    );
     result.state = 1;
     return result;
 }
 
 void raster_pixel(RasterResult& result, int x, int y, std::uint16_t face, bool uncovered_only)
 {
-    if (x < 0 || x >= kLogicalWidth || y < 0 || y >= kLogicalHeight)
+    if (x < 0 || x >= render_width() || y < 0 || y >= render_height())
     {
         return;
     }
@@ -797,7 +833,7 @@ namespace {
 void raster_hline(RasterResult& result, int x0, int y, int x1, std::uint16_t face, int overlap, bool uncovered_only)
 {
     ++result.stats.span_calls;
-    if (y < 0 || y >= kLogicalHeight)
+    if (y < 0 || y >= render_height())
     {
         return;
     }
@@ -807,12 +843,12 @@ void raster_hline(RasterResult& result, int x0, int y, int x1, std::uint16_t fac
     }
     x0 -= overlap;
     x1 += overlap;
-    if (x1 < 0 || x0 >= kLogicalWidth)
+    if (x1 < 0 || x0 >= render_width())
     {
         return;
     }
     x0 = std::max(x0, 0);
-    x1 = std::min(x1, kLogicalWidth - 1);
+    x1 = std::min(x1, render_width() - 1);
     for (int x = x0; x <= x1; ++x)
     {
         raster_pixel(result, x, y, face, uncovered_only);
@@ -936,8 +972,8 @@ ScreenPoint clip_edge_to_near(const ViewVertex& inside, const ViewVertex& outsid
     const int right_q6 = interpolate_q6(base.right_q6, other.right_q6);
     const int up_q6 = interpolate_q6(base.up_q6, other.up_q6);
     return {
-        wrap_i16(64 + ((right_q6 * 96) >> 6)),
-        wrap_i16(56 - ((up_q6 * 96) >> 6)),
+        wrap_i16(render_center_x() + ((right_q6 * render_focal_length()) >> 6)),
+        wrap_i16(render_center_y() - ((up_q6 * render_focal_length()) >> 6)),
     };
 }
 } // namespace
@@ -1053,7 +1089,8 @@ int frustum_distance(const ViewVertex& point, int plane)
 {
     const int axis = plane < 2 ? point.right_q6 : point.up_q6;
     const bool subtract_axis = plane == 1 || plane == 2;
-    return (point.depth_q6 >> 1) + (subtract_axis ? -(axis >> 1) : (axis >> 1));
+    const int clipped_axis = axis >> (render_wide_frustum() ? 2 : 1);
+    return (point.depth_q6 >> 1) + (subtract_axis ? -clipped_axis : clipped_axis);
 }
 
 namespace {
@@ -1145,12 +1182,14 @@ void raster_fixed_convex_polygon(RasterResult& result, std::span<const ViewVerte
     {
         const int depth = std::max(1, point.depth_q6);
         const auto projected_delta = [&](int component) {
-            const int magnitude = std::min(std::abs(component), depth);
+            const int magnitude = std::min(std::abs(component), depth * (render_wide_frustum() ? 2 : 1));
             const int ratio_q11 = (magnitude << 11) / depth;
-            const int delta_q7 = ratio_q11 * 6;
-            return component < 0 ? -delta_q7 : delta_q7;
+            return render_project_q7(component < 0 ? -ratio_q11 : ratio_q11);
         };
-        polygon.push_back({8192 + projected_delta(point.right_q6), 7168 - projected_delta(point.up_q6)});
+        polygon.push_back(
+            {render_center_x() * 128 + projected_delta(point.right_q6),
+             render_center_y() * 128 - projected_delta(point.up_q6)}
+        );
     }
 
     std::size_t top = 0;
@@ -1166,7 +1205,7 @@ void raster_fixed_convex_polygon(RasterResult& result, std::span<const ViewVerte
         maximum_y_q7 = std::max(maximum_y_q7, polygon[index].y_q7);
     }
     const int first_y = std::max(0, ceil_divide(minimum_y_q7 - 64, 128));
-    const int last_y = std::min(kLogicalHeight - 1, floor_divide(maximum_y_q7 - 65, 128));
+    const int last_y = std::min(render_height() - 1, floor_divide(maximum_y_q7 - 65, 128));
     if (first_y > last_y)
     {
         return;
@@ -1211,7 +1250,7 @@ void raster_fixed_convex_polygon(RasterResult& result, std::span<const ViewVerte
         const int minimum_x_q7 = std::min(forward_x_q7, reverse_x_q7);
         const int maximum_x_q7 = std::max(forward_x_q7, reverse_x_q7);
         const int first_x = std::max(0, ceil_divide(minimum_x_q7 - 68, 128));
-        const int last_x = std::min(kLogicalWidth - 1, floor_divide(maximum_x_q7 - 60, 128));
+        const int last_x = std::min(render_width() - 1, floor_divide(maximum_x_q7 - 60, 128));
         if (first_x <= last_x)
         {
             raster_hline(result, first_x, y, last_x, face, 0, false);

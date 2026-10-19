@@ -243,8 +243,21 @@ class ReferenceInstrumentationServer::Impl
         brushes_enabled_ = live_state.brushes_enabled;
         entities_enabled_ = live_state.entities_enabled;
         external_bsp_models_ = live_state.external_bsp_models;
+        particles_available_ = live_state.particles_available;
+        particles_enabled_ = live_state.particles_enabled;
         playback_speed_ = live_state.playback_speed;
         frame_generation_ = frame_generation;
+        frame_width_ = indices.size() == 85U * 74U ? 85 : 128;
+        frame_height_ = indices.size() == 85U * 74U ? 74 : 112;
+        presentation_ = live_state.presentation;
+        display_rgb_.clear();
+        const auto& display = frame_width_ == 85 ? live_state.display_pixels : live_state.pixels;
+        for (const auto color : display)
+        {
+            display_rgb_.push_back(static_cast<std::uint8_t>((color >> 16U) & 255U));
+            display_rgb_.push_back(static_cast<std::uint8_t>((color >> 8U) & 255U));
+            display_rgb_.push_back(static_cast<std::uint8_t>(color & 255U));
+        }
         frame_indices_.assign(indices.begin(), indices.end());
         frame_hash_ = reference_instrumentation_hash(frame_indices_);
         if (live_state.pixels.size() != frame_indices_.size())
@@ -321,21 +334,11 @@ class ReferenceInstrumentationServer::Impl
             {"sessionId", config_.session_id},
             {"pipeName", config_.pipe_name},
             {"capabilities",
-             Json::array(
-                 {"status",
-                  "captureFrame",
-                  "captureWindow",
-                  "inspectAliases",
-                  "pause",
-                  "resume",
-                  "seek",
-                  "setPace",
-                  "setRate",
-                  "setExternalBspModels",
-                  "setSound",
-                  "setVolume",
-                  "shutdown"}
-             )},
+             Json::array({"status",        "captureFrame",   "captureDisplay", "setRenderScale",
+                          "setWarp",       "setViewPose",    "setScenePose",   "setCaptureCamera",
+                          "captureWindow", "inspectAliases", "pause",          "resume",
+                          "seek",          "setPace",        "setRate",        "setExternalBspModels",
+                          "setParticles",  "setSound",       "setVolume",      "shutdown"})},
             {"ready", ready_},
             {"windowCapture", window_capture_},
             {"serverError", server_error_.empty() ? Json(nullptr) : Json(server_error_)}
@@ -361,8 +364,8 @@ class ReferenceInstrumentationServer::Impl
                 {"frame",
                  Json{
                      {"generation", frame_generation_},
-                     {"width", kLogicalWidth},
-                     {"height", kLogicalHeight},
+                     {"width", frame_width_},
+                     {"height", frame_height_},
                      {"bytes", frame_indices_.size()},
                      {"fnv1a64", reference_instrumentation_hex(frame_hash_)}
                  }},
@@ -371,15 +374,20 @@ class ReferenceInstrumentationServer::Impl
                      {"textures", mode_.textures},
                      {"technique", render_mode_technique(mode_)},
                      {"lighting", static_cast<int>(mode_.lighting)},
+                     {"liquidLighting", mode_.liquid_lighting == Lighting::None ? "none" : "lightmap"},
+                     {"liquidTurbulence", mode_.liquid_turbulence == LiquidTurbulence::SnesQ4 ? "snes-q4" : "none"},
                      {"dynamicBrushes", brushes_enabled_},
                      {"configuredDynamicBrushes", brushes_enabled_},
                      {"mdlEntities", entities_enabled_},
                      {"configuredMdlEntities", entities_enabled_},
                      {"externalBspModels", external_bsp_models_},
                      {"configuredExternalBspModels", external_bsp_models_},
+                     {"particlesAvailable", particles_available_},
+                     {"particles", particles_enabled_},
                      {"externalBsp", external_bsp_inspection_},
                      {"surface", surface_inspection_}
                  }},
+                {"presentation", presentation_},
                 {"audio", audio_inspection_},
                 {"controls", control_layout_}
             }
@@ -398,12 +406,13 @@ class ReferenceInstrumentationServer::Impl
             {"pose", pose_},
             {"loop", loop_},
             {"generation", frame_generation_},
-            {"width", kLogicalWidth},
-            {"height", kLogicalHeight},
+            {"width", frame_width_},
+            {"height", frame_height_},
             {"format", "indexed8"},
             {"rgbFormat", "rgb888"},
             {"surface", surface_inspection_},
             {"fnv1a64", reference_instrumentation_hex(frame_hash_)},
+            {"presentation", presentation_},
             {"indicesHex", reference_instrumentation_bytes_hex(frame_indices_)},
             {"rgb888Hex", reference_instrumentation_bytes_hex(frame_rgb_)}
         };
@@ -446,6 +455,99 @@ class ReferenceInstrumentationServer::Impl
         if (method == "captureFrame")
         {
             return capture_locked();
+        }
+        if (method == "captureDisplay")
+        {
+            if (!ready_)
+                throw std::runtime_error("reference renderer has no displayed frame");
+            return Json{
+                {"protocol", kReferenceInstrumentationProtocol},
+                {"format", "rgb888"},
+                {"width", frame_width_ == 85 ? 256 : 128},
+                {"height", frame_width_ == 85 ? 224 : 112},
+                {"generation", frame_generation_},
+                {"presentation", presentation_},
+                {"rgb888Hex", reference_instrumentation_bytes_hex(display_rgb_)}
+            };
+        }
+        if (method == "setRenderScale")
+        {
+            const auto scale = parse_render_scale(params.value("scale", ""));
+            pending_commands_.render_scale = scale;
+            return Json{{"accepted", true}, {"scale", render_scale_name(scale)}};
+        }
+        if (method == "setWarp")
+        {
+            const auto settings = parse_warp_settings(
+                params.value("model", "projective"),
+                params.value("depth", 192.0),
+                params.value("bands", 16),
+                params.value("inverseDepthProfileQ16", std::vector<int>{})
+            );
+            pending_commands_.warp_settings = settings;
+            return Json{
+                {"accepted", true},
+                {"model", warp_model_name(settings)},
+                {"depth", settings.depth},
+                {"bands", settings.bands},
+                {"inverseDepthProfileQ16", settings.inverse_depth_profile}
+            };
+        }
+        if (method == "setScenePose")
+        {
+            if (!ready_ || !paused_ || !presentation_.value("scenePoseControl", false))
+                throw std::runtime_error("setScenePose requires paused source playback");
+            if (!params.contains("pose"))
+                throw std::runtime_error("scene pose must be an integer or null");
+            const auto& value = params.at("pose");
+            if (!value.is_null() && !value.is_number_integer())
+                throw std::runtime_error("scene pose must be an integer or null");
+            const auto pose = value.is_null() ? -1 : value.get<std::int64_t>();
+            if (!value.is_null() && (pose < 0 || static_cast<std::uint64_t>(pose) >= pose_count_))
+                throw std::runtime_error("scene pose is out of range");
+            pending_commands_.scene_pose = pose;
+            return Json{{"accepted", true}, {"pose", value}};
+        }
+        if (method == "setCaptureCamera")
+        {
+            if (!ready_ || !paused_ || !presentation_.value("captureCameraControl", false))
+                throw std::runtime_error("setCaptureCamera requires paused source playback");
+            const auto& value = params.at("camera");
+            if (value.is_null())
+                pending_commands_.capture_camera.emplace(std::nullopt);
+            else
+            {
+                const auto vector = [&](std::string_view key) {
+                    const auto& values = value.at(std::string(key));
+                    if (!values.is_array() || values.size() != 3)
+                        throw std::runtime_error("capture camera vectors must contain three numbers");
+                    Vec3 result{values[0].get<double>(), values[1].get<double>(), values[2].get<double>()};
+                    for (int axis = 0; axis < 3; ++axis)
+                        if (!std::isfinite(result[axis]) || std::abs(result[axis]) > 65536.0)
+                            throw std::runtime_error("capture camera vector is outside its finite domain");
+                    return result;
+                };
+                SourceCamera camera{vector("position")};
+                camera.capture_basis = std::array{vector("forward"), vector("screenRight"), vector("up")};
+                if (std::abs(
+                        dot((*camera.capture_basis)[0], cross((*camera.capture_basis)[1], (*camera.capture_basis)[2]))
+                    ) < 1e-6)
+                    throw std::runtime_error("capture camera basis is singular");
+                pending_commands_.capture_camera.emplace(camera);
+            }
+            return Json{{"accepted", true}};
+        }
+        if (method == "setViewPose")
+        {
+            if (!ready_ || !paused_ || presentation_.value("scale", "") != "x3-warp")
+                throw std::runtime_error("setViewPose requires paused X3 WARP playback");
+            if (!params.contains("pose") || !params.at("pose").is_number_integer())
+                throw std::runtime_error("view pose must be an integer");
+            const auto pose = params.at("pose").get<std::int64_t>();
+            if (pose < 0 || static_cast<std::uint64_t>(pose) >= pose_count_)
+                throw std::runtime_error("view pose is out of range");
+            pending_commands_.view_pose = static_cast<std::size_t>(pose);
+            return Json{{"accepted", true}, {"pose", pose}};
         }
         if (method == "captureWindow")
         {
@@ -520,9 +622,9 @@ class ReferenceInstrumentationServer::Impl
                 throw std::runtime_error("setRate requires ordered live playback");
             }
             const int rate = params.value("rateHz", 0);
-            if (rate != 2 && rate != 20)
+            if (rate != 3 && rate != 30)
             {
-                throw std::runtime_error("rateHz must be 2 or 20");
+                throw std::runtime_error("rateHz must be 3 or 30");
             }
             pending_commands_.presentation_rate_hz = rate;
             return Json{{"accepted", true}, {"rateHz", rate}};
@@ -531,7 +633,10 @@ class ReferenceInstrumentationServer::Impl
         {
             if (!ready_ || !external_bsp_inspection_.value("available", false))
             {
-                throw std::runtime_error("setExternalBspModels requires an external BSP replay");
+                throw std::runtime_error(
+                    "setExternalBspModels requires source rendering with an external BSP replay; packed pickups use "
+                    "brush/entity controls"
+                );
             }
             if (!params.contains("enabled") || !params.at("enabled").is_boolean())
             {
@@ -539,6 +644,16 @@ class ReferenceInstrumentationServer::Impl
             }
             const bool enabled = params.at("enabled").get<bool>();
             pending_commands_.external_bsp_models = enabled;
+            return Json{{"accepted", true}, {"enabled", enabled}};
+        }
+        if (method == "setParticles")
+        {
+            if (!ready_ || !particles_available_)
+                throw std::runtime_error("setParticles requires a particle replay");
+            if (!params.contains("enabled") || !params.at("enabled").is_boolean())
+                throw std::runtime_error("setParticles requires boolean enabled");
+            const bool enabled = params.at("enabled").get<bool>();
+            pending_commands_.particles_enabled = enabled;
             return Json{{"accepted", true}, {"enabled", enabled}};
         }
         if (method == "setSound")
@@ -864,13 +979,18 @@ class ReferenceInstrumentationServer::Impl
     std::uint64_t loop_{};
     bool paused_{};
     PlaybackSchedule schedule_{PlaybackSchedule::NewestDue};
-    int presentation_rate_hz_{2};
+    int presentation_rate_hz_{3};
     RenderMode mode_{};
     bool brushes_enabled_{};
     bool entities_enabled_{};
     bool external_bsp_models_{};
+    bool particles_available_{};
+    bool particles_enabled_{};
     PlaybackSpeed playback_speed_{PlaybackSpeed::Realtime};
     std::uint64_t frame_generation_{};
+    int frame_width_{128}, frame_height_{112};
+    Json presentation_;
+    std::vector<std::uint8_t> display_rgb_;
     std::uint64_t frame_hash_{};
     std::vector<std::uint8_t> frame_indices_;
     std::vector<std::uint8_t> frame_rgb_;

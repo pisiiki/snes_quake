@@ -496,14 +496,13 @@ void raster_packed_texture_polygon(
     {
         const int depth = std::max(1, point.view.depth_q6);
         const auto projected_delta = [&](int component) {
-            const int magnitude = std::min(std::abs(component), depth);
+            const int magnitude = std::min(std::abs(component), depth * (render_wide_frustum() ? 2 : 1));
             const int ratio_q11 = (magnitude << 11) / depth;
-            const int delta_q7 = ratio_q11 * 6;
-            return component < 0 ? -delta_q7 : delta_q7;
+            return render_project_q7(component < 0 ? -ratio_q11 : ratio_q11);
         };
         polygon.push_back(
-            {8192 + projected_delta(point.view.right_q6),
-             7168 - projected_delta(point.view.up_q6),
+            {render_center_x() * 128 + projected_delta(point.view.right_q6),
+             render_center_y() * 128 - projected_delta(point.view.up_q6),
              point.s_q4,
              point.t_q4,
              static_cast<std::int16_t>(point.view.depth_q6)}
@@ -523,7 +522,7 @@ void raster_packed_texture_polygon(
         maximum_y_q7 = std::max(maximum_y_q7, polygon[index].y_q7);
     }
     const int first_y = std::max(0, ceil_divide(minimum_y_q7 - 64, 128));
-    const int last_y = std::min(kLogicalHeight - 1, floor_divide(maximum_y_q7 - 65, 128));
+    const int last_y = std::min(render_height() - 1, floor_divide(maximum_y_q7 - 65, 128));
     if (first_y > last_y)
     {
         return;
@@ -614,7 +613,7 @@ void raster_packed_texture_polygon(
             std::swap(left, right);
         }
         const int first_x = std::max(0, ceil_divide(left.x_q7 - 68, 128));
-        const int last_x = std::min(kLogicalWidth - 1, floor_divide(right.x_q7 - 60, 128));
+        const int last_x = std::min(render_width() - 1, floor_divide(right.x_q7 - 60, 128));
         if (first_x <= last_x)
         {
             if (mode == TextureRasterMode::affine)
@@ -810,13 +809,16 @@ void raster_convex_polygon(
     polygon.reserve(clipped.size());
     for (const auto& vertex : clipped)
     {
-        polygon.push_back({64.0 + vertex.right * 96.0 / vertex.depth, 56.0 - vertex.up * 96.0 / vertex.depth});
+        polygon.push_back(
+            {render_center_x() + vertex.right * render_focal_length() / vertex.depth,
+             render_center_y() - vertex.up * render_focal_length() / vertex.depth}
+        );
     }
     const auto [minimum_y, maximum_y] = std::ranges::minmax_element(polygon, {}, &Point::y);
     constexpr double kBoundaryEpsilon = 1e-9;
     const int first_y = std::max(0, static_cast<int>(std::ceil(minimum_y->y - 0.5 - kBoundaryEpsilon)));
     const int last_y =
-        std::min(kLogicalHeight - 1, static_cast<int>(std::floor(maximum_y->y - 0.5 + kBoundaryEpsilon)));
+        std::min(render_height() - 1, static_cast<int>(std::floor(maximum_y->y - 0.5 + kBoundaryEpsilon)));
     for (int y = first_y; y <= last_y; ++y)
     {
         const double sample_y = static_cast<double>(y) + 0.5;
@@ -840,7 +842,7 @@ void raster_convex_polygon(
         int first_x = static_cast<int>(std::ceil(minimum_x - 0.5 - kBoundaryEpsilon));
         int last_x = static_cast<int>(std::floor(maximum_x - 0.5 + kBoundaryEpsilon));
         first_x = std::max(first_x, 0);
-        last_x = std::min(last_x, kLogicalWidth - 1);
+        last_x = std::min(last_x, render_width() - 1);
         if (first_x > last_x)
         {
             continue;
@@ -903,11 +905,87 @@ RasterResult render_convex_counterfactual(
     return result;
 }
 
-const std::vector<std::uint8_t>& selected_render_indices(const ReferenceFrame& frame, RenderMode mode)
+Json liquid_lighting_inspection(const ReferenceFrame& frame, RenderMode mode)
+{
+    int pixels = 0;
+    int affected = 0;
+    int warped_pixels = 0;
+    const bool warp = mode.liquid_turbulence == LiquidTurbulence::SnesQ4;
+    const auto& albedo = warp ? frame.turbulent_texture_indices : frame.texture_indices;
+    const auto& lightmapped = warp ? frame.turbulent_lightmap_texture_indices : frame.lightmap_texture_indices;
+    std::uint64_t table_hash = 14695981039346656037ULL;
+    for (const auto value : source_quake_turbulence_table())
+    {
+        table_hash = (table_hash ^ value) * 1099511628211ULL;
+    }
+    Json runs = Json::array();
+    const auto width = static_cast<std::size_t>(render_width());
+    const auto height = static_cast<std::size_t>(render_height());
+    for (std::size_t compact_pixel = 0; compact_pixel < width * height; ++compact_pixel)
+    {
+        const auto pixel =
+            logical_pixel_index(static_cast<int>(compact_pixel % width), static_cast<int>(compact_pixel / width));
+        if (pixel >= frame.turbulent_pixels.size())
+        {
+            continue;
+        }
+        if (frame.turbulent_pixels[pixel] == 0)
+        {
+            continue;
+        }
+        ++pixels;
+        affected += albedo.at(pixel) != lightmapped.at(pixel) ? 1 : 0;
+        warped_pixels += frame.texture_indices.at(pixel) != frame.turbulent_texture_indices.at(pixel) ? 1 : 0;
+        if (!runs.empty() && runs.back()[0].get<std::size_t>() + runs.back()[1].get<std::size_t>() == compact_pixel)
+        {
+            runs.back()[1] = runs.back()[1].get<int>() + 1;
+        }
+        else
+        {
+            runs.push_back(Json::array({compact_pixel, 1}));
+        }
+    }
+    return {
+        {"policy", mode.liquid_lighting == Lighting::None ? "none" : "lightmap"},
+        {"applied", mode.textures && mode.lighting == Lighting::LightMap},
+        {"pixels", pixels},
+        {"differentLightmappedTexels", affected},
+        {"pixelRuns", runs},
+        {"width", width},
+        {"height", height},
+        {"layout", "compact-row-major"},
+        {"sampling", warp ? "source-exact-uv-snes-q4" : "source-level-zero-unwarped"},
+        {"turbulencePolicy", warp ? "snes-q4" : "none"},
+        {"turbulenceApplied", mode.textures && warp},
+        {"surfaceTime", frame.surface_time},
+        {"turbulencePhase", quake_turbulence_phase(frame.surface_time)},
+        {"turbulenceTableFnv1a64", table_hash},
+        {"differentTurbulentTexels", warped_pixels},
+        {"packedPolicy", "none"}
+    };
+}
+
+std::vector<std::uint8_t> selected_render_indices(const ReferenceFrame& frame, RenderMode mode)
 {
     if (mode.textures)
     {
-        return mode.lighting == Lighting::None ? frame.texture_indices : frame.lightmap_texture_indices;
+        auto indices = mode.lighting == Lighting::None ? frame.texture_indices : frame.lightmap_texture_indices;
+        const bool unlit = mode.lighting == Lighting::None || mode.liquid_lighting == Lighting::None;
+        const bool warp = mode.liquid_turbulence == LiquidTurbulence::SnesQ4;
+        if (warp || unlit)
+        {
+            const auto& liquids =
+                warp ? (unlit ? frame.turbulent_texture_indices : frame.turbulent_lightmap_texture_indices)
+                     : frame.texture_indices;
+            for (std::size_t pixel = 0; pixel < frame.turbulent_pixels.size(); ++pixel)
+            {
+                if (frame.turbulent_pixels[pixel] != 0)
+                {
+                    indices[pixel] = liquids.at(pixel);
+                }
+            }
+        }
+        return indices;
     }
     if (mode.lighting == Lighting::LightMap)
     {
@@ -986,9 +1064,11 @@ void update_live_pixels(LiveWindowState& state, std::span<const std::uint8_t> in
     state.pixels.resize(indices.size());
     for (std::size_t index = 0; index < indices.size(); ++index)
     {
-        const auto color = state.legacy_material ? world.live_material_palette.at(indices[index])
-                           : state.mode.textures  ? world.texture_palette.at(indices[index])
-                                                 : world.untextured_palette.at(indices[index]);
+        const auto color =
+            state.legacy_material ? world.live_material_palette.at(indices[index])
+            : state.mode.textures
+                ? world.texture_palette.at(indices[index])
+                : world.untextured_palette.at(indices[index]);
         state.pixels[index] =
             (static_cast<std::uint32_t>(color.r) << 16U) | (static_cast<std::uint32_t>(color.g) << 8U) |
             static_cast<std::uint32_t>(color.b);

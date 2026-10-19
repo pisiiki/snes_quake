@@ -3,5 +3,6 @@
 *.mp4 binary
 *.png binary
 *.zip binary
+/src/snes_quake/Data/** -text
 third_party/quake106/SLICNSE.TXT binary
 third_party/quake106/README.TXT binary

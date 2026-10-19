@@ -1,3 +1,4 @@
+#include "presentation_warp.hpp"
 #include "application.hpp"
 #include "world.hpp"
 #include "geometry.hpp"
@@ -77,6 +78,7 @@ class ReferenceRendererApplication
         std::optional<ExternalBspReplay> external_bsp_replay;
         std::optional<ExternalBspScene> external_bsp_scene;
         std::optional<QuakeSoundAssets> sound_assets;
+        std::optional<ParticleReplay> particles;
         RenderMode initial_mode;
         bool brushes_enabled{};
         bool entities_enabled{};
@@ -122,6 +124,15 @@ class ReferenceRendererApplication
                 brush_replay.sample_rate
             ));
         }
+        std::optional<ParticleReplay> particles;
+        if (!options_.particle_replay.empty())
+            particles.emplace(load_particle_replay(
+                options_.particle_replay,
+                pak_bytes_,
+                options_.realtime_demo_track,
+                brush_replay,
+                options_.map_entry
+            ));
         return {
             std::move(brush_replay),
             std::move(alias_assets),
@@ -129,7 +140,8 @@ class ReferenceRendererApplication
             std::move(external_bsp_replay),
             std::move(external_bsp_scene),
             std::move(sound_assets),
-            {!options_.no_textures, options_.lighting},
+            std::move(particles),
+            {!options_.no_textures, options_.lighting, options_.liquid_lighting, options_.liquid_turbulence},
             !options_.no_brushes,
             !options_.no_entities
         };
@@ -165,12 +177,15 @@ class ReferenceRendererApplication
             brushes_enabled
         );
         write_file(options.ordered_alias_visibility, visibility);
-        std::cout << "aliasVisibilityContract=QAV2"
-                  << " aliasVisibilityRows=" << ordered.frames.size()
-                  << " aliasVisibilityBytes=" << (read_u32(visibility, 32) + read_u32(visibility, 36))
-                  << " aliasVisibilityMaxRecords=" << read_u16(visibility, 22) << " aliasVisibilityMaxMaskBytes="
-                  << read_u16(visibility, 24) << " brushes=" << (brushes_enabled ? "enabled" : "disabled")
-                  << " output=" << options.ordered_alias_visibility << '\n';
+        std::cout
+            << "aliasVisibilityContract=QAV2"
+            << " renderScale=" << options.render_scale
+            << " sourceFocal=" << (options.render_scale == "x2" ? 96 : options.diagnostic_source_focal)
+            << " aliasVisibilityRows=" << ordered.frames.size()
+            << " aliasVisibilityBytes=" << (read_u32(visibility, 32) + read_u32(visibility, 36))
+            << " aliasVisibilityMaxRecords=" << read_u16(visibility, 22) << " aliasVisibilityMaxMaskBytes="
+            << read_u16(visibility, 24) << " brushes=" << (brushes_enabled ? "enabled" : "disabled")
+            << " output=" << options.ordered_alias_visibility << '\n';
         return 0;
     }
 
@@ -217,7 +232,8 @@ class ReferenceRendererApplication
             external_scene,
             external_replay,
             options.external_bsp_models,
-            &state.external_coverage
+            &state.external_coverage,
+            options.surface_time_override ? std::optional<double>{options.surface_time} : std::nullopt
         );
         return state;
     }
@@ -232,26 +248,17 @@ class ReferenceRendererApplication
         const auto& world = world_;
         const auto& brush_replay = replay.brush_replay;
         const auto& alias_assets = replay.alias_assets;
-        const auto* external_replay = replay.external_bsp_replay ? &*replay.external_bsp_replay : nullptr;
-        const auto* external_scene = replay.external_bsp_scene ? &*replay.external_bsp_scene : nullptr;
         const auto initial_mode = replay.initial_mode;
         const bool brushes_enabled = replay.brushes_enabled;
         const bool entities_enabled = replay.entities_enabled;
         const auto pose = state.pose;
-        auto& external_coverage = state.external_coverage;
         auto quantized = build_quantized_world(options.data_dir, world);
-        const auto ordered = load_ordered_packed_replay(
-            options.ordered_replay,
-            options.realtime_demo_track,
-            options.data_dir,
-            quantized
-        );
-        const auto selected =
-            std::ranges::find_if(ordered.frames, [&](const auto& candidate) { return candidate.source_pose == pose; });
-        if (selected == ordered.frames.end())
+        const auto selection = select_demo_packet(quantized, pose);
+        if (!selection.ordered_frame)
         {
-            fail("--demo-pose is absent from --ordered-replay");
+            fail("demo sky requires --ordered-replay");
         }
+        const auto* selected = &*selection.ordered_frame;
         const double canonical_surface_time =
             brush_replay.first_server_time + (static_cast<double>(selected->source_pose) / brush_replay.sample_rate);
         const double effective_surface_time =
@@ -271,20 +278,21 @@ class ReferenceRendererApplication
             true,
             effective_surface_time,
             &surface_inspection,
-            external_scene,
-            external_replay,
-            options.external_bsp_models,
-            &external_coverage
+            replay.particles && options.particles ? &*replay.particles : nullptr
         );
         surface_inspection["timeSource"] = options.surface_time_override ? "command-line-override" : "demo-server-time";
         surface_inspection["canonicalSurfaceTime"] = canonical_surface_time;
         surface_inspection["surfaceTimeOverride"] = options.surface_time_override;
         surface_inspection["sourcePose"] = selected->source_pose;
+        surface_inspection["packetSourceFaces"] = options.packet_source_faces.generic_string();
         surface_inspection["output"] = Json{
             {"indicesPath", options.quake_sky_indices.string()},
             {"indicesBytes", presented.size()},
             {"logicalWidth", kLogicalWidth},
-            {"logicalHeight", kLogicalHeight}
+            {"logicalHeight", kLogicalHeight},
+            {"activeWidth", render_width()},
+            {"activeHeight", render_height()},
+            {"rowStride", kLogicalWidth}
         };
         write_quake_sky_artifacts(options.quake_sky_indices, presented, surface_inspection);
     }
@@ -328,8 +336,12 @@ class ReferenceRendererApplication
             fail("--demo-pose is absent from --ordered-replay");
         }
         selection.camera = selected->camera;
-        selection.packet = selected->packet;
+        selection.packet =
+            options_.packet_source_faces.empty()
+                ? selected->packet
+                : load_packet_selection(options_.packet_source_faces, quantized);
         selection.ordered_frame = *selected;
+        selection.ordered_frame->packet = selection.packet;
         return selection;
     }
 
@@ -341,7 +353,10 @@ class ReferenceRendererApplication
     ) const
     {
         const double server_time =
-            replay.brush_replay.first_server_time + (static_cast<double>(state.pose) / replay.brush_replay.sample_rate);
+            options_.surface_time_override
+                ? options_.surface_time
+                : replay.brush_replay.first_server_time +
+                      (static_cast<double>(state.pose) / replay.brush_replay.sample_rate);
         state.packed_source_authority.emplace(render_packed_camera_source_reference_with_brushes(
             world_,
             bvh_,
@@ -428,8 +443,6 @@ class ReferenceRendererApplication
         std::vector<std::uint8_t> composed;
         if (selection.ordered_frame.has_value())
         {
-            const auto* external_replay = replay.external_bsp_replay ? &*replay.external_bsp_replay : nullptr;
-            const auto* external_scene = replay.external_bsp_scene ? &*replay.external_bsp_scene : nullptr;
             composed = render_ordered_packed_indices(
                 build_quantized_world(options_.data_dir, world_),
                 *selection.ordered_frame,
@@ -443,11 +456,7 @@ class ReferenceRendererApplication
                 nullptr,
                 false,
                 0.0,
-                nullptr,
-                external_scene,
-                external_replay,
-                options_.external_bsp_models,
-                &state.external_coverage
+                nullptr
             );
         }
         else
@@ -468,6 +477,12 @@ class ReferenceRendererApplication
                     : std::vector<std::uint8_t>(opaque.begin(), opaque.end());
         }
         write_file(options_.packed_alias_render_indices, composed);
+        const auto inspection =
+            packed_alias_inspection(selection.camera, replay.alias_assets, state.pose, state.alias_coverage);
+        std::ofstream sidecar(with_suffix(options_.packed_alias_render_indices, ".json"));
+        sidecar << inspection.dump(2) << '\n';
+        if (!sidecar)
+            fail("cannot write packed alias inspection");
     }
 
     void render_demo_packed(const SourceReplayContext& replay, DemoPoseState& state) const
@@ -752,6 +767,22 @@ class ReferenceRendererApplication
     int run_demo_pose(const SourceReplayContext& replay) const
     {
         auto state = render_demo_source(replay);
+        if (!options_.particle_output.empty())
+        {
+            const auto camera = load_precise_demo_track(options_.realtime_demo_track).at(state.pose);
+            auto indices = select_live_indices(state.frame, replay.initial_mode, false);
+            Json inspection{{"enabled", false}, {"sourcePose", state.pose}};
+            if (replay.particles && options_.particles)
+                inspection = compose_particles(
+                    indices,
+                    state.frame.depths,
+                    source_view_transform(camera),
+                    *replay.particles,
+                    state.pose,
+                    replay.initial_mode
+                );
+            write_quake_sky_artifacts(options_.particle_output, indices, inspection);
+        }
         write_demo_sky(replay, state);
         render_demo_packed(replay, state);
         write_demo_outputs(replay, state);
@@ -786,7 +817,7 @@ class ReferenceRendererApplication
             initial_mode,
             options.material_view,
             options.playback_speed,
-            options.ordered_2hz,
+            options.ordered_3hz,
             options.ordered_fast,
             options.ordered_presentation_hz,
             {options.instrumentation_session, options.instrumentation_pipe},
@@ -797,7 +828,10 @@ class ReferenceRendererApplication
             options.external_bsp_models,
             sound_assets,
             !options.no_sound,
-            options.volume
+            options.volume,
+            replay.particles ? &*replay.particles : nullptr,
+            options.particles,
+            options.inspect_packed_external_visibility
         );
     }
 
@@ -826,7 +860,7 @@ class ReferenceRendererApplication
             options.packed_realtime_demo_track,
             options.realtime_demo_timing,
             options.flat,
-            {!options.no_textures, options.lighting},
+            {!options.no_textures, options.lighting, options.liquid_lighting, options.liquid_turbulence},
             options.material_view,
             options.playback_speed,
             {options.instrumentation_session, options.instrumentation_pipe}
@@ -881,7 +915,7 @@ class ReferenceRendererApplication
         }
 
         render_begin = std::chrono::steady_clock::now();
-        frame = render_source_reference(world, bvh, options.camera, options.flat);
+        frame = render_source_reference(world, bvh, options.camera, options.flat, options.surface_time);
         render_end = std::chrono::steady_clock::now();
         if (!options.report_only)
         {
@@ -891,7 +925,7 @@ class ReferenceRendererApplication
 
     [[nodiscard]] RenderMode static_render_mode() const
     {
-        return {!options_.no_textures, options_.lighting};
+        return {!options_.no_textures, options_.lighting, options_.liquid_lighting, options_.liquid_turbulence};
     }
 
     void render_static_quantized_reference(StaticRenderState& state) const
@@ -1021,8 +1055,7 @@ class ReferenceRendererApplication
                 const auto source_pose = static_cast<std::size_t>(options_.fly_source_pose);
                 auto visual_state = packed_brush_visual_state_at_pose(brush_assets, source_pose);
                 const auto fly = std::ranges::find(brush_assets.sections, "FLYSTATE", &PackedBrushSection::name);
-                if (fly == brush_assets.sections.end() || fly->record_bytes != 2 ||
-                    visual_state > fly->record_count ||
+                if (fly == brush_assets.sections.end() || fly->record_bytes != 2 || visual_state > fly->record_count ||
                     fly->bytes.size() != static_cast<std::size_t>(fly->record_count) * 2)
                 {
                     fail("QBSA FLYSTATE cannot complete the requested frozen state");
@@ -1068,8 +1101,7 @@ class ReferenceRendererApplication
         }
     }
 
-    [[nodiscard]] static const PackedTextureRaster&
-    selected_static_packed_frame(const StaticRenderState& state)
+    [[nodiscard]] static const PackedTextureRaster& selected_static_packed_frame(const StaticRenderState& state)
     {
         return required(state.packed_projective_texture_raster);
     }
@@ -1125,18 +1157,19 @@ class ReferenceRendererApplication
             "command-line-override"
         );
         sky.inspection["turbulence"] = quake_turbulence_inspection(selected_frame);
-        const auto presented = options_.no_entities
-                                   ? sky.indices
-                                   : compose_post_opaque_alias_indices(
-                                         sky.indices,
-                                         selected_frame.depth_q6,
-                                         options_.camera,
-                                         alias_assets,
-                                         state.fly_alias_row,
-                                         mode,
-                                         nullptr,
-                                         nullptr
-                                     );
+        const auto presented =
+            options_.no_entities
+                ? sky.indices
+                : compose_post_opaque_alias_indices(
+                      sky.indices,
+                      selected_frame.depth_q6,
+                      options_.camera,
+                      alias_assets,
+                      state.fly_alias_row,
+                      mode,
+                      nullptr,
+                      nullptr
+                  );
         sky.inspection["playbackMode"] = "static-fly";
         sky.inspection["surfaceTimeOverride"] = true;
         sky.inspection["camera"] = Json{
@@ -1544,8 +1577,12 @@ class ReferenceRendererApplication
 int run_application(int argc, char** argv)
 {
     const auto options = parse_options(argc, argv);
+    const RenderViewportScope viewport(parse_render_scale(options.render_scale), options.diagnostic_source_focal);
+    active_warp_settings =
+        parse_warp_settings(options.warp_model, options.warp_depth, options.warp_bands, options.warp_profile);
     if (options.self_test)
     {
+        run_presentation_warp_tests();
         const bool passed = run_self_test();
         std::cout << "self-test=" << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 2;

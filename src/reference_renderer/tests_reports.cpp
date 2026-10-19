@@ -1,5 +1,6 @@
 #include "tests_reports.hpp"
 #include "world.hpp"
+#include "particles.hpp"
 #include "geometry.hpp"
 #include "brushes.hpp"
 #include "audio.hpp"
@@ -9,8 +10,10 @@
 #include "packed_brushes.hpp"
 #include "ordered_replay.hpp"
 #include "artifacts_options.hpp"
+#include "report.hpp"
 #include "alias_tests.hpp"
 #include "sky_tests.hpp"
+#include "turbulence.hpp"
 
 namespace quake_bsp_reference {
 
@@ -39,7 +42,7 @@ bool run_surface_visibility_self_test()
     }
     const Bvh bvh(world.triangles);
     const auto front = render_reference(world, bvh, {0, 0, 0, 0, 0}, false);
-    const auto back = render_reference(world, bvh, {2, 0, 0, 16, 0}, false);
+    const auto back = render_reference(world, bvh, {2, 0, 0, 128, 0}, false);
     if (front.hits != kLogicalPixels || front.misses != 0 || front.unique_faces != 1 || front.visible_faces != 1 ||
         back.hits != kLogicalPixels || back.misses != 0 || back.unique_faces != 1 || back.visible_faces != 1 ||
         std::ranges::any_of(front.faces, [](std::uint16_t face) { return face != 0; }) ||
@@ -292,20 +295,17 @@ bool run_render_mode_self_test()
            world.untextured_palette[238] == Rgb{} && world.untextured_palette[240] == world.texture_palette[240] &&
            world.untextured_palette[255] == world.texture_palette[255] &&
            world.untextured_palette[kUntexturedDiagnosticIndex] == Rgb{255, 0, 255} &&
-           untextured_lightmap_index(0) == 63 &&
-           untextured_lightmap_index(63) == 0 && render_mode_name({true, Lighting::None}) == "textures+None" &&
+           untextured_lightmap_index(0) == 63 && untextured_lightmap_index(63) == 0 &&
+           render_mode_name({true, Lighting::None}) == "textures+None" &&
            render_mode_name({false, Lighting::LightMap}) == "untextured+LightMap" &&
            render_mode_technique({true, Lighting::None}) == 2 &&
            render_mode_technique({true, Lighting::LightMap}) == 4 &&
            render_mode_technique({false, Lighting::LightMap}) == 7 &&
-           is_supported_render_mode({true, Lighting::None}) &&
-           is_supported_render_mode({true, Lighting::LightMap}) &&
+           is_supported_render_mode({true, Lighting::None}) && is_supported_render_mode({true, Lighting::LightMap}) &&
            is_supported_render_mode({false, Lighting::LightMap}) &&
            !is_supported_render_mode({false, Lighting::None}) &&
-           packed_render_contract({true, Lighting::None}, false) ==
-               "packed-gsu-q4-projective-block8-albedo-v1" &&
-           packed_render_contract({true, Lighting::LightMap}, false) ==
-               "packed-gsu-q4-projective-block8-lightmap-v1" &&
+           packed_render_contract({true, Lighting::None}, false) == "packed-gsu-q4-projective-block8-albedo-v1" &&
+           packed_render_contract({true, Lighting::LightMap}, false) == "packed-gsu-q4-projective-block8-lightmap-v1" &&
            packed_render_contract({false, Lighting::LightMap}, true) ==
                "packed-gsu-q4-projective-block8-enabled-brush-"
                "untextured-lightmap-v1";
@@ -352,6 +352,163 @@ bool run_exact_texture_self_test()
 } // namespace
 
 namespace {
+bool run_liquid_lighting_self_test()
+{
+    SourceWorld world;
+    world.face_count = 2;
+    world.visibility_planes = {{{1, 0, 0}, 10}, {{1, 0, 0}, 10}};
+    world.face_texture_infos = {0, 1};
+    world.texture_infos = {{{0, 1, 0}, 0, {0, 0, 1}, 0, 0}, {{0, 1, 0}, 0, {0, 0, 1}, 0, 1}};
+    world.textures = {{"*water", 64, 64, std::vector<std::uint8_t>(4096, 17), true}, {"wall", 1, 1, {18}, true}};
+    world.textures[0].turbulent = true;
+    world.face_lightmaps.resize(2);
+    world.texture_colormap[63][17] = 4;
+    world.texture_colormap[63][18] = 5;
+    ReferenceFrame frame;
+    frame.faces.assign(kLogicalPixels, 0);
+    frame.faces.back() = 1;
+    shade_exact_texture_frame(frame, world, source_view_transform({{}, 0, 0, 0}));
+    const auto lit = selected_render_indices(frame, {true, Lighting::LightMap, Lighting::LightMap});
+    const auto unlit = selected_render_indices(frame, {true, Lighting::LightMap, Lighting::None});
+    for (std::size_t pixel = 0; pixel < lit.size(); ++pixel)
+    {
+        if (frame.turbulent_pixels[pixel] != 0
+                ? (lit[pixel] != 4 || unlit[pixel] != 17)
+                : (lit[pixel] != 5 || unlit[pixel] != 5))
+        {
+            return false;
+        }
+    }
+    {
+        const RenderViewportScope viewport(RenderScale::X3Warp);
+        const auto inspection = liquid_lighting_inspection(frame, {true, Lighting::LightMap, Lighting::None});
+        if (inspection["pixels"] != 85 * 74 || inspection["pixelRuns"] != Json::array({Json::array({0, 85 * 74})}))
+        {
+            return false;
+        }
+    }
+    return selected_render_indices(frame, {}) == lit &&
+           selected_render_indices(frame, {true, Lighting::None, Lighting::None}) == frame.texture_indices &&
+           selected_render_indices(frame, {true, Lighting::None, Lighting::LightMap}) == frame.texture_indices &&
+           selected_render_indices(frame, {false, Lighting::LightMap, Lighting::None}) ==
+               selected_render_indices(frame, {false, Lighting::LightMap, Lighting::LightMap}) &&
+           frame.lightmap_texture_indices == lit && frame.lightmap_texture_levels.front() == 63 &&
+           liquid_lighting_inspection(frame, {true, Lighting::LightMap, Lighting::None})["pixels"] ==
+               kLogicalPixels - 1;
+}
+
+bool run_source_turbulence_self_test()
+{
+    SourceWorld world;
+    world.face_count = 1;
+    world.colors = {{2, 0x32}};
+    world.visibility_planes = {{{-1, 0, 0}, -16}};
+    world.face_texture_infos = {0};
+    world.face_lightmaps.resize(1);
+    world.live_base_colors = {0};
+    world.centroids = {{1, 0, 0}};
+    world.texture_infos = {{{0, 1, 0}, -64.125, {0, 0, 1}, 128.875, 0}};
+    world.textures = {{"*water", 64, 64, std::vector<std::uint8_t>(4096), true}};
+    auto& texture = world.textures[0];
+    texture.turbulent = true;
+    for (int y = 0; y < 64; ++y)
+        for (int x = 0; x < 64; ++x)
+            texture.level_zero[y * 64 + x] = static_cast<std::uint8_t>(x + 3 * y);
+    for (auto& row : world.texture_colormap)
+        for (std::size_t i = 0; i < row.size(); ++i)
+            row[i] = static_cast<std::uint8_t>(255 - i);
+
+    const auto& table = source_quake_turbulence_table();
+    if (table[0] != 128 || table[32] != 255 || table[64] != 128 || table[96] != 0 || table[127] != 122)
+        return false;
+    // Independent integer oracle, including the extra sine-period bit and Q4 floor.
+    for (const int phase : {0, 1, 31, 63, 64, 96, 127})
+        for (const int s : {-32768, -2049, -1025, -1, 0, 1024, 2047, 32767})
+            for (const int t : {-2049, -1025, -1, 0, 1024, 2047})
+            {
+                const auto floor16 = [](int v) { return static_cast<int>(std::floor(v / 16.0)); };
+                const auto modulo = [](int v, int period) { return (v % period + period) % period; };
+                const int u = modulo(floor16(s + table[modulo(floor16(t) + phase, 128)]), 64);
+                const int v = modulo(floor16(t + table[modulo(floor16(s) + phase, 128)]), 64);
+                const auto expected = texture.level_zero[v * 64 + u];
+                for (const double period : {0.0, 128.0 * 1000000000.0, -128.0 * 1000000000.0})
+                    if (sample_source_turbulent_texture(
+                            texture,
+                            s / 16.0 + 0.01 + period,
+                            t / 16.0 + 0.01 - period,
+                            phase / 20.0
+                        ) != expected)
+                        return false;
+            }
+    if (quake_turbulence_phase(6.35) != 127 || quake_turbulence_phase(6.4) != 0 || wrapped_texel(1e30, 64) != 0 ||
+        wrapped_texel(-1e30, 64) != 0)
+        return false;
+
+    world.triangles = {
+        make_test_triangle({16, -64, -64}, {16, 64, -64}, {16, 64, 64}, 0, world.colors[0]),
+        make_test_triangle({16, -64, -64}, {16, 64, 64}, {16, -64, 64}, 0, world.colors[0])
+    };
+    const Bvh bvh(world.triangles);
+    const SourceCamera camera{};
+    const auto view = source_view_transform(camera);
+    constexpr RenderMode warped{true, Lighting::LightMap, Lighting::None, LiquidTurbulence::SnesQ4};
+    const auto before = render_source_reference(world, bvh, camera, false, 6.35);
+    auto after = render_source_reference(world, bvh, camera, false, 6.4);
+    if (before.faces != after.faces || before.texture_indices != after.texture_indices ||
+        selected_render_indices(before, warped) == selected_render_indices(after, warped) ||
+        selected_render_indices(after, {true, Lighting::None, Lighting::LightMap, LiquidTurbulence::SnesQ4}) !=
+            selected_render_indices(after, warped) ||
+        selected_render_indices(after, {false, Lighting::LightMap, Lighting::None, LiquidTurbulence::SnesQ4}) !=
+            selected_render_indices(after, {false, Lighting::LightMap}))
+        return false;
+    const auto lit =
+        selected_render_indices(after, {true, Lighting::LightMap, Lighting::LightMap, LiquidTurbulence::SnesQ4});
+    for (std::size_t pixel = 0; pixel < lit.size(); ++pixel)
+        if (after.turbulent_pixels[pixel] && lit[pixel] != 255 - after.turbulent_texture_indices[pixel])
+            return false;
+
+    ExternalBspScene scene;
+    auto external = std::make_unique<SourceWorld>(world);
+    auto external_bvh = std::make_unique<Bvh>(external->triangles);
+    scene.models.push_back(
+        {1, "test.bsp", std::move(external), std::move(external_bvh), build_brush_texture_animations(world.textures)}
+    );
+    const std::array<ExternalBspEntityState, 1> entities{{{42, 0, 0, {-8, 0, 0}, {}}}};
+    std::vector<std::uint8_t> previous;
+    for (const double time : {6.35, 6.4})
+    {
+        auto composed = render_source_reference(world, bvh, camera, false, time);
+        compose_source_external_bsp_models(scene, entities, 0, time, false, view, composed);
+        const auto center = logical_pixel_index(64, 56);
+        if (composed.entities[center] != 42 || !composed.turbulent_pixels[center] ||
+            selected_render_indices(composed, warped)[center] !=
+                sample_source_turbulent_texture(texture, composed.texture_s[center], composed.texture_t[center], time))
+            return false;
+        const auto current = selected_render_indices(composed, warped);
+        if (!previous.empty() && previous == current)
+            return false;
+        previous = current;
+    }
+    // An alias that wins over water must clear liquid ownership before final selection.
+    AliasAssets aliases;
+    aliases.sprites = {{8, 8, -4, 4, std::vector<std::uint8_t>(64, 7)}};
+    AliasRow row;
+    row.dynamic_states = {{0, {1, 0, 0}}};
+    row.tokens = {{false, 0}};
+    aliases.rows.push_back(std::move(row));
+    compose_alias_billboards(after, world, view, aliases, 0, nullptr);
+    int alias_pixels = 0;
+    const auto selected = selected_render_indices(after, warped);
+    for (std::size_t pixel = 0; pixel < selected.size(); ++pixel)
+        if (after.faces[pixel] == kAliasFace)
+        {
+            ++alias_pixels;
+            if (after.turbulent_pixels[pixel] || selected[pixel] != 7)
+                return false;
+        }
+    return alias_pixels > 0;
+}
+
 bool run_bsp_lightmap_self_test()
 {
     SourceWorld world;
@@ -490,10 +647,10 @@ bool run_packed_texture_span_self_test()
     const bool simple_span_passed =
         raster.indices[pixel(10, 5)] == 0 && raster.indices[pixel(11, 5)] == 1 && raster.indices[pixel(12, 5)] == 2 &&
         raster.indices[pixel(13, 5)] == 3 && raster.indices[pixel(14, 5)] == 0 &&
-        raster.lightmap_levels[pixel(10, 5)] == 1 &&
-        raster.untextured_lightmap_indices[pixel(10, 5)] == 62 && raster.faces[pixel(12, 5)] == 9 &&
-        raster.s_q4[pixel(13, 5)] == 48 && raster.stats.span_calls == 1 && raster.spans.size() == 1 &&
-        raster.spans.front().face == 9 && raster.spans.front().first_x == 10 && raster.spans.front().right_s_q4 == 64;
+        raster.lightmap_levels[pixel(10, 5)] == 1 && raster.untextured_lightmap_indices[pixel(10, 5)] == 62 &&
+        raster.faces[pixel(12, 5)] == 9 && raster.s_q4[pixel(13, 5)] == 48 && raster.stats.span_calls == 1 &&
+        raster.spans.size() == 1 && raster.spans.front().face == 9 && raster.spans.front().first_x == 10 &&
+        raster.spans.front().right_s_q4 == 64;
     if (!simple_span_passed)
     {
         return false;
@@ -507,41 +664,9 @@ bool run_packed_texture_span_self_test()
     auto affine = make_raster();
     auto projective = make_raster();
     draw_packed_texture_span_affine(affine, world, split_texture, 9, 6, 0, 16, 64, 2112, 0, 0, 256, 0, 64, 128);
-    draw_packed_texture_span_projective(
-        projective,
-        world,
-        split_texture,
-        9,
-        6,
-        0,
-        16,
-        64,
-        2112,
-        0,
-        0,
-        256,
-        0,
-        64,
-        128
-    );
+    draw_packed_texture_span_projective(projective, world, split_texture, 9, 6, 0, 16, 64, 2112, 0, 0, 256, 0, 64, 128);
     auto degenerate = make_raster();
-    draw_packed_texture_span_projective(
-        degenerate,
-        world,
-        split_texture,
-        9,
-        7,
-        3,
-        3,
-        448,
-        448,
-        16,
-        0,
-        128,
-        0,
-        64,
-        128
-    );
+    draw_packed_texture_span_projective(degenerate, world, split_texture, 9, 7, 3, 3, 448, 448, 16, 0, 128, 0, 64, 128);
     return affine.absolute_s_q4[pixel(8, 6)] == 128 && projective.absolute_s_q4[pixel(8, 6)] == 85 &&
            affine.indices[pixel(8, 6)] == 8 && projective.indices[pixel(8, 6)] == 5 &&
            projective.depth_q6[pixel(8, 6)] > 64 && projective.depth_q6[pixel(8, 6)] < 128 &&
@@ -567,6 +692,70 @@ bool run_texture_mapping_fidelity_self_test()
     packed.indices.resize(kLogicalPixels);
     packed.absolute_s_q4.resize(kLogicalPixels);
     packed.absolute_t_q4.resize(kLogicalPixels);
+    const auto empty = compare_texture_mapping_fidelity(world, source, packed);
+    const auto empty_json = Json::parse(texture_mapping_fidelity_json(&empty, "test").dump());
+    if (empty.owner_match_pixels != kLogicalPixels || empty.comparable_pixels != 0 ||
+        empty_json.at("available") != false || empty_json.at("comparablePixels") != 0 ||
+        empty_json.at("unavailableReason") != "no-same-owner-geometry-pixels" ||
+        !texture_mapping_fidelity_json(nullptr, "test").is_null())
+    {
+        return false;
+    }
+    for (const auto* key :
+         {"exactTexelRatio",
+          "withinOneTexelRatio",
+          "withinTwoTexelsRatio",
+          "withinFourTexelsRatio",
+          "meanSErrorQ4",
+          "meanTErrorQ4",
+          "maxSErrorQ4",
+          "maxTErrorQ4",
+          "firstBeyondTwoTexels",
+          "firstBeyondFourTexels"})
+    {
+        if (!empty_json.at(key).is_null())
+        {
+            return false;
+        }
+    }
+    std::ranges::fill(source.faces, 9);
+    const auto disjoint = compare_texture_mapping_fidelity(world, source, packed);
+    if (disjoint.comparable_pixels != 0 || disjoint.owner_mismatch_pixels != kLogicalPixels ||
+        texture_mapping_fidelity_json(&disjoint, "test").at("available") != false)
+    {
+        return false;
+    }
+    std::ranges::fill(source.faces, kMissFace);
+    const auto rejected = [&](const ReferenceFrame& source_frame, const PackedTextureRaster& packed_frame) {
+        try
+        {
+            static_cast<void>(compare_texture_mapping_fidelity(world, source_frame, packed_frame));
+            return false;
+        }
+        catch (const std::runtime_error&)
+        {
+            return true;
+        }
+    };
+    auto malformed_source = source;
+    malformed_source.texture_s.pop_back();
+    if (!rejected(malformed_source, packed))
+    {
+        return false;
+    }
+    malformed_source = source;
+    auto malformed_packed = packed;
+    malformed_source.faces[0] = malformed_packed.faces[0] = 99;
+    if (!rejected(malformed_source, malformed_packed))
+    {
+        return false;
+    }
+    malformed_source.faces[0] = malformed_packed.faces[0] = 9;
+    malformed_source.texture_s[0] = std::numeric_limits<double>::quiet_NaN();
+    if (!rejected(malformed_source, malformed_packed))
+    {
+        return false;
+    }
     const auto pixel = [](int x) { return logical_pixel_index(x, 5); };
     for (int x = 10; x <= 12; ++x)
     {
@@ -588,8 +777,11 @@ bool run_texture_mapping_fidelity_self_test()
     source.faces[pixel(13)] = 9;
 
     const auto fidelity = compare_texture_mapping_fidelity(world, source, packed);
-    return fidelity.owner_match_pixels == kLogicalPixels - 1 && fidelity.owner_mismatch_pixels == 1 &&
-           fidelity.comparable_pixels == 3 && fidelity.exact_texel_pixels == 2 &&
+    const auto fidelity_json = texture_mapping_fidelity_json(&fidelity, "test");
+    return fidelity_json.at("available") == true && fidelity_json.at("unavailableReason").is_null() &&
+           fidelity_json.at("withinFourTexelsRatio") == 1.0 && fidelity_json.at("meanSErrorQ4") == 16.0 &&
+           fidelity_json.at("maxSErrorQ4") == 33 && fidelity.owner_match_pixels == kLogicalPixels - 1 &&
+           fidelity.owner_mismatch_pixels == 1 && fidelity.comparable_pixels == 3 && fidelity.exact_texel_pixels == 2 &&
            fidelity.within_one_texel_pixels == 2 && fidelity.within_two_texel_pixels == 2 &&
            fidelity.within_four_texel_pixels == 3 && fidelity.max_s_error_q4 == 33 && fidelity.max_t_error_q4 == 0 &&
            fidelity.first_beyond_two_texels == static_cast<int>(pixel(12)) && fidelity.first_beyond_four_texels == -1 &&
@@ -694,16 +886,16 @@ bool run_precise_demo_self_test()
     const auto view = source_view_transform({{1.0, 2.0, 3.0}, 0.0, 0.0, 0.0});
     const auto close = [](double left, double right) { return std::abs(left - right) < 1e-12; };
     const auto half_advanced = 10.0 + playback_source_delta(1.0, PlaybackSpeed::Half);
-    const auto step_indices = step_demo_pose_indices(2086, 20);
+    const auto step_indices = step_demo_pose_indices(2226, 30);
     std::size_t ordered_pose = 0;
     const auto ordered_first = advance_ordered_demo_pose(step_indices.size(), ordered_pose);
     const auto ordered_second = advance_ordered_demo_pose(step_indices.size(), ordered_pose);
     ordered_pose = step_indices.size() - 1U;
     const auto ordered_wrap = advance_ordered_demo_pose(step_indices.size(), ordered_pose);
-    advance_ordered_demo_pose(1484, ordered_pose, 10);
+    advance_ordered_demo_pose(2226, ordered_pose, 10);
     const bool stride_advanced = ordered_pose == 10;
-    ordered_pose = 1480;
-    const auto stride_wrap = advance_ordered_demo_pose(1484, ordered_pose, 10);
+    ordered_pose = 2220;
+    const auto stride_wrap = advance_ordered_demo_pose(2226, ordered_pose, 10);
     double early_deadline = 0.499;
     const bool early_advance = consume_ordered_demo_deadline(0.5, true, early_deadline);
     double exact_deadline = 0.5;
@@ -712,8 +904,8 @@ bool run_precise_demo_self_test()
     const bool unpresented_advance = consume_ordered_demo_deadline(0.5, false, unpresented_deadline);
     return constant_step_pose_at_time(4, 0.0, 30.0) == 0 && constant_step_pose_at_time(4, 0.032, 30.0) == 0 &&
            constant_step_pose_at_time(4, 0.034, 30.0) == 1 && constant_step_pose_at_time(4, 0.067, 30.0) == 2 &&
-           constant_step_pose_at_time(4, 10.0, 30.0) == 3 && constant_step_pose_at_time(4, 0.499, 2.0) == 0 &&
-           constant_step_pose_at_time(4, 0.5, 2.0) == 1 && close(constant_step_duration(2226, 30.0), 74.2) &&
+           constant_step_pose_at_time(4, 10.0, 30.0) == 3 && constant_step_pose_at_time(4, 0.333, 3.0) == 0 &&
+           constant_step_pose_at_time(4, 0.334, 3.0) == 1 && close(constant_step_duration(2226, 30.0), 74.2) &&
            close(playback_speed_scale(PlaybackSpeed::Realtime), 1.0) &&
            close(playback_speed_scale(PlaybackSpeed::Half), 0.5) &&
            close(playback_speed_scale(PlaybackSpeed::Quarter), 0.25) &&
@@ -721,8 +913,8 @@ bool run_precise_demo_self_test()
            close(half_advanced + playback_source_delta(1.0, PlaybackSpeed::Quarter), 10.75) &&
            close(constant_step_duration(2226, 30.0) / playback_speed_scale(PlaybackSpeed::Half), 148.4) &&
            close(constant_step_duration(2226, 30.0) / playback_speed_scale(PlaybackSpeed::Quarter), 296.8) &&
-           close(constant_step_duration(step_indices.size(), 2.0), 104.5) && step_indices.size() == 209 &&
-           step_indices[1] == 10 && step_indices.back() == 2080 && ordered_first.advanced && !ordered_first.wrapped &&
+           close(constant_step_duration(step_indices.size(), 3.0), 223.0 / 3.0) && step_indices.size() == 223 &&
+           step_indices[1] == 10 && step_indices.back() == 2220 && ordered_first.advanced && !ordered_first.wrapped &&
            ordered_second.advanced && !ordered_second.wrapped && ordered_wrap.advanced && ordered_wrap.wrapped &&
            ordered_pose == 0 && stride_advanced && stride_wrap.advanced && stride_wrap.wrapped && ordered_pose == 0 &&
            !early_advance && close(early_deadline, 0.499) && exact_advance && close(exact_deadline, 0.0) &&
@@ -757,6 +949,7 @@ bool run_packed_alias_occlusion_self_test()
     depth[visible] = 129;
     AliasCoverage coverage;
     AliasVisibilityRow visibility_row;
+    std::vector<std::int16_t> composed_depth;
     const auto composed = compose_post_opaque_alias_indices(
         opaque,
         depth,
@@ -765,9 +958,11 @@ bool run_packed_alias_occlusion_self_test()
         0,
         RenderMode{true, Lighting::LightMap},
         &coverage,
-        &visibility_row
+        &visibility_row,
+        &composed_depth
     );
-    return composed[occluded] == opaque[occluded] && composed[visible] == 5 && coverage.packed_plot_pixels > 0 &&
+    return composed_depth[occluded] == 128 && composed_depth[visible] == 128 &&
+           composed[occluded] == opaque[occluded] && composed[visible] == 5 && coverage.packed_plot_pixels > 0 &&
            coverage.packed_visible_pixels > 0 && coverage.packed_opaque_occluded_pixels > 0 &&
            visibility_row.tokens.size() == 2 &&
            std::ranges::any_of(visibility_row.tokens[0].candidates, [](std::uint8_t value) { return value == 0; }) &&
@@ -842,8 +1037,8 @@ bool run_alias_visibility_encoding_self_test()
 {
     OrderedPackedReplay replay;
     replay.source_pose_count = 11;
-    replay.source_rate = 20;
-    replay.step_rate = 20;
+    replay.source_rate = 30;
+    replay.step_rate = 30;
     replay.stride = 1;
     for (std::uint16_t pose = 0; pose < replay.source_pose_count; ++pose)
     {
@@ -866,7 +1061,7 @@ bool run_alias_visibility_encoding_self_test()
     return encoded.size() == kAliasVisibilityHalfbankBytes &&
            std::equal(encoded.begin(), encoded.begin() + 4, "QAV2") &&
            read_u16(encoded, 4) == kAliasVisibilityVersion && read_u16(encoded, 8) == 11 &&
-           read_u16(encoded, 10) == 11 && read_u16(encoded, 12) == 1 && read_u16(encoded, 16) == 20 &&
+           read_u16(encoded, 10) == 11 && read_u16(encoded, 12) == 1 && read_u16(encoded, 16) == 30 &&
            read_u16(encoded, 20) == 1 && read_u16(encoded, 26) == 2 && read_u16(encoded, directory) == 0x11 &&
            read_u16(encoded, directory + 2U) == 0 && read_u16(encoded, directory + 10U * 2U) == 0x21 &&
            encoded[first] == 1 && encoded[first + 1] == kAliasVisibilityPartial && read_u16(encoded, first + 2) == 3 &&
@@ -878,24 +1073,95 @@ bool run_alias_visibility_encoding_self_test()
 
 bool run_self_test()
 {
+    // The ROM rounds the odd X3 width upward: both raster projection and
+    // source rays must use (43,37), even though integer width/2 is 42.
+    bool viewport_contract = true;
+    for (const auto scale : {RenderScale::X2, RenderScale::X3, RenderScale::X3Warp})
+    {
+        const RenderViewportScope viewport(scale);
+        const bool x2 = scale == RenderScale::X2;
+        const int center_x = x2 ? 64 : 43, center_y = x2 ? 56 : 37, focal = x2 ? 96 : 64;
+        const auto view = source_view_transform(SourceCamera{});
+        const auto ray = view_ray(view, center_x, center_y);
+        viewport_contract &=
+            render_center_x() == center_x && render_center_y() == center_y && render_focal_length() == focal &&
+            std::abs(dot(ray.direction, view.screen_right) - 0.5 / focal) < 1e-12 &&
+            std::abs(dot(ray.direction, view.up) + 0.5 / focal) < 1e-12;
+    }
+    viewport_contract &= [&] {
+        for (int focal = 33; focal <= 64; ++focal)
+        {
+            const RenderViewportScope viewport(RenderScale::X3, focal);
+            for (int q = -4096; q <= 4096; ++q)
+                if (render_project_q7(q) != static_cast<int>(std::floor(q * focal / 64.0)) * 4)
+                    return false;
+            if (render_wide_frustum() != (focal < 43))
+                return false;
+            const auto edge = project_packed_alias_axis(1, -1, 2048, 37 * 128, true, 74);
+            if (edge.first_q7 != 37 * 128 - 4 || edge.last_q7 != 37 * 128 + (focal == 64 ? 4 : 0))
+                return false;
+            {
+                const RenderViewportScope target(RenderScale::X3);
+                if (render_focal_length() != 64)
+                    return false;
+            }
+            if (render_focal_length() != focal)
+                return false;
+        }
+        return true;
+    }();
     const bool ordered_rates =
-        supported_ordered_replay_step_rate(2) && supported_ordered_replay_step_rate(20) &&
+        supported_ordered_replay_step_rate(3) && supported_ordered_replay_step_rate(30) &&
         !supported_ordered_replay_step_rate(1) && !supported_ordered_replay_step_rate(10) &&
-        std::abs(constant_step_duration(209, 2.0) - 104.5) < 1e-9 &&
-        std::abs(constant_step_duration(2086, 20.0) - 104.3) < 1e-9 &&
-        constant_step_pose_at_time(2086, 104.25, 20.0) == 2085;
-    return run_brush_reference_self_test() && run_quake_audio_self_test() && run_external_bsp_replay_self_test() &&
-           run_surface_visibility_self_test() && run_bvh_tie_self_test() && run_painter_rank_self_test() &&
-           run_packet_selection_self_test() && run_material_layer_self_test() && run_render_mode_self_test() &&
-           run_exact_texture_self_test() && run_bsp_lightmap_self_test() &&
-           run_packed_brush_compact_lightmap_self_test() &&
-           run_packed_brush_ordering_self_test() && run_packed_texture_span_self_test() &&
-           run_texture_mapping_fidelity_self_test() && run_quantized_world_self_test() &&
-           run_current_pipeline_self_test() &&
-           run_span_endpoint_self_test() && run_demo_timing_self_test() && run_precise_demo_self_test() &&
-           run_packed_alias_occlusion_self_test() && run_packed_alias_projection_self_test() &&
-           run_alias_order_self_test() && run_alias_inspection_self_test() && run_quake_sky_self_test() &&
-           run_alias_visibility_encoding_self_test() && ordered_rates;
+        std::abs(constant_step_duration(223, 3.0) - 223.0 / 3.0) < 1e-9 &&
+        std::abs(constant_step_duration(2226, 30.0) - 74.2) < 1e-9 &&
+        constant_step_pose_at_time(2226, 74.18, 30.0) == 2225;
+    bool passed = true;
+    const auto check = [&](bool result, const char* name) {
+        if (!result)
+        {
+            std::cerr << "self-test failed: " << name << '\n';
+            passed = false;
+        }
+    };
+    check(viewport_contract, "native_viewport_projection_contract");
+    check(run_brush_reference_self_test(), "run_brush_reference_self_test");
+    check(run_quake_audio_self_test(), "run_quake_audio_self_test");
+    check(run_particle_self_test(), "run_particle_self_test");
+    check(run_particle_option_contract_self_test(), "run_particle_option_contract_self_test");
+    check(run_external_bsp_replay_self_test(), "run_external_bsp_replay_self_test");
+    check(run_surface_visibility_self_test(), "run_surface_visibility_self_test");
+    check(
+        table_index(-1) == 255 && kSinTable[1] == 2 && kCosTable[1] == 64 && kSinTable[255] == -2 &&
+            kSinTable[64] == 64 && kSinTable[192] == -64,
+        "native_camera_angle_table"
+    );
+    check(run_bvh_tie_self_test(), "run_bvh_tie_self_test");
+    check(run_painter_rank_self_test(), "run_painter_rank_self_test");
+    check(run_packet_selection_self_test(), "run_packet_selection_self_test");
+    check(run_material_layer_self_test(), "run_material_layer_self_test");
+    check(run_render_mode_self_test(), "run_render_mode_self_test");
+    check(run_exact_texture_self_test(), "run_exact_texture_self_test");
+    check(run_liquid_lighting_self_test(), "run_liquid_lighting_self_test");
+    check(run_source_turbulence_self_test(), "run_source_turbulence_self_test");
+    check(run_bsp_lightmap_self_test(), "run_bsp_lightmap_self_test");
+    check(run_packed_brush_compact_lightmap_self_test(), "run_packed_brush_compact_lightmap_self_test");
+    check(run_packed_brush_ordering_self_test(), "run_packed_brush_ordering_self_test");
+    check(run_packed_texture_span_self_test(), "run_packed_texture_span_self_test");
+    check(run_texture_mapping_fidelity_self_test(), "run_texture_mapping_fidelity_self_test");
+    check(run_quantized_world_self_test(), "run_quantized_world_self_test");
+    check(run_current_pipeline_self_test(), "run_current_pipeline_self_test");
+    check(run_span_endpoint_self_test(), "run_span_endpoint_self_test");
+    check(run_demo_timing_self_test(), "run_demo_timing_self_test");
+    check(run_precise_demo_self_test(), "run_precise_demo_self_test");
+    check(run_packed_alias_occlusion_self_test(), "run_packed_alias_occlusion_self_test");
+    check(run_packed_alias_projection_self_test(), "run_packed_alias_projection_self_test");
+    check(run_alias_order_self_test(), "run_alias_order_self_test");
+    check(run_alias_inspection_self_test(), "run_alias_inspection_self_test");
+    check(run_quake_sky_self_test(), "run_quake_sky_self_test");
+    check(run_alias_visibility_encoding_self_test(), "run_alias_visibility_encoding_self_test");
+    check(ordered_rates, "ordered_rates");
+    return passed;
 }
 
 } // namespace quake_bsp_reference

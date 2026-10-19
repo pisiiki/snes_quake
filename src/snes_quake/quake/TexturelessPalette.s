@@ -13,7 +13,9 @@ QuakeBSPUntexturedPalette:
         .word   $4E94, $5295, $52B5, $56B5, $56D6, $5AD6, $5AF7, $5EF7
         .word   $5F18, $6318, $6339, $6739, $675A, $6B5A, $6B7B, $6F7B
         .word   $6F9C, $739C, $73BD, $77BD, $77DE, $7BDE, $7BFF, $7FFF
-        .res    (239 - 64) * 2, 0
+        .res    (209 - 64) * 2, 0
+        .incbin "../Data/Warp/WarpBackgroundPalette.bin"
+        .res    (239 - 224) * 2, 0
         .word   $7C1F                  ; Palette index 239 diagnoses holes.
         .incbin "../Data/QuakeBSPTexturePalette.bin", 480, 32
 QuakeBSPUntexturedPaletteEnd:

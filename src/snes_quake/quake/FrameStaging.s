@@ -36,6 +36,10 @@
 ; command. The render_* identity remains owned by the next selector/renderer.
 SnapshotRenderedFrameForStage:
         RW_forced a16i16
+        lda     render_warp_strafe
+        sta     staging_warp_strafe
+        lda     render_warp_forward
+        sta     staging_warp_forward
         lda     render_camera+0
         sta     staging_camera+0
         lda     render_camera+2
@@ -64,6 +68,8 @@ SnapshotRenderedFrameForStage:
         sta     staging_coverage_mode
         lda     render_demo_pose
         sta     staging_demo_pose
+        lda     render_demo_prediction_bias
+        sta     staging_demo_prediction_bias
         lda     render_demo_due_tick
         sta     staging_demo_due_tick
         lda     render_demo_epoch
@@ -98,7 +104,11 @@ WaitForSafeStagingFrame:
         cmp     #$0002
         bcc     @FlatLimit
         lda     staging_scanline
+.if BSP_RENDER_SCALE = 3
+        cmp     #176                    ; 7040-byte DMA plus the same margin.
+.else
         cmp     #BSP_STAGING_TEXTURE_LIMIT
+.endif
         bcc     @Safe
         bra     @Wait
 @FlatLimit:
@@ -106,6 +116,12 @@ WaitForSafeStagingFrame:
         cmp     #BSP_STAGING_FLAT_LIMIT
         bcc     @Safe
 @Wait:
+  .if BSP_SOUND_ENABLED
+        ; This wait grows as the GSU gets faster. Refill outside NMI, then
+        ; latch the scanline again: the audio slice may cross the DMA cutoff.
+        jsr     QuakeSoundServiceMain
+        jmp     WaitForSafeStagingFrame
+  .else
         RW      a8
         lda     HVBJOY
         bmi     @WaitForActive
@@ -115,6 +131,7 @@ WaitForSafeStagingFrame:
 @WaitForActive:
         lda     HVBJOY
         bmi     @WaitForActive
+  .endif
 @Safe:
         RW_forced a8i16
         rts
@@ -148,8 +165,20 @@ JoinOverlappedSelector:
         RW_forced a16i16
         lda     overlap_selector_active
         beq     JoinOverlappedSelectorReturn
+  .if BSP_SOUND_ENABLED
+        lda     sound_cpu_state
+        cmp     #SOUND_CPU_STATE_PLAYING
+        bcc     JoinSilentOverlappedSelector
         RW      a8
+        ; Staging is immutable now, so feed the SPC ring while this selector
+        ; finishes just as the ordinary selector and renderer joins do.
+        BSP_SOUND_FX3_JOB_JOIN BSP_RENDER_SCALE
+        bra     JoinOverlappedSelectorComplete
+  .endif
+JoinSilentOverlappedSelector:
+        RW_forced a8i16
         FX3_JOB_JOIN
+JoinOverlappedSelectorComplete:
         stz     FX3_SCMR
         RW      a16
         stz     overlap_selector_active
@@ -195,7 +224,11 @@ TemporalMetadataOnlyStaging:
         lda     staging_camera+10
         cmp     #$02
         bcc     @TransferSizeReady
+.if BSP_RENDER_SCALE = 3
+        ldx     #GSU_MODE7_FRAME_BYTES
+.else
         ldx     #GSU_TEXTURE_VISIBLE_BYTES
+.endif
 @TransferSizeReady:
         stx     DAS6L
         stz     DMAP6
@@ -232,66 +265,84 @@ SelectorStageMetadataOnly:
         lda     staging_camera+14
         sta     slot_camera+14,x
 
-        ldx     #0
         lda     producer_slot
-        beq     @BrushStateSlotReady
-        ldx     #2
+        asl
+        tax
 @BrushStateSlotReady:
+        lda     staging_warp_strafe
+        sta     slot_warp_strafe,x
+        lda     staging_warp_forward
+        sta     slot_warp_forward,x
         lda     staging_brush_visual_state
         sta     slot_brush_visual_state,x
 
-        ldx     #0
-        lda     producer_slot
-        beq     @CoverageSlotReady
-        ldx     #2
+        ; The producer slot is immutable while NMI is masked. Reuse its word
+        ; offset for the fixed presentation callback and adjacent metadata.
 @CoverageSlotReady:
+        lda     #.loword(UploadPresentDirect)
+        sta     slot_present_direct,x
         lda     staging_coverage_mode
         sta     slot_coverage_mode,x
 
-        ldx     #0
-        lda     producer_slot
-        beq     @ReuseSlotReady
-        ldx     #2
 @ReuseSlotReady:
         lda     temporal_stage_metadata_only
         sta     slot_metadata_only,x
 
-        ldx     #0
-        lda     producer_slot
-        beq     @DemoSlotReady
-        ldx     #2
 @DemoSlotReady:
         lda     staging_demo_pose
         sta     slot_demo_pose,x
+        lda     staging_demo_prediction_bias
+        sta     slot_demo_prediction_bias,x
         lda     staging_demo_due_tick
         sta     slot_demo_due_tick,x
         lda     staging_demo_epoch
         sta     slot_demo_epoch,x
 
-        ldx     #0
-        lda     producer_slot
-        beq     @SkyPhaseSlotReady
-        ldx     #4
+        ; Fly reprojection measures movement since this image's input sample.
+        ; Keep its fractional position: reconstructing the packed GSU camera
+        ; leaves a permanent translation even after a fresh stationary render.
+        ; Demo fitting still uses the actual quantized render camera.
+        lda     staging_demo_pose
+        cmp     #$FFFF
+        bne     @PackedWarpPosition
+        .repeat 3, axis
+          lda   staging_camera_q8+axis*2
+          sta   slot_warp_x+axis*4,x
+        .endrepeat
+        bra     @WarpPositionReady
+@PackedWarpPosition:
+        .repeat 3, axis
+          lda   staging_camera+4+axis*2
+          xba
+          clc
+          .if axis = 0
+            adc #BSP_WORLD_START_X_Q8
+          .elseif axis = 1
+            adc #BSP_WORLD_START_Y_Q8
+          .else
+            adc #BSP_WORLD_START_Z_Q8
+          .endif
+          sta   slot_warp_x+axis*4,x
+        .endrepeat
+@WarpPositionReady:
+        txa
+        asl
+        tax
 @SkyPhaseSlotReady:
         lda     staging_sky_phase_q16+0
         sta     slot_sky_phase_q16+0,x
         lda     staging_sky_phase_q16+2
         sta     slot_sky_phase_q16+2,x
 
-        ldx     #0
-        lda     producer_slot
-        beq     @TurbulencePhaseSlotReady
-        ldx     #4
 @TurbulencePhaseSlotReady:
         lda     staging_turbulence_phase_q16+0
         sta     slot_turbulence_phase_q16+0,x
         lda     staging_turbulence_phase_q16+2
         sta     slot_turbulence_phase_q16+2,x
 
-        ldx     #0
-        lda     producer_slot
-        beq     @SkyPresentSlotReady
-        ldx     #2
+        txa
+        lsr
+        tax
 @SkyPresentSlotReady:
         lda     staging_sky_present
         sta     slot_sky_present,x

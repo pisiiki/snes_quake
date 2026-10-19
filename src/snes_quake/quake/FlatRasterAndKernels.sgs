@@ -1,5 +1,7 @@
 ; Keep the dominant interior decoder inside the lightmap interpolation cache
 ; window. The technique-0/1 flat loop occupies this routine's former cold slot.
+; Padding below retains the CPU-installed T4 overlays and cache-manifest
+; addresses while hot instructions shrink inside their established windows.
 LightmapSampleInteriorDirect:
         ; Both entries establish this source prefix in their jump slot.
         to      R3
@@ -39,6 +41,9 @@ LightmapSampleInteriorDirect:
 TextureSampleAbsolutePowerOfTwoSingleBank:
         lm      R5, (TEXTURE_SPAN_S)
         lm      R6, (TEXTURE_SPAN_T)
+  .repeat $27DC - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 TextureSampleAbsolutePowerOfTwoSingleBankRegisters:
         lm      R1, (TEXTURE_SPAN_SHADE_Q8)
         with    R5
@@ -125,17 +130,11 @@ TextureBuildCoordinateDone:
         nop
         nop
 
-; The setup entries below used this 100-byte cold slot. Relocating them to
-; auxiliary code leaves the complete repeated DDA above in the active
-; lightmap cache and lets the equally hot reciprocal mirror share the exact
-; cache tail with the common bilinear lightmap sampler. Miss handling remains
-; in the sampler's former cold slot.
+; Shared reciprocal and bilinear callbacks remain resident in the lightmap
+; cache window; the mixed sampler uses the retained cold auxiliary segment.
 TextureCoordinateSetupSlotStart:
 TextureDivideQ12Lookup:
 TextureDivideQ12HotMirrorStart:
-        ; R2 is the one-based denominator. Comparing against one past the
-        ; mirror and biasing its base by one entry avoids forming d-1 on every
-        ; hit; only the uncommon ROM fallback needs the zero-based index.
         iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES+1
         with    R2
         cmp     R4
@@ -164,8 +163,8 @@ TextureDivideQ12HotMirrorMissCached:
 LightmapSampleBlockBilinearCached:
         with    R3
         and     R1
-        move    R5, R9
-        with    R5
+        to      R5
+        from    R9
         and     R1
         lm      R8, (LIGHTMAP_BLOCK_UL)
         lm      R9, (LIGHTMAP_BLOCK_UR)
@@ -176,19 +175,19 @@ TextureDivideQ12HotMirrorMissCold:
         move    R1, R2
         dec     R1
         GSU_ABSOLUTE_GOTO TextureDivideQ12HotMirrorMiss
+
   .repeat $73 - (* - TextureCoordinateSetupSlotStart)
         nop
   .endrepeat
 LightmapPrepareCachedContinue:
         move    R0, R7
-        with    R0
         sub     R1
         bmi     LightmapPrepareEndTInterior
         nop
         GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
 LightmapPrepareEndTInterior:
-        move    R9, R7
-        with    R9
+        to      R9
+        from    R7
         sub     R13
         iwt     R0, #$8000              ; Proven interior block.
         sm      (LIGHTMAP_BLOCK_FAST), R0
@@ -205,9 +204,7 @@ LightmapPrepareSameT:
 
         lm      R1, (LIGHTMAP_WIDTH)
         move    R0, R13
-        with    R0
         umult   R1
-        with    R0
         add     R12
         move    R6, R0
         lm      R10, (LIGHTMAP_ROM_ADDRESS)
@@ -249,7 +246,10 @@ LightmapPrepareBlockDone:
 ; Clip one complete convex BSP face against a wide four-plane view pyramid,
 ; project it at Q7 subpixel precision, then emit one exact pixel-center span
 ; per covered row. The wide planes bound division without acting as a semantic
-; near plane: |right|/depth and |up|/depth are at most one after clipping.
+; near plane. Normal guards bound |axis|/depth by one; wide WARP uses two.
+  .repeat $2920 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 GSU_CACHE_KERNEL_BEGIN RenderConvexFace
         sm      (CONVEX_RETURN), R11
         iwt     R0, #CONVEX_VIEW_A
@@ -318,6 +318,7 @@ ConvexFaceDone:
         lm      R11, (CONVEX_RETURN)
         ret
         nop
+        .res $00B1 - (* - RenderConvexFace)
 GSU_CACHE_KERNEL_END RenderConvexFace
 
 ; Return unsigned magnitude in R0 and 1=inside/0=outside in R1 for the current
@@ -328,8 +329,7 @@ ConvexComputeDistance:
         with    R4
         asr
         lm      R0, (CONVEX_PLANE)
-        move    R5, R0
-        with    R5
+        to      R5
         and     #2
         beq     ConvexDistanceUseRight
         nop
@@ -341,6 +341,13 @@ ConvexDistanceUseRight:
 ConvexDistanceAxisReady:
         with    R5
         asr
+.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
+        ; WARP installs a second ASR: depth/2 +/- axis/4 bounds |axis|/depth
+        ; by two without overflowing signed16. Ordinary X3 restores the NOPs.
+ConvexClipAxisScale:
+        nop
+        nop
+.endif
         lm      R0, (CONVEX_PLANE)
         moves   R0, R0
         beq     ConvexDistanceAdd
@@ -367,12 +374,14 @@ ConvexDistanceSigned:
         nop
 ConvexDistanceOutside:
         move    R0, #0
-        with    R0
         sub     R4
         move    R1, #0
         ret
         nop
 
+  .repeat $2A20 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 GSU_CACHE_KERNEL_BEGIN ConvexClipPlane
         sm      (CONVEX_CLIP_RETURN), R11
         move    R0, #0
@@ -383,12 +392,11 @@ GSU_CACHE_KERNEL_BEGIN ConvexClipPlane
         ; Seed the closed edge walk with the last input vertex.
         lm      R0, (CONVEX_COUNT)
         dec     R0
-        move    R1, R0
-        with    R1
-        add     R1                       ; 2n
-        move    R2, R1
-        with    R2
-        add     R2                       ; 4n
+        to      R1
+        add     R0                       ; 2n
+        to      R2
+        from    R1
+        add     R1                       ; 4n
         with    R1
         add     R2                       ; 6n
         lm      R10, (CONVEX_INPUT_PTR)
@@ -477,15 +485,18 @@ ConvexClipAdvance:
         lm      R11, (CONVEX_CLIP_RETURN)
         ret
         nop
+        .res $0178 - (* - ConvexClipPlane)
 GSU_CACHE_KERNEL_END ConvexClipPlane
 
+  .repeat $2BA0 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 GSU_CACHE_KERNEL_BEGIN ConvexInterpolateEdge
         sm      (CONVEX_INTERPOLATE_RETURN), R11
         lm      R1, (CONVEX_INSIDE_MAG)
         lm      R2, (CONVEX_OUTSIDE_MAG)
 ConvexInterpolateScale:
         move    R0, R1
-        with    R0
         add     R2
         bcs     ConvexInterpolateScaleDown
         nop
@@ -503,8 +514,7 @@ ConvexInterpolateScaleDown:
         nop
 ConvexInterpolateDivideReady:
         move    R0, R1                   ; Remainder/numerator.
-        move    R1, R0
-        with    R1
+        to      R1
         add     R2                       ; Positive denominator.
         move    R3, #0
         move    R12, #12
@@ -514,8 +524,7 @@ ConvexInterpolateDivideLoop:
         add     R0
         with    R3
         add     R3
-        move    R2, R0
-        with    R2
+        to      R2
         sub     R1
         bcc     ConvexInterpolateDivideNext
         nop
@@ -527,28 +536,23 @@ ConvexInterpolateDivideNext:
 
         iwt     R1, #2048
         move    R0, R3
-        with    R0
         cmp     R1
         bcc     ConvexInterpolateInsideBase
         nop
         iwt     R0, #4096
-        with    R0
         sub     R3
         sm      (CONVEX_FACTOR), R0
         BSP_CLIP_COPY_VIEW CONVEX_OUT_RIGHT, CONVEX_OUT_UP, CONVEX_OUT_DEPTH, CONVEX_BASE_RIGHT, CONVEX_BASE_UP, CONVEX_BASE_DEPTH
         lm      R0, (CONVEX_IN_RIGHT)
         lm      R1, (CONVEX_OUT_RIGHT)
-        with    R0
         sub     R1
         sm      (CONVEX_DELTA_RIGHT), R0
         lm      R0, (CONVEX_IN_UP)
         lm      R1, (CONVEX_OUT_UP)
-        with    R0
         sub     R1
         sm      (CONVEX_DELTA_UP), R0
         lm      R0, (CONVEX_IN_DEPTH)
         lm      R1, (CONVEX_OUT_DEPTH)
-        with    R0
         sub     R1
         sm      (CONVEX_DELTA_DEPTH), R0
         bra     ConvexInterpolateComponents
@@ -558,17 +562,14 @@ ConvexInterpolateInsideBase:
         BSP_CLIP_COPY_VIEW CONVEX_IN_RIGHT, CONVEX_IN_UP, CONVEX_IN_DEPTH, CONVEX_BASE_RIGHT, CONVEX_BASE_UP, CONVEX_BASE_DEPTH
         lm      R0, (CONVEX_OUT_RIGHT)
         lm      R1, (CONVEX_IN_RIGHT)
-        with    R0
         sub     R1
         sm      (CONVEX_DELTA_RIGHT), R0
         lm      R0, (CONVEX_OUT_UP)
         lm      R1, (CONVEX_IN_UP)
-        with    R0
         sub     R1
         sm      (CONVEX_DELTA_UP), R0
         lm      R0, (CONVEX_OUT_DEPTH)
         lm      R1, (CONVEX_IN_DEPTH)
-        with    R0
         sub     R1
         sm      (CONVEX_DELTA_DEPTH), R0
 ConvexInterpolateComponents:
@@ -601,10 +602,14 @@ ConvexInterpolateComponents:
         .repeat 0
         nop
         .endrepeat
+        .res $0176 - (* - ConvexInterpolateEdge)
 GSU_CACHE_KERNEL_END ConvexInterpolateEdge
 
 .include "quake/VertexTransform.sgs"
 
+  .repeat $2EA0 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 GSU_CACHE_KERNEL_BEGIN ConvexProjectPolygon
         sm      (CONVEX_PROJECT_RETURN), R11
         iwt     R0, #24576
@@ -633,7 +638,7 @@ ConvexProjectLoop:
         lm      R2, (CONVEX_CUR_DEPTH)
         jal     ConvexProjectComponent
         nop
-        iwt     R1, #8192               ; 64 logical pixels in Q7.
+        iwt     R1, #BSP_VIEW_CENTER_X_Q7               ; 64 logical pixels in Q7.
         with    R0
         add     R1
         lm      R10, (CONVEX_SCREEN_PTR)
@@ -645,14 +650,14 @@ ConvexProjectLoop:
         lm      R2, (CONVEX_CUR_DEPTH)
         jal     ConvexProjectComponent
         nop
-        iwt     R1, #7168               ; 56 logical pixels in Q7.
+        iwt     R1, #BSP_VIEW_CENTER_Y_Q7               ; 56 logical pixels in Q7.
         with    R1
         sub     R0
         movew   (R10), R1
 
         lm      R2, (CONVEX_MIN_Y)
-        move    R3, R1
-        with    R3
+        to      R3
+        from    R1
         sub     R2
         bpl     ConvexProjectMinReady
         nop
@@ -663,8 +668,8 @@ ConvexProjectLoop:
         sm      (CONVEX_TOP_PTR), R0
 ConvexProjectMinReady:
         lm      R2, (CONVEX_MAX_Y)
-        move    R3, R2
-        with    R3
+        to      R3
+        from    R2
         sub     R1
         bpl     ConvexProjectMaxReady
         nop
@@ -701,7 +706,7 @@ ConvexProjectDone:
         nop
         move    R0, #0
 ConvexRasterFirstYPositive:
-        move    R1, #111
+        move    R1, #BSP_VIEW_HEIGHT-1
         with    R1
         sub     R0
         bpl     ConvexRasterFirstYReady
@@ -723,17 +728,16 @@ ConvexRasterFirstYReady:
         nop
         GSU_ABSOLUTE_GOTO ConvexProjectRejected
 ConvexRasterLastYPositive:
-        move    R1, #111
-        move    R2, R1
-        with    R2
+        move    R1, #BSP_VIEW_HEIGHT-1
+        to      R2
+        from    R1
         sub     R0
         bpl     ConvexRasterLastYReady
         nop
         move    R0, R1
 ConvexRasterLastYReady:
         lm      R1, (CONVEX_RASTER_Y)
-        move    R2, R0
-        with    R2
+        to      R2
         sub     R1
         bpl     ConvexRasterRowsReady
         nop
@@ -749,6 +753,7 @@ ConvexProjectReturn:
         lm      R11, (CONVEX_PROJECT_RETURN)
         ret
         nop
+        .res $0126 - (* - ConvexProjectPolygon)
 GSU_CACHE_KERNEL_END ConvexProjectPolygon
 
 ; R1=signed Q6 component, R2=positive Q6 depth. Return signed Q7 screen
@@ -765,7 +770,6 @@ ConvexProjectComponentUnsaturated:
         bpl     ConvexProjectMagnitudeReady
         nop
         move    R0, #0
-        with    R0
         sub     R1
         move    R1, R0
         move    R0, #1
@@ -776,12 +780,23 @@ ConvexProjectMagnitudeReady:
         ; ordinary component clamp.
         moves   R4, R4
         bne     ConvexProjectDivide
+.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
+        with    R1                     ; First byte of MOVE in the delay slot.
+        to      R0
+        ; WARP halves the magnitude only for this comparison, then clamps to
+        ; +/-2*depth. Keep the original numerator and the zero-depth guard.
+ConvexProjectClampScale:
+        nop
+.else
         nop
         move    R0, R1
-        with    R0
+.endif
         cmp     R2
         bcc     ConvexProjectDivide
         nop
+.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
+ConvexProjectClampLimit:
+.endif
         iwt     R3, #2048
         bra     ConvexProjectSignedQuotient
         nop
@@ -809,19 +824,24 @@ ConvexProjectSignedQuotient:
         move    R3, R1
 ConvexProjectScale:
         move    R0, R3
-        with    R0
         add     R0                       ; 2q
-        move    R1, R3
-        with    R1
-        add     R1
+        to      R1
+        from    R3
+        add     R3
         with    R1
         add     R1                       ; 4q
-        with    R0
+.if BSP_RENDER_SCALE = 2
         add     R1                       ; 6q
+.else
+        move    R0, R1                  ; 4q: focal length 64.
+.endif
 ConvexProjectComponentDone:
         ret
         nop
 
+  .repeat $3020 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 GSU_CACHE_KERNEL_BEGIN ConvexRasterPolygon
         sm      (CONVEX_RASTER_RETURN), R11
 ConvexRasterRowLoop:
@@ -841,8 +861,8 @@ ConvexRasterRowLoop:
         lm      R10, (CONVEX_FORWARD_PTR)
         lm      R12, (CONVEX_SCREEN_COUNT)
 ConvexRasterForwardAdvance:
-        move    R9, R10
-        with    R9
+        to      R9
+        from    R10
         add     #4
         lm      R0, (CONVEX_SCREEN_END_PTR)
         with    R9
@@ -856,8 +876,8 @@ ConvexRasterForwardNextReady:
         inc     R8
         movew   R1, (R8)
         lm      R0, (CONVEX_SAMPLE_Y)
-        move    R2, R1
-        with    R2
+        to      R2
+        from    R1
         sub     R0
         moves   R2, R2
         bmi     ConvexRasterForwardStep
@@ -901,8 +921,8 @@ ConvexRasterReverseAdvance:
         bra     ConvexRasterReverseNextReady
         nop
 ConvexRasterReverseNoWrap:
-        move    R9, R10
-        with    R9
+        to      R9
+        from    R10
         sub     #4
 ConvexRasterReverseNextReady:
         move    R8, R9
@@ -910,8 +930,8 @@ ConvexRasterReverseNextReady:
         inc     R8
         movew   R1, (R8)
         lm      R0, (CONVEX_SAMPLE_Y)
-        move    R2, R1
-        with    R2
+        to      R2
+        from    R1
         sub     R0
         moves   R2, R2
         bpl     ConvexRasterReverseNonNegative
@@ -941,8 +961,7 @@ ConvexRasterReverseNonNegative:
         nop
 
         lm      R1, (CONVEX_MIN_X)
-        move    R2, R0
-        with    R2
+        to      R2
         sub     R1
         bpl     ConvexRasterXOrderReady
         nop
@@ -974,9 +993,8 @@ ConvexRasterFirstReady:
         with    R3
         asr
   .endrepeat
-        move    R0, #127
-        move    R4, R0
-        with    R4
+        move    R0, #BSP_VIEW_WIDTH-1
+        to      R4
         sub     R3
         bpl     ConvexRasterLastReady
         nop
@@ -1009,8 +1027,7 @@ ConvexRasterDone:
 ; interpolation remains in the hot path.
 ConvexIntersectActiveEdge:
         lm      R0, (CONVEX_SAMPLE_Y)
-        move    R1, R0
-        with    R1
+        to      R1
         sub     R5
         sm      (CONVEX_DIV_NUM), R1
         move    R0, R7
@@ -1033,8 +1050,7 @@ ConvexIntersectDivideLoop:
         add     R0
         with    R3
         add     R3
-        move    R4, R0
-        with    R4
+        to      R4
         sub     R2
         bcc     ConvexIntersectDivideNext
         nop
@@ -1052,9 +1068,13 @@ ConvexIntersectDivideNext:
         move    R1, #1
         ret
         nop
+        .res $01BC - (* - ConvexRasterPolygon)
 GSU_CACHE_KERNEL_END ConvexRasterPolygon
 
 ; Warm the stable horizontal-span cache window once per frame.
+  .repeat $31E0 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 GSU_CACHE_KERNEL_BEGIN RasterHotKernel
         ret
         nop
@@ -1063,7 +1083,7 @@ GSU_DrawHLine:
         moves   R2, R2
         bmi     HLineDone
         nop
-        move    R0, #111
+        move    R0, #BSP_VIEW_HEIGHT-1
         with    R0
         sub     R2
         bmi     HLineDone
@@ -1083,7 +1103,7 @@ HLineForward:
         moves   R3, R3
         bmi     HLineDone
         nop
-        move    R0, #127
+        move    R0, #BSP_VIEW_WIDTH-1
         with    R0
         sub     R1
         bmi     HLineDone
@@ -1093,15 +1113,15 @@ HLineForward:
         nop
         move    R1, #0
 HLineLeftReady:
-        move    R0, #127
+        move    R0, #BSP_VIEW_WIDTH-1
         with    R0
         sub     R3
         bpl     HLineRightReady
         nop
-        move    R3, #127
+        move    R3, #BSP_VIEW_WIDTH-1
 HLineRightReady:
-        move    R12, R3
-        with    R12
+        to      R12
+        from    R3
         sub     R1
         inc     R12
         iwt     R13, #HLineLoop
@@ -1112,12 +1132,16 @@ HLineLoop:
 HLineDone:
         ret
         nop
+        .res $0047 - (* - RasterHotKernel)
 GSU_CACHE_KERNEL_END RasterHotKernel
 
 ;-------------------------------------------------------------------------------
 ; Expand each logical 8x8 4bpp tile into four physical tiles. Lookup tables
 ; duplicate every source bit horizontally; duplicate stores handle vertical
 ; doubling. Both SNES plane pairs and all 28,672 destination bytes are written.
+  .repeat $3230 - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 GSU_CACHE_KERNEL_BEGIN ExpandFrame
         sm      (EXPAND_RETURN), R11
         iwt     R0, #FRAMEBUFFER
@@ -1306,6 +1330,7 @@ ExpandPlanePair:
         moveb   R3, (R10)
         ret
         nop
+        .res $0153 - (* - ExpandFrame)
 GSU_CACHE_KERNEL_END ExpandFrame
 
 ; These exact restoring divides sit after the pinned cache kernels so unrolling
@@ -1363,9 +1388,9 @@ TextureDivideQ12SelectBank:
         nop
 TextureDivideQ12BankReady:
         romb
-        move    R2, R1
-        with    R2
-        add     R2
+        to      R2
+        from    R1
+        add     R1
         with    R2
         add     R2
         iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS
@@ -1414,8 +1439,8 @@ SkyMarkerSampler:
         rol
         with    R2
         add     R2
-        move    R4, R3
-        with    R4
+        to      R4
+        from    R3
         sub     R1
         bcc     Next
         nop
@@ -1434,54 +1459,47 @@ TextureDivideUnsigned:
         nop
 
 ; Technique 4's projective blocks are at most eight pixels wide. Handle the
-; common power-of-two widths directly and tail-call the exact general divider
-; for the short 3/5/6/7-pixel remainder blocks.
+; power-of-two widths directly and use exact reciprocals for 3/5/6/7. A balanced
+; dispatch keeps short remainder blocks from walking every earlier width.
 TextureDivideBlockUnsigned:
-        move    R4, R1
-        with    R4
-        sub     #8
-        beq     TextureDivideBlock8
-        nop
-        move    R4, R1
-        with    R4
+        to      R4
+        from    R1
         sub     #4
         beq     TextureDivideBlock4
         nop
-        move    R4, R1
+        bcc     TextureDivideBlockBelow4
+        nop
         with    R4
         sub     #2
-        beq     TextureDivideBlock2
-        nop
-        move    R4, R1
-        dec     R4
-        beq     TextureDivideBlock1
-        nop
-        move    R4, R1
-        with    R4
-        sub     #3
-        beq     TextureDivideBlock3
-        nop
-        move    R4, R1
-        with    R4
-        sub     #5
-        beq     TextureDivideBlock5
-        nop
-        move    R4, R1
-        with    R4
-        sub     #6
         beq     TextureDivideBlock6
         nop
-        move    R4, R1
-        with    R4
-        sub     #7
-        beq     TextureDivideBlock7
+        bcc     TextureDivideBlock5
         nop
+        with    R4
+        sub     #2
+        beq     TextureDivideBlock8
+        nop
+        bcc     TextureDivideBlock7
+        nop
+TextureDivideBlockFallback:
         iwt     R13, #TextureDivideUnsigned
         jmp     R13
         nop
+TextureDivideBlockBelow4:
+        with    R4
+        add     #2
+        beq     TextureDivideBlock2
+        nop
+        bpl     TextureDivideBlock3
+        nop
+        inc     R4
+        beq     TextureDivideBlock1
+        nop
+        GSU_ABSOLUTE_GOTO TextureDivideBlockFallback
+        ; Preserve the divider bodies and following cache layout.
+        .res $3C - (* - TextureDivideBlockUnsigned)
 TextureDivideBlock8:
-        move    R3, R0
-        with    R3
+        to      R3
         and     #7
   .repeat 3
         with    R0
@@ -1491,8 +1509,7 @@ TextureDivideBlock8:
         ret
         nop
 TextureDivideBlock4:
-        move    R3, R0
-        with    R3
+        to      R3
         and     #3
   .repeat 2
         with    R0
@@ -1502,10 +1519,8 @@ TextureDivideBlock4:
         ret
         nop
 TextureDivideBlock2:
-        move    R3, R0
-        with    R3
+        to      R3
         and     #1
-        with    R0
         lsr
         move    R2, R0
         ret
@@ -1541,19 +1556,16 @@ TextureDivideBlockReciprocal:
         move    R12, #1
 TextureDivideBlockMagnitudeReady:
         move    R5, R0
-        with    R0
         lmult
         ; floor(product / 32768) is the high word doubled plus low bit 15.
         with    R4
         add     R4
-        with    R0
         adc     R0
         move    R2, R0
         move    R6, R1
-        with    R0
         lmult
-        move    R3, R5
-        with    R3
+        to      R3
+        from    R5
         sub     R4
         moves   R3, R3
         bpl     TextureDivideBlockReciprocalReady
@@ -1579,64 +1591,49 @@ LightmapPrepareBlock:
         GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
 :
         lm      R0, (TEXTURE_SPAN_S)
-        with    R0
         hib
-        with    R0
         sex
         lm      R1, (LIGHTMAP_MIN_BLOCK_S)
-        with    R0
         sub     R1
         move    R12, R0
         lm      R0, (TEXTURE_BLOCK_END_S)
-        with    R0
         hib
-        with    R0
         sex
         lm      R1, (LIGHTMAP_MIN_BLOCK_S)
-        with    R0
         sub     R1
         move    R6, R0
         lm      R1, (LIGHTMAP_WIDTH)
         dec     R1
         move    R0, R12
-        with    R0
         cmp     R1
         bcc     LightmapPrepareStartSInterior
         nop
         GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
 LightmapPrepareStartSInterior:
         move    R0, R6
-        with    R0
         cmp     R1
         bcc     LightmapPrepareEndSInterior
         nop
         GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
 LightmapPrepareEndSInterior:
-        move    R8, R6
-        with    R8
+        to      R8
+        from    R6
         sub     R12
         lm      R0, (TEXTURE_SPAN_T)
-        with    R0
         hib
-        with    R0
         sex
         lm      R1, (LIGHTMAP_MIN_BLOCK_T)
-        with    R0
         sub     R1
         move    R13, R0
         lm      R0, (TEXTURE_BLOCK_END_T)
-        with    R0
         hib
-        with    R0
         sex
         lm      R1, (LIGHTMAP_MIN_BLOCK_T)
-        with    R0
         sub     R1
         move    R7, R0
         lm      R1, (LIGHTMAP_HEIGHT)
         dec     R1
         move    R0, R13
-        with    R0
         cmp     R1
         bcc     LightmapPrepareStartTInterior
         nop
@@ -1655,6 +1652,9 @@ TextureRenderConvexFaceAlbedoSamplerReady:
 
 ; Resolve the overwhelmingly common sampler once per face. The fallback
 ; retains non-power-of-two, 256-wide, and cross-bank cases.
+  .repeat $364B - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 TextureSelectSampleRoutine:
         iwt     R1, #TextureSampleAbsoluteRegisters
         sm      (TEXTURE_SAMPLE_ROUTINE), R1
@@ -1668,23 +1668,23 @@ TextureSelectSampleRoutine:
         sm      (TEXTURE_ERR_S), R1
         sm      (TEXTURE_ERR_T), R1
         move    R2, #BSP_WORLD_TEXTURE_FLAG_POWER_OF_TWO_AXES | BSP_WORLD_TEXTURE_FLAG_SINGLE_BANK
-        with    R0
         cmp     R2
         bne     TextureSelectSampleRoutineWidthMismatch
         nop
         lm      R0, (TEXTURE_WIDTH)
         lm      R1, (TEXTURE_HEIGHT)
-        with    R0
         cmp     R1
         bne     TextureSelectSampleRoutineWidthMismatch
         nop
         iwt     R2, #256
-        with    R0
         cmp     R2
         beq     TextureSelectSampleRoutineDone
         nop
         iwt     R10, #TextureSelectPowerOfTwoStateReady
         GSU_ABSOLUTE_GOTO TexturePreparePowerOfTwoSamplerState
+  .repeat $368A - (* - GSU_SelectVisibility)
+        nop
+  .endrepeat
 TextureSelectPowerOfTwoStateReady:
         iwt     R1, #TextureSampleAbsolutePowerOfTwoSingleBankRegisters
         sm      (TEXTURE_SAMPLE_ROUTINE), R1
@@ -1713,19 +1713,16 @@ TexturePreparePowerOfTwoSamplerState:
         sm      (TEXTURE_SPAN_SHADE_Q8), R1
         iwt     R1, #TextureSamplePowerOfTwoRowShift2
         iwt     R2, #64
-        with    R0
         cmp     R2
         beq     TextureSelectSampleRowRoutineReady
         nop
         iwt     R1, #TextureSamplePowerOfTwoRowShift3
         iwt     R2, #128
-        with    R0
         cmp     R2
         beq     TextureSelectSampleRowRoutineReady
         nop
         iwt     R1, #TextureSamplePowerOfTwoRowShift1
         iwt     R2, #32
-        with    R0
         cmp     R2
         beq     TextureSelectSampleRowRoutineReady
         nop

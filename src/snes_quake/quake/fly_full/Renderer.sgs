@@ -1,0 +1,73 @@
+; Fused all-feature fly job. Own the fixed configuration and complete render
+; sequence here; reuse the fixed-lightmap geometry/raster kernels installed
+; by our dispatch. The fly-entry loader installs this deferred RAM tail.
+.segment "GSU_ALIAS_FLY_CODE"
+
+.if BSP_FLY_FUSED_SUPPORTED
+.export GSU_FlyTextureLightmapCode
+
+GSU_FlyTextureLightmapCode:
+        move    R0, #1
+        sm      (TEXTURE_RENDER_MODE), R0
+        iwt     R1, #BrushArbiterSpanLightmapped
+        sm      (BRUSH_ARBITER_COMPOSE_ROUTINE), R1
+        jal     TexturePublishOrdinaryQ12Routes
+        nop
+        move    R0, #1
+        ramb
+        move    R0, #$11
+        cmode
+        iwt     R10, #COMMAND+12
+        movew   R0, (R10)
+        sm      (GSU_TELEMETRY_BRUSH_VISUAL_STATE), R0
+
+        jal     LoadProjectedPacketState
+        nop
+        ; Near clipping reuses the selector camera cache. Preserve the same
+        ; brush-private Q2 camera for every subsequent world/fragment cull.
+        lm      R0, (CAMERA_X)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (BRUSH_CAMERA_Q2_X), R0
+        lm      R0, (CAMERA_Y)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (BRUSH_CAMERA_Q2_Y), R0
+        lm      R0, (CAMERA_Z)
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        sm      (BRUSH_CAMERA_Q2_Z), R0
+
+        ; Accepted inline poses, frozen QER1 membership and current-camera
+        ; visibility feed one painter-ordered world/brush/alias stream.
+        jal     FlyBrushLoadPVS
+        nop
+        jal     BrushBuildMixedTokens
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     FlyRenderFallbackWorld
+        nop
+        jal     BuildPacketViewCache
+        nop
+        ; This owner also schedules sky before the sorted alias suffix.
+        ; Shared samplers retain composed surfaces, turbulence and lightmaps;
+        ; alias samples use the exact world and brush coverage mask.
+        jal     BrushRenderMixedTokens
+        nop
+        GSU_ABSOLUTE_GOTO BrushRenderComplete
+
+FlyRenderFallbackWorld:
+        ; Preserve the existing diagnosed overflow behavior and completion ABI.
+        jal     TextureRenderFaces
+        nop
+        GSU_ABSOLUTE_GOTO BrushRenderComplete
+
+.assert * - FlyAliasTestVisibility <= GSU_ALIAS_FLY_CODE_CAPACITY, error, "Fused fly renderer exceeds the deferred overlay"
+.endif

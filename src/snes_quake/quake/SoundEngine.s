@@ -23,19 +23,19 @@ SOUND_NO_CHUNK              = $FFFF
 SOUND_UPLOAD_CONTINUE_NONE  = 0
 SOUND_UPLOAD_CONTINUE_REFILL = 1
 SOUND_UPLOAD_CONTINUE_START = 2
-; Twenty-four packets per realtime slice cover the dense four-stream mix
-; while retaining interruptible transfers outside VBlank. A 576-byte chunk
-; takes eight slices. Ordered playback uses eight packets and also pumps
-; refills while waiting for the next video tick.
+; Bound foreground polling attempts. Individual nonblocking packets can also
+; advance between warp operations; chunk completion and all mixer commands
+; remain foreground work. Other playback modes retain the shorter poll batch.
 SOUND_UPLOAD_BATCH_PACKETS_REALTIME = 24
 SOUND_UPLOAD_BATCH_PACKETS_ORDERED = 8
 SOUND_JOIN_POLL_COUNT       = 4
 SOUND_BOOT_START_TICK       = 240
-; Realtime presents source poses after the renderer finishes.  The current
-; full-route median presentation age is 30 NTSC ticks (499.18 ms), so keep the
-; dry soundtrack one half-second behind the source clock on real hardware.
-; Ordered 2 Hz is render-completion paced and must retain its zero offset.
+; Plain rendering retains its presentation-age delay. X3 WARP displays a
+; camera sampled two/three ticks earlier; native sound-service age supplies
+; the remainder after this two-tick delay. Select once when joining playback,
+; never from a predicted source image that may arrive early or late.
 SOUND_REALTIME_PRESENTATION_OFFSET_TICKS = 30
+SOUND_WARP_PRESENTATION_OFFSET_TICKS = 2
 SOUND_CHUNK_TICK_NUMERATOR  = 125
 SOUND_CHUNK_TICK_DENOMINATOR = 960
 
@@ -52,6 +52,7 @@ QuakeSoundInit:
         stz     sound_start_tick
         stz     sound_elapsed_tick
         stz     sound_target_tick
+        stz     sound_presentation_offset_ticks
         stz     sound_next_command
         stz     sound_mix_command_counter
         stz     sound_driver_status
@@ -82,7 +83,17 @@ QuakeSoundInit:
         stz     sound_finished_epoch
         jsr     QuakeSoundClearVoiceState
         SMP_ready
+        ; IPL's execute acknowledgement is transient: our driver immediately
+        ; replaces it with READY. A mouse/fly NMI here can miss that echo and
+        ; strand the CPU in smpExecute. Keep this boot-only transfer atomic.
+        RW_push set:a8i16
+        lda     SFX_nmitimen
+        and     #$7F
+        sta     NMITIMEN
         SMP_exec __SMPCODE_RUN__, __SMPCODE_LOAD__, __SMPCODE_SIZE__, QuakeSoundDriver
+        lda     SFX_nmitimen
+        sta     NMITIMEN
+        RW_pull
         RW_forced a8i16
 @WaitForDriver:
         lda     SMPIO0
@@ -127,17 +138,10 @@ QuakeSoundCompatible:
         cmp     #$0001
         bne     @No
         lda     demo_schedule
-        beq     @Ordered
         cmp     #$0001
         bne     @No
         lda     demo_playback_rate_shift
         bne     @No
-        bra     @Menu
-@Ordered:
-        lda     demo_ordered_pose_stride
-        cmp     #BSP_DEMO_ORDERED_POSE_STRIDE
-        bne     @No
-@Menu:
         lda     runtime_menu_open
         bne     @No
         sec
@@ -160,6 +164,17 @@ QuakeSoundStartPose:
         bcc     :+
         jmp     @Return
 :
+        ; The requested scale is already committed when a menu closes. An old
+        ; displayed/uploading image may still belong to the previous scale.
+        ldy     #SOUND_REALTIME_PRESENTATION_OFFSET_TICKS
+        ldx     fly_playback_mode
+        cpx     #RUNTIME_MENU_PLAYBACK_FLY3X
+        bne     @OffsetReady
+        ldx     fly_warp_enabled
+        beq     @OffsetReady
+        ldy     #SOUND_WARP_PRESENTATION_OFFSET_TICKS
+@OffsetReady:
+        sty     sound_presentation_offset_ticks
         asl
         tax
         lda     f:QuakeBSPDemoPreciseTiming,x
@@ -168,7 +183,7 @@ QuakeSoundStartPose:
         beq     @TargetReady
         lda     sound_target_tick
         sec
-        sbc     #SOUND_REALTIME_PRESENTATION_OFFSET_TICKS
+        sbc     sound_presentation_offset_ticks
         bcs     @StoreTarget
         lda     #$0000
 @StoreTarget:
@@ -217,6 +232,21 @@ QuakeSoundStartPose:
         lda     sound_voice_start_tick,x
         sta     sound_work_start_tick
         jsr     QuakeSoundStartVoice
+@FinishSeekStart:
+        ; Finish the initial prefill before reconstructing the next voice.
+        ; Service older voices' tail/refill deadlines throughout a dense seek.
+        lda     sound_upload_active
+        beq     @SeekUploadIdle
+        jsr     QuakeSoundPumpUpload
+        bra     @FinishSeekStart
+@SeekUploadIdle:
+        jsr     QuakeSoundDrainRequests
+        lda     sound_upload_active
+        bne     @FinishSeekStart
+        lda     sound_pending_start_active
+        beq     @NextVoice
+        jsr     QuakeSoundContinuePendingStart
+        bra     @FinishSeekStart
 @NextVoice:
         inc     sound_work_voice
         lda     sound_work_voice
@@ -254,6 +284,52 @@ QuakeSoundStop:
         stz     sound_schedule_finished
         inc     sound_stop_counter
 @Return:
+        rts
+
+; Realtime normally exhausts its cursor for bounded benchmarks. Once both the
+; last image and the complete soundtrack have finished, publish a natural new
+; lap. Hold its source clock at zero until pose zero is visible and the main
+; loop has restarted the mixer. NMI never performs an SPC transfer here.
+QuakeSoundRealtimeLoop:
+        RW_assume a16i16
+        lda     demo_playback_rate_shift
+        bne     @Continue
+        lda     demo_next_pose
+        cmp     #BSP_DEMO_PRECISE_TRACK_POSE_COUNT
+        bcs     @CursorEnded
+        ; The end sentinel holds pose zero until the mixer has joined this
+        ; lap. Its source record cursor already points to pose one.
+        lda     sound_demo_loop
+        cmp     demo_loop_counter
+        bne     @HoldZero
+        lda     #BSP_DEMO_PRECISE_TIMING_RECORD_BYTES
+        sta     demo_timing_offset
+        bra     @Continue
+@CursorEnded:
+        lda     sound_schedule_finished
+        beq     @Continue
+        lda     sound_service_busy
+        bne     @Continue
+        lda     presented_demo_pose
+        cmp     #BSP_DEMO_PRECISE_TRACK_POSE_COUNT - 1
+        bne     @Continue
+        stz     demo_offset
+        stz     demo_timing_offset
+        stz     demo_next_pose
+        inc     demo_loop_counter
+        jsr     InvalidateScheduledFrameIdentity
+        jsr     LoadNextDemoPose
+        inc     demo_source_due_counter
+        lda     #BSP_DEMO_PRECISE_TIMING_BYTES
+        sta     demo_timing_offset
+@HoldZero:
+        lda     video_tick
+        sta     demo_playhead_origin
+        stz     demo_playhead_tick
+        sec
+        rts
+@Continue:
+        clc
         rts
 
 QuakeSoundService:
@@ -353,24 +429,16 @@ QuakeSoundService:
         jsr     QuakeSoundStartPose
         rts
 :
-        jsr     QuakeSoundDrainRequests
-        lda     sound_upload_active
-        bne     @Return
-        lda     sound_pending_start_active
-        beq     :+
-        jsr     QuakeSoundContinuePendingStart
-        lda     sound_upload_active
-        bne     @Return
-        lda     sound_pending_start_active
-        bne     @Return
-:
+        ; Due stop/volume commands must not wait for an empty refill queue.
+        ; Otherwise a looping voice can keep that queue occupied forever,
+        ; preventing the scheduled stop that would release its bandwidth.
         lda     demo_schedule
         beq     @OrderedElapsed
         lda     demo_playhead_tick
-        cmp     #SOUND_REALTIME_PRESENTATION_OFFSET_TICKS
+        cmp     sound_presentation_offset_ticks
         bcc     @Return
         sec
-        sbc     #SOUND_REALTIME_PRESENTATION_OFFSET_TICKS
+        sbc     sound_presentation_offset_ticks
         bra     @StoreElapsed
 @OrderedElapsed:
         lda     video_tick
@@ -394,14 +462,17 @@ QuakeSoundService:
         inc     sound_mix_command_counter
         lda     sound_upload_active
         bne     @Return
-        lda     sound_pending_start_active
-        bne     @Return
         lda     sound_cpu_state
         cmp     #SOUND_CPU_STATE_PLAYING
         beq     @ScheduleLoop
         rts
 @RequestsAfterCommands:
         jsr     QuakeSoundDrainRequests
+        lda     sound_upload_active
+        bne     @Return
+        lda     sound_pending_start_active
+        beq     @Return
+        jmp     QuakeSoundContinuePendingStart
 @Return:
         rts
 
@@ -560,6 +631,7 @@ QuakeSoundShadowStart:
         lda     sound_work_voice
         asl
         tax
+        jsr     QuakeSoundCancelPendingVoice
         lda     #$0001
         sta     sound_voice_active,x
         lda     sound_work_sample
@@ -577,7 +649,21 @@ QuakeSoundShadowStop:
         lda     sound_work_voice
         asl
         tax
+        jsr     QuakeSoundCancelPendingVoice
         stz     sound_voice_active,x
+        rts
+
+; X = voice word offset. An obsolete queued start has never reached KON;
+; account for it explicitly, then let the newer scheduled command proceed.
+QuakeSoundCancelPendingVoice:
+        lda     f:QuakeSoundCpuVoiceMasks,x
+        bit     sound_pending_start_active
+        beq     @Return
+        eor     #$FFFF
+        and     sound_pending_start_active
+        sta     sound_pending_start_active
+        inc     sound_late_skip_counter
+@Return:
         rts
 
 QuakeSoundShadowVolume:
@@ -690,14 +776,14 @@ QuakeSoundStartVoice:
         sta     sound_voice_next_chunk,x
         bra     QuakeSoundConfigureVoice
 @Stream:
-        lda     sound_work_voice
-        sta     sound_pending_start_voice
         lda     sound_work_relative
-        sta     sound_pending_start_relative
-        stz     sound_pending_start_slot
-        lda     #$0001
+        sta     sound_voice_pending_relative,x
+        stz     sound_voice_pending_slot,x
+        lda     f:QuakeSoundCpuVoiceMasks,x
+        ora     sound_pending_start_active
         sta     sound_pending_start_active
-        jsr     QuakeSoundContinuePendingStart
+        ; The next service pass drains older playing-voice refills before
+        ; beginning this new ring. Seek reconstruction pumps it explicitly.
         sec
         rts
 QuakeSoundConfigureVoice:
@@ -729,10 +815,29 @@ QuakeSoundStartAlreadyEnded:
         clc
         rts
 
-; Upload one ring chunk for the pending voice. Existing refill requests run
-; first, so starting a new sound never consumes an already-playing deadline.
+; Upload one initial ring chunk. Existing refill requests run first. Finish
+; the selected voice's short prefill before selecting another pending voice.
 QuakeSoundContinuePendingStart:
         RW_assume a16i16
+        ; Each voice owns its prefill cursor. A slow streamed start cannot
+        ; block cached cues, volumes, stops or newer schedule commands.
+@FindVoice:
+        lda     sound_pending_start_voice
+        asl
+        tax
+        lda     f:QuakeSoundCpuVoiceMasks,x
+        bit     sound_pending_start_active
+        bne     @VoiceReady
+        inc     sound_pending_start_voice
+        lda     sound_pending_start_voice
+        and     #BSP_SOUND_VOICE_COUNT-1
+        sta     sound_pending_start_voice
+        bra     @FindVoice
+@VoiceReady:
+        lda     sound_voice_pending_relative,x
+        sta     sound_pending_start_relative
+        lda     sound_voice_pending_slot,x
+        sta     sound_pending_start_slot
         lda     sound_pending_start_voice
         sta     sound_work_voice
         asl
@@ -781,11 +886,18 @@ QuakeSoundFinishStartUpload:
         lda     sound_work_relative
         sta     sound_pending_start_relative
         inc     sound_pending_start_slot
+        lda     sound_pending_start_voice
+        asl
+        tax
+        lda     sound_pending_start_relative
+        sta     sound_voice_pending_relative,x
+        lda     sound_pending_start_slot
+        sta     sound_voice_pending_slot,x
         lda     sound_pending_start_relative
         cmp     #SOUND_NO_CHUNK
         beq     QuakeSoundFinishPendingStart
         lda     sound_pending_start_slot
-        cmp     #BSP_SOUND_STREAM_BUFFER_COUNT
+        cmp     #2                   ; SPC requests the rest by their deadlines.
         bcs     QuakeSoundFinishPendingStart
         rts
 
@@ -804,7 +916,13 @@ QuakeSoundFinishPendingStart:
         lda     sound_voice_right,x
         sta     sound_work_right
         jsr     QuakeSoundConfigureVoice
-        stz     sound_pending_start_active
+        lda     sound_pending_start_voice
+        asl
+        tax
+        lda     f:QuakeSoundCpuVoiceMasks,x
+        eor     #$FFFF
+        and     sound_pending_start_active
+        sta     sound_pending_start_active
 @Return:
         rts
 
@@ -917,6 +1035,8 @@ QuakeSoundClearVoiceState:
         stz     sound_voice_right,x
         stz     sound_voice_start_tick,x
         stz     sound_voice_current_chunk,x
+        stz     sound_voice_pending_relative,x
+        stz     sound_voice_pending_slot,x
         lda     #SOUND_NO_CHUNK
         sta     sound_voice_next_chunk,x
         inx
@@ -926,8 +1046,8 @@ QuakeSoundClearVoiceState:
         rts
 
 ; A16 = global chunk identity, X16 = upload descriptor/cache slot,
-; Y16 = upload command. Boot cache loads use the blocking wrapper; live work
-; advances in bounded slices outside VBlank.
+; Y16 = upload command. Boot cache loads use the blocking wrapper; live chunks
+; advance through the shared, nonblocking packet pump.
 QuakeSoundUploadChunk:
         RW_assume a16i16
         pha
@@ -970,7 +1090,6 @@ QuakeSoundBeginUploadChunk:
 
 QuakeSoundPumpUpload:
         RW_assume a16i16
-        ldy     sound_upload_offset
         lda     demo_schedule
         beq     @OrderedBatch
         ldx     #SOUND_UPLOAD_BATCH_PACKETS_REALTIME
@@ -978,35 +1097,23 @@ QuakeSoundPumpUpload:
 @OrderedBatch:
         ldx     #SOUND_UPLOAD_BATCH_PACKETS_ORDERED
 @BatchReady:
-        RW_forced a8i16
 @Packet:
-        lda     [sound_source_pointer],y
-        sta     SMPIO0
-        iny
-        lda     [sound_source_pointer],y
-        sta     SMPIO1
-        iny
-        lda     [sound_source_pointer],y
-        sta     SMPIO2
-        iny
-        inc     z:sound_command_token
-        lda     z:sound_command_token
-        sta     SMPIO3
-@WaitPacket:
-        cmp     SMPIO3
-        bne     @WaitPacket
+        jsr     QuakeSoundPumpPacket
+        ldy     sound_upload_offset
         cpy     #BSP_SOUND_STREAM_CHUNK_BYTES
+        bne     @NextPacket
+        ; The final ACK follows SPC readiness/status publication. Only the
+        ; foreground can finish a chunk and run scheduler continuations.
+        RW_forced a8i16
+        lda     z:sound_command_token
+        cmp     SMPIO3
+        RW_forced a16i16
         beq     @Complete
+@NextPacket:
         dex
         bne     @Packet
-        RW_forced a16i16
-        sty     sound_upload_offset
         rts
 @Complete:
-        ; The SPC publishes ready/request state before acknowledging the final
-        ; packet, so completion is also the status-ordering edge.
-        RW_forced a16i16
-        sty     sound_upload_offset
         stz     sound_upload_active
         inc     sound_transfer_counter
         lda     sound_upload_command
@@ -1029,6 +1136,88 @@ QuakeSoundPumpUpload:
 :
         rts
 
+; At most one three-byte packet, and never wait for its acknowledgement.
+; NMI may help between warp operations, including while the foreground is
+; pumping this upload. The atomic commit covers every port/pointer/token mutation;
+; interrupted callers reload the shared offset instead of retaining stale Y.
+QuakeSoundPumpPacket:
+        RW_assume a16i16
+        lda     sound_upload_active
+        beq     @Return
+        ; Poll with NMI enabled. A waiting foreground must not exclude the
+        ; helper for an entire interrupt just because ACK is pending.
+        RW_forced a8i16
+        lda     z:sound_command_token
+        cmp     SMPIO3
+        RW_forced a16i16
+        bne     @Return
+        ; Do not strand a partial port write across a warp interrupt. Defer NMI
+        ; across the bounded port commit (no ACK wait); an edge arriving here
+        ; remains latched in RDNMI and fires when the saved enable is restored.
+        RW_forced a8i16
+        lda     SFX_nmitimen
+        and     #$7F
+        sta     NMITIMEN
+        RW_forced a16i16
+        jmp     QuakeSoundSendPacket
+@Return:
+        rts
+
+; Recheck after taking ownership: NMI may have advanced the shared packet
+; between the foreground's optimistic ACK read and its atomic commit.
+.macro SOUND_SEND_PACKET
+        .local PacketDone, PacketReturn
+        RW_assume a16i16
+        RW_forced a8i16
+        lda     z:sound_command_token
+        cmp     SMPIO3
+        bne     PacketDone
+        RW_forced a16i16
+        ldy     sound_upload_offset
+        cpy     #BSP_SOUND_STREAM_CHUNK_BYTES
+        bcs     PacketReturn
+        RW_forced a8i16
+        lda     [sound_source_pointer],y
+        sta     SMPIO0
+        iny
+        lda     [sound_source_pointer],y
+        sta     SMPIO1
+        iny
+        lda     [sound_source_pointer],y
+        sta     SMPIO2
+        iny
+        inc     z:sound_command_token
+        lda     z:sound_command_token
+        sta     SMPIO3
+        sty     sound_upload_offset
+PacketDone:
+        RW_forced a16i16
+PacketReturn:
+.endmacro
+
+QuakeSoundSendPacket:
+        SOUND_SEND_PACKET
+        RW_forced a8i16
+        lda     SFX_nmitimen
+        sta     NMITIMEN
+        RW_forced a16i16
+        rts
+
+; Warp call sites have dead A/Y/flags, 16-bit registers and DB in the CPU I/O
+; mirror. Preserve only their custom direct page; X is untouched by packets.
+QuakeSoundWarpPacket:
+        RW_assume a16i16
+        lda     sound_upload_active
+        and     hdma_audio_enabled
+        beq     QuakeSoundWarpPacketReturn
+        phd
+        lda     #0
+        tcd
+        SOUND_SEND_PACKET
+        pld
+QuakeSoundWarpPacketReturn:
+        rtl
+
 ; A8 = command, X16 low byte = argument, Y16 low byte = second argument.
 ; Port 3 is a monotonic strobe/ack and remains safe across NMI.
 QuakeSoundCommand:
@@ -1050,6 +1239,14 @@ QuakeSoundCommand:
 ; existing join contract: A, Y, DB, and widths survive; X/N/Z are clobbered.
 QuakeSoundJoinFX3:
         phy
+        ; A completed job has no work left to overlap. Do not delay staging
+        ; with another live stream slice when this join is only a fence.
+        ; Preserve the established ready/cache-warmup service boundaries.
+        ldx     sound_cpu_state
+        cpx     #SOUND_CPU_STATE_PLAYING
+        bne     @Service
+        ldx     FX3_R15
+        beq     @Done
 @Service:
         ; Finish cache packets during a GSU job, but publish READY/start only
         ; from the ordinary pre-render service boundary.
@@ -1133,6 +1330,10 @@ QuakeSoundVoiceFirstDescriptors:
         .repeat BSP_SOUND_VOICE_COUNT, Voice
         .byte   Voice * BSP_SOUND_STREAM_BUFFER_COUNT
         .endrepeat
+QuakeSoundCpuVoiceMasks:
+        .repeat BSP_SOUND_VOICE_COUNT, Voice
+        .word   1 << Voice
+        .endrepeat
 
 .segment "ZEROPAGE"
 sound_command_token: .res 1
@@ -1146,6 +1347,7 @@ sound_demo_loop: .res 2
 sound_start_tick: .res 2
 sound_elapsed_tick: .res 2
 sound_target_tick: .res 2
+sound_presentation_offset_ticks: .res 2
 sound_next_command: .res 2
 sound_mix_command_counter: .res 2
 sound_driver_status: .res 2
@@ -1204,6 +1406,8 @@ sound_voice_right: .res BSP_SOUND_VOICE_COUNT * 2
 sound_voice_start_tick: .res BSP_SOUND_VOICE_COUNT * 2
 sound_voice_current_chunk: .res BSP_SOUND_VOICE_COUNT * 2
 sound_voice_next_chunk: .res BSP_SOUND_VOICE_COUNT * 2
+sound_voice_pending_relative: .res BSP_SOUND_VOICE_COUNT * 2
+sound_voice_pending_slot: .res BSP_SOUND_VOICE_COUNT * 2
 
 .endif
 

@@ -1,13 +1,13 @@
 ; Deterministic QBSA/QBSF banks consumed only by the enabled brush path.
 
 .segment "BSP_BRUSH_TEXTURE_0"
-        .incbin "Data/QuakeBSPBrushTexturePixels0.bin"
+        .incbin "Data/Warp/QuakeBSPBrushTexturePixels0.bin"
 .segment "BSP_BRUSH_TEXTURE_1"
-        .incbin "Data/QuakeBSPBrushTexturePixels1.bin"
+        .incbin "Data/Warp/QuakeBSPBrushTexturePixels1.bin"
 .segment "BSP_BRUSH_TEXTURE_2"
-        .incbin "Data/QuakeBSPBrushTexturePixels2.bin"
+        .incbin "Data/Warp/QuakeBSPBrushTexturePixels2.bin"
 .segment "BSP_BRUSH_TEXTURE_3"
-        .incbin "Data/QuakeBSPBrushTexturePixels3.bin"
+        .incbin "Data/Warp/QuakeBSPBrushTexturePixels3.bin"
 .segment "BSP_BRUSH_RUNTIME_0"
         .incbin "Data/QuakeBSPBrushRuntime0.bin"
 .segment "BSP_BRUSH_RUNTIME_1"

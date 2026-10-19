@@ -18,7 +18,7 @@ BuildPacketViewCache:
 BuildPacketViewCacheLoop:
         jal     ClipTransformVertex
         nop
-        BSP_CLASSIFY_CLIP_OUTCODE
+        BSP_CLASSIFY_CLIP_OUTCODE PacketClipRightScale, PacketClipUpScale
         move    R7, R0
         lm      R10, (CONVEX_OUTPUT_CURSOR)
         lm      R0, (CLIP_RIGHT)
@@ -52,6 +52,17 @@ BuildPacketViewCacheDone:
 
 LoadPacketViewVertex:
         lm      R0, (CLIP_VERTEX_INDEX)
+.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
+        ; R0 is disposable before the first load. Its implicit destination
+        ; saves the bytes occupied by the two outcode patch slots above,
+        ; retaining the next cache kernel's pinned address.
+        add     R0
+        add     R0
+        add     R0
+        iwt     R10, #PACKET_VIEW_CACHE
+        with    R10
+        add     R0
+.else
         move    R1, R0
         with    R1
         add     R1
@@ -62,6 +73,7 @@ LoadPacketViewVertex:
         iwt     R10, #PACKET_VIEW_CACHE
         with    R10
         add     R1
+.endif
         lm      R9, (CONVEX_OUTPUT_CURSOR)
         movew   R0, (R10)
         movew   (R9), R0

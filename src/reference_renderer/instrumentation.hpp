@@ -1,6 +1,7 @@
 #pragma once
 
 #include "geometry.hpp"
+#include "presentation_warp.hpp"
 
 namespace quake_bsp_reference {
 
@@ -20,10 +21,16 @@ bool valid_reference_instrumentation_identifier(std::string_view value);
 struct ReferenceInstrumentationCommands
 {
     std::optional<bool> paused;
+    std::optional<RenderScale> render_scale;
+    std::optional<WarpSettings> warp_settings;
+    std::optional<std::size_t> view_pose;
+    std::optional<std::int64_t> scene_pose;
+    std::optional<std::optional<SourceCamera>> capture_camera;
     std::optional<PlaybackSchedule> pace;
     std::optional<int> presentation_rate_hz;
     std::optional<std::size_t> pose;
     std::optional<bool> external_bsp_models;
+    std::optional<bool> particles_enabled;
     std::optional<bool> sound_enabled;
     std::optional<float> sound_volume;
     std::optional<std::string> window_capture_path;

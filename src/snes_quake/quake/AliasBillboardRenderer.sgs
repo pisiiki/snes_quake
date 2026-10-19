@@ -385,9 +385,17 @@ AliasProjectAxis:
         add     R0
         sm      (ALIAS_AXIS_END), R1
         lm      R2, (CLIP_DEPTH)
+.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
+        ; WARP doubles only the unsigned rejection threshold. Positive depth
+        ; is at most 32767, so the doubled comparison still fits unsigned16.
+AliasClipDepthScale:
+        nop
+        nop
+.endif
 
         ; The normalized pair is monotone increasing. Reject it if both
-        ; endpoints lie on the same side of the broad +/-depth frustum.
+        ; endpoints lie on the same side of the broad +/-depth frustum
+        ; (twice that depth for the wide WARP projection).
         moves   R0, R0
         bpl     AliasProjectAxisRightPlane
         nop
@@ -409,6 +417,9 @@ AliasProjectAxisRightPlane:
         nop
         GSU_ABSOLUTE_GOTO AliasRenderDone
 AliasProjectAxisIntersects:
+.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
+        lm      R2, (CLIP_DEPTH)        ; Projection always uses the real depth.
+.endif
         move    R1, R0
         move    R4, #1
         jal     ConvexProjectComponentUnsaturated
@@ -418,8 +429,10 @@ AliasProjectAxisIntersects:
         move    R0, R3
         with    R0
         add     R0
+.if BSP_RENDER_SCALE = 2
         with    R0
         add     R3
+.endif
         movew   (R10), R0
         move    R2, #31
         jal     AliasEndpointCoordinate
@@ -437,16 +450,20 @@ AliasProjectAxisIntersects:
         move    R0, R3
         with    R0
         add     R0
+.if BSP_RENDER_SCALE = 2
         with    R0
         add     R3
+.endif
         move    R8, R0
         move    R2, #$ffe0
         jal     AliasEndpointCoordinate
         nop
         move    R6, R0
+.if BSP_RENDER_SCALE = 2
         move    R2, R1
         with    R2
         add     R2
+.endif
 
         movew   R1, (R10)
         move    R0, R8

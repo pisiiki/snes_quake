@@ -2,7 +2,12 @@
 .include "libSFX.i"
 .include "SNES_FX3.i"
 .include "MemoryMap.i"
+.export CAMERA_ANGLE_STEPS
+.export BSP_WARP_SOURCE_FOCAL
+.export GSU_CAMERA_SIN_OFFSET, GSU_CAMERA_COS_OFFSET
 .include "quake/SoundJoin.i"
+; Resolve CPU mirrors at link time for either fixed renderer's ROM image.
+.define BSP_CPU_CODE_ADDRESS(address) ((address) + (((^(address) >= $C0) .and (^(address) < $F0)) * BSP_SOUND_CPU_MIRROR_DELTA))
 GSU_RENDER_BASE    = $700000
 GSU_DATA_BASE      = $710000
 GSU_OUTPUT         = GSU_RENDER_BASE + GSU_OUTPUT_OFFSET
@@ -10,8 +15,8 @@ GSU_VERTICES       = GSU_DATA_BASE + GSU_VERTICES_OFFSET
 GSU_INDICES        = GSU_DATA_BASE + GSU_INDICES_OFFSET
 GSU_FACES          = GSU_DATA_BASE + GSU_FACES_OFFSET
 GSU_FACE_PLANES    = GSU_DATA_BASE + GSU_FACE_PLANES_OFFSET
-GSU_SIN             = GSU_DATA_BASE + GSU_SIN_OFFSET
-GSU_COS             = GSU_DATA_BASE + GSU_COS_OFFSET
+GSU_SIN             = GSU_DATA_BASE + GSU_CAMERA_SIN_OFFSET
+GSU_COS             = GSU_DATA_BASE + GSU_CAMERA_COS_OFFSET
 GSU_RECIPROCAL      = GSU_DATA_BASE + GSU_RECIPROCAL_OFFSET
 GSU_EXPAND_NIBBLE   = GSU_RENDER_BASE + GSU_EXPAND_NIBBLE_OFFSET
 GSU_TEXTURE_COORD_MAP = GSU_DATA_BASE + GSU_TEXTURE_COORD_MAP_OFFSET
@@ -41,6 +46,7 @@ CAMERA_COMMAND_WORDS = 8
 CAMERA_COMMAND_BYTES = CAMERA_COMMAND_WORDS * 2
 BSP_UPLOAD_FORMAT_FLAT = 0
 BSP_UPLOAD_FORMAT_TEXTURE = 1
+BSP_UPLOAD_FORMAT_MODE7 = 2
 BSP_STAGING_FLAT_LIMIT = 49
 BSP_STAGING_TEXTURE_LIMIT = 132
 BSP_WORLD_ROM_BANK_BYTES = $8000
@@ -234,7 +240,9 @@ BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_
 .assert __BSP_WORLD_PVS_3_SIZE__ + __BSP_DEMO_TRACK_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Face-PVS chunk 3 and configured demo track exceed ROM19"
 .assert __BSP_DEMO_TRACK_SIZE__ = BSP_DEMO_PRECISE_TRACK_BYTES, lderror, "configured demo track segment has the wrong size"
 .assert __BSP_DEMO_TRACK_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "configured demo track exceeds its ROM bank"
-.assert __BSP_DEMO_TIMING_SIZE__ = BSP_DEMO_PRECISE_TIMING_BYTES+BSP_SKY_PHASE_BYTES+BSP_TURBULENCE_PHASE_BYTES+BSP_TURBULENCE_TABLE_BYTES, lderror, "configured demo timing/special-phase segment has the wrong size"
+.assert __BSP_DEMO_CLOCK_LOAD__ = $F80000, lderror, "CPU demo clock moved out of ROM112's CPU mirror"
+.assert __BSP_DEMO_CLOCK_SIZE__ = BSP_DEMO_PRECISE_TIMING_BYTES, lderror, "CPU demo clock size disagrees"
+.assert __BSP_DEMO_TIMING_SIZE__ = BSP_SKY_PHASE_BYTES+BSP_TURBULENCE_PHASE_BYTES+BSP_TURBULENCE_TABLE_BYTES, lderror, "configured special-phase segment has the wrong size"
 .assert __BSP_DEMO_TIMING_SIZE__ + __BSP_LIGHTMAP_COLORMAPS_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Demo timing and lightmap colormaps exceed ROM3"
 .assert __BSP_DEMO_TIMING_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "configured demo timing exceeds its ROM bank"
 .assert __BSP_COLLISION_PACKED_0_SIZE__ = BSP_COLLISION_PACKED_0_BYTES, lderror, "Fly collision payload chunk 0 has the wrong size"
@@ -284,11 +292,14 @@ Main:
         BSP_STATIC_COPY __GSU_BRUSH_CODE_RUN__, __GSU_BRUSH_CODE_LOAD__, __GSU_BRUSH_CODE_SIZE__
         BSP_STATIC_COPY __GSU_TEXTURE_TAIL_CODE_RUN__, __GSU_TEXTURE_TAIL_CODE_LOAD__, __GSU_TEXTURE_TAIL_CODE_SIZE__
         jsr     StageStaticAssets
+        RW_forced a16i16
+        lda     #$FFFF
+        sta     f:GSU_DATA_BASE+GSU_BRUSH_PVS_LEAF_OFFSET
         ; StageStaticAssets fills the Q12 mirror through $8BFF, including the
         ; sampler's reserved $8B00 tail. Install the sampler only afterward.
         RW_forced a16i16
         BSP_STATIC_COPY __GSU_TURBULENCE_HOT_CODE_RUN__, __GSU_TURBULENCE_HOT_CODE_LOAD__, __GSU_TURBULENCE_HOT_CODE_SIZE__
-        lda     #BSP_START_YAW_INDEX
+        lda     #BSP_START_YAW_INDEX*CAMERA_ANGLE_LEGACY_STEP
         sta     yaw_index
         stz     pitch_level
         lda     #BSP_WORLD_START_X_Q8
@@ -298,6 +309,8 @@ Main:
         lda     #BSP_WORLD_START_Z_Q8
         sta     camera_z
         stz     control_divider
+        jsr     InitFlyMouse
+        RW_forced a16i16
         stz     control_revision
         stz     coverage_debug
         stz     render_coverage_mode
@@ -410,6 +423,7 @@ Main:
         sta     active_packet_screen_count
         sta     active_packet_painter_node_count
         jsr     InitTemporalReuse
+        jsr     InitFlyViewport
         jsr     ApplyBootParameters
         ; Runtime state is authoritative. Derive every menu draft only after
         ; optional frame-zero overrides have been applied and before InitVideo
@@ -441,14 +455,7 @@ Main:
         sta     f:GSU_DATA_BASE+GSU_TELEMETRY_BRUSH_CURRENT_FACE
         sta     f:GSU_DATA_BASE+GSU_TELEMETRY_BRUSH_CURRENT_TEXTURE
         jsr     InitGSU
-        jsr     RenderFrame
-        ; A configured flat startup render is asynchronous. Its output must be
-        ; complete before the first snapshot and DMA, just like textured boot.
-        FX3_JOB_JOIN
-StartupRendererOutputReady:
-        jsr     SnapshotRenderedFrameForStage
-        jsr     StageExpandedFrame
-        jsr     InitVideo
+        jsr     BootRenderViewport
         ; InitVideo returns in 8-bit accumulator mode. These queue fields are
         ; words, so restore the runtime width before encoding their stores.
         RW_forced a16i16
@@ -479,117 +486,7 @@ StartupRendererOutputReady:
         BSP_SOUND_WAIT_FRAME
         bra     MainLoop
 :
-        jsr     RenderFrame
-RenderFrameComplete:
-        ; RenderFrame returns with M=0; keep assembler/runtime width aligned.
-        RW_forced a16i16
-        ; Cache warm-up needs the GSU-overlap service inside RenderFrame, but
-        ; the held ordered pose must not become another presentation.
-        BSP_SOUND_HOLD_DEMO DiscardHeldOrderedFrame
-        lda     runtime_menu_open
-        beq     :+
-        stz     stage_frame_required
-        stz     prefetched_selector_valid
-        BSP_SOUND_WAIT_FRAME
-        bra     MainLoop
-:
-        lda     stage_frame_required
-        bne     CheckRenderedRevision
-        lda     control_revision
-        cmp     render_camera+12
-        beq     @IdleVisible
-        ; VBlank may have changed controls after RenderFrame found the prior
-        ; identity current. Re-enter the renderer before sleeping so the newly
-        ; visible command cannot wait for another interrupt edge.
-        bra     MainLoop
-@IdleVisible:
-        ; VBlank still advances input/demo time and wakes changed commands.
-PresentationBoundaryWait:
-        BSP_SOUND_WAIT_FRAME
-        bra     MainLoop
-CheckRenderedRevision:
-        lda     demo_schedule_revision
-        cmp     render_demo_epoch
-        bne     @DiscardRenderedFrame
-        lda     demo_mode
-        beq     @WaitForQueue
-        lda     demo_schedule
-        bne     @WaitForQueue
-        lda     control_revision
-        cmp     render_camera+12
-        beq     @WaitForQueue
-@DiscardRenderedFrame:
-        ; Only step playback may discard ordinary camera revisions.
-        stz     stage_frame_required
-        jmp     MainLoop
-
-@WaitForQueue:
-        lda     frame_ready
-        bne     @WaitForQueue
-        lda     runtime_menu_open
-        beq     :+
-        stz     stage_frame_required
-        BSP_SOUND_WAIT_FRAME
-        jmp     MainLoop
-:
-@StageFrame:
-        ; Snapshot N before StageCommand may publish N+1. Starting the selector
-        ; before the safe-window wait keeps NMI/input live while either the
-        ; selector or the PPU scanline gate is the longer operation.
-        jsr     SnapshotRenderedFrameForStage
-        lda     demo_schedule_revision
-        cmp     staging_demo_epoch
-        beq     :+
-        jmp     DiscardStaleFrameBeforeSelector
-:
-        jsr     AdvanceDemoAfterStage
-        ; Preserve the flat-render overlap through queue and snapshot work,
-        ; then close it before publishing the next selector command.
-        BSP_SOUND_FX3_JOB_JOIN
-RendererOutputReady:
-        jsr     TryStartOverlappedSelector
-        RW      a8
-        lda     temporal_stage_metadata_only
-        bne     @StagingGateReady
-        jsr     WaitForSafeStagingFrame
-@StagingGateReady:
-        VBL_off
-        RW      a16
-        lda     demo_schedule_revision
-        cmp     staging_demo_epoch
-        beq     :+
-        jmp     DiscardStaleStage
-:
-        RW      a8
-        jsr     StageExpandedFrame
-        RW_forced a16i16
-        lda     producer_slot
-        sta     ready_slot
-        eor     #$01
-        sta     producer_slot
-        lda     #$01
-        sta     frame_ready
-FrameReadyPublished:
-        RW_forced a8i16
-        lda     RDNMI                   ; Discard any VBlank deferred by DMA.
-        VBL_on
-        RW_forced a16i16
-        jsr     JoinOverlappedSelector
-        jmp     MainLoop
-DiscardStaleFrameBeforeSelector:
-        stz     stage_frame_required
-        jmp     MainLoop
-DiscardStaleStage:
-        stz     prefetched_selector_valid
-        RW      a8
-        lda     RDNMI
-        VBL_on
-        RW      a16
-        jsr     JoinOverlappedSelector
-        stz     prefetched_selector_valid
-        stz     stage_frame_required
-        jmp     MainLoop
-.include "quake/FrameStaging.s"
+        jmp     (frame_pipeline_entry)
 ;-------------------------------------------------------------------------------
 StageStaticAssets:
         RW_forced a8i16
@@ -599,8 +496,8 @@ StageStaticAssets:
   .if BSP_COLLISION_PACKED_1_BYTES > 0
         BSP_STATIC_COPY QuakeBSPCollisionRAM+BSP_COLLISION_PACKED_0_BYTES, BSP_COLLISION_CPU_ROM_BASE+BSP_WORLD_ROM_BANK_BYTES, BSP_COLLISION_PACKED_1_BYTES
   .endif
-        BSP_STATIC_COPY GSU_SIN, QuakeBSPSin, 32
-        BSP_STATIC_COPY GSU_COS, QuakeBSPCos, 32
+        BSP_STATIC_COPY GSU_SIN, CameraAngleSin, CAMERA_ANGLE_STEPS
+        BSP_STATIC_COPY GSU_COS, CameraAngleCos, CAMERA_ANGLE_STEPS
         BSP_STATIC_COPY GSU_RECIPROCAL, QuakeBSPReciprocal, GSU_RECIPROCAL_RAM_BYTES
         BSP_STATIC_COPY GSU_EXPAND_NIBBLE, QuakeBSPExpandRight, 16
         BSP_STATIC_COPY GSU_TURBULENCE_TABLE, QuakeBSPTurbulenceTable, BSP_TURBULENCE_TABLE_BYTES
@@ -630,266 +527,9 @@ InitGSU:
         sta     FX3_CLSR
         rts
 ;-------------------------------------------------------------------------------
-StageCommand:
-        RW_forced a16i16
-StageCommandRetry:
-        lda     control_revision
-        sta     render_camera+12
-        lda     demo_schedule_revision
-        sta     render_demo_epoch
-        lda     camera_x
-        sta     render_camera_q8+0
-        lda     camera_y
-        sta     render_camera_q8+2
-        lda     camera_z
-        sta     render_camera_q8+4
-        lda     yaw_index
-        and     #$001F
-        sta     render_camera+0
-        lda     pitch_level
-        and     #$001F
-        sta     render_camera+2
-        lda     camera_x
-        sec
-        sbc     #BSP_WORLD_START_X_Q8
-        xba
-        and     #$00FF
-        sta     render_camera+4
-        lda     camera_y
-        sec
-        sbc     #BSP_WORLD_START_Y_Q8
-        xba
-        and     #$00FF
-        sta     render_camera+6
-        lda     camera_z
-        sec
-        sbc     #BSP_WORLD_START_Z_Q8
-        xba
-        and     #$00FF
-        sta     render_camera+8
-        ; Resolve into the unpublished snapshot; flight freezes its last seqlock state.
-        stz     render_brush_visual_state
-        lda     technique
-        and     #$00FF
-        sta     render_camera+10       ; A16 store also clears overlay flags.
-        lda     dynamic_brushes_enabled
-        bne     StageCommandResolveBrushState
-        lda     mdl_entities_enabled
-        and     #BSP_EXTERNAL_BSP_SUPPORTED
-        beq     StageCommandBrushStateResolved
-StageCommandResolveBrushState:
-        lda     brush_visual_state
-        sta     render_brush_visual_state
-        lda     demo_mode
-        bne     StageCommandLoadBrushState
-        lda     render_brush_visual_state
-        bne     StageCommandCompleteFlyBrushState
-StageCommandLoadBrushState:
-        ldx     demo_track_pose
-        txa
-        asl
-        tax
-        lda     f:BSP_BRUSH_ROWSTATE_CPU_ADDRESS,x
-        sta     render_brush_visual_state
-StageCommandCompleteFlyBrushState:
-        ; Fill demo-camera omissions while preserving the accepted brush poses.
-        lda     demo_mode
-        bne     StageCommandBrushStateResolved
-        lda     render_brush_visual_state
-        dec
-        asl
-        tax
-        lda     f:BSP_BRUSH_FLYSTATE_CPU_ADDRESS,x
-        sta     render_brush_visual_state
-StageCommandBrushStateResolved:
-        lda     dynamic_brushes_enabled
-        beq     StageCommandAliases
-        lda     render_camera+10
-        ora     #(BSP_OVERLAY_DYNAMIC_BRUSHES << 8)
-        sta     render_camera+10
-        lda     demo_mode
-        bne     StageCommandAliases
-        lda     render_camera+10
-        ora     #(BSP_OVERLAY_FLY_STATICS << 8)
-        sta     render_camera+10
-StageCommandAliases:
-        ; Demo uses sampled entity rows; flight uses the all-leaf initial-pose snapshot.
-        lda     mdl_entities_enabled
-        beq     StageCommandOverlayReady
-        lda     render_camera+10
-        ora     #(BSP_OVERLAY_EXTERNAL_BSP << 8)
-        sta     render_camera+10
-        lda     render_camera+10
-        ora     #(BSP_OVERLAY_ALIAS_ENTITIES << 8)
-        sta     render_camera+10
-StageCommandOverlayReady:
-        lda     demo_mode
-        beq     @ManualDemoMetadata
-        lda     demo_track_pose
-        sta     render_demo_pose
-        sta     render_camera+14
-        lda     demo_pose_due_tick
-        sta     render_demo_due_tick
-        bra     @DemoMetadataReady
-@ManualDemoMetadata:
-        lda     #$FFFF
-        sta     render_demo_pose
-        ; Quantize camera yaw to the nearest generated 45-degree orbit row.
-        lda     render_camera+0
-        clc
-        adc     #2
-        lsr
-        lsr
-        and     #(BSP_ALIAS_FLY_ROW_COUNT - 1)
-        clc
-        adc     #BSP_ALIAS_FLY_ROW
-        sta     render_camera+14
-        stz     render_demo_due_tick
-@DemoMetadataReady:
-        ; Bind technique, flags, entity pose, and brush replay to one revision.
-        jsr     StageSkyCommand
-        jsr     StageAliasRotation
-        jsr     StageTurbulenceCommand
-        lda     control_revision
-        cmp     render_camera+12
-        beq     :+
-        jmp     StageCommandRetry
-:
-        lda     demo_schedule_revision
-        cmp     render_demo_epoch
-        beq     :+
-        jmp     StageCommandRetry
-:
-        lda     dynamic_brushes_enabled
-        bne     :+
-        lda     mdl_entities_enabled
-        and     #BSP_EXTERNAL_BSP_SUPPORTED
-        beq     StageCommandSnapshotReady
-:
-        lda     render_brush_visual_state
-        sta     brush_visual_state
-StageCommandSnapshotReady:
-        jsr     EnsureBrushCode
-
-        RW      a8
-        lda     render_camera+0
-        sta     f:GSU_COMMAND+0
-        lda     render_camera+2
-        sta     f:GSU_COMMAND+1
-        lda     render_camera+4
-        sta     f:GSU_COMMAND+2
-        lda     render_camera+6
-        sta     f:GSU_COMMAND+3
-        lda     render_camera+8
-        sta     f:GSU_COMMAND+4
-        lda     render_camera+10
-        sta     f:GSU_COMMAND+5
-        lda     render_camera+12
-        sta     f:GSU_COMMAND+6
-        lda     render_camera+13
-        sta     f:GSU_COMMAND+7
-        lda     render_camera_q8+1      ; Global map-centered signed coordinates.
-        sta     f:GSU_COMMAND+8
-        lda     render_camera_q8+3
-        sta     f:GSU_COMMAND+9
-        lda     render_camera_q8+5
-        sta     f:GSU_COMMAND+10
-        lda     render_camera+11
-        sta     f:GSU_COMMAND+11        ; Overlay feature flags.
-        RW      a16
-        lda     render_brush_visual_state
-        sta     f:GSU_COMMAND+12
-        lda     render_camera+14
-        sta     f:GSU_DATA_BASE+GSU_ALIAS_RENDER_ROW_OFFSET
-        lda     demo_track_pose
-        sta     f:GSU_COMMAND+14        ; Frozen demo row for brush lifecycle.
-        RW_forced a16i16
-        rts
-;-------------------------------------------------------------------------------
-RenderFrame:
-        RW_forced a16i16
-        ; Flat rendering overlaps the S-CPU queue work. Join that prior job
-        ; before touching SCMR, SCBR, or the shared command for another frame.
-        BSP_SOUND_FX3_JOB_JOIN
-        lda     prefetched_selector_valid
-        beq     RenderStageSelectorCommand
-        stz     prefetched_selector_valid
-        lda     #$0001
-        sta     stage_frame_required
-        jmp     RenderAfterSelectorCapture
-RenderStageSelectorCommand:
-        RW      a8
-        stz     FX3_SCMR
-        jsr     StageCommand
-        RW_forced a16i16
-        lda     coverage_debug
-        sta     render_coverage_mode       ; Bind the mode to this frame job.
-        jsr     ClassifyScheduledFrameReuse
-        beq     RenderRequired
-        cmp     #$0002
-        bne     RenderIdleReady
-        inc     texture_input_reuse_counter
-        sta     temporal_stage_metadata_only
-        lda     #$0001
-        sta     stage_frame_required
-
-RenderIdleReady:
-        RW_forced a16i16
-        rts
-
-RenderRequired:
-        lda     #$0001
-        sta     stage_frame_required
-        stz     temporal_stage_metadata_only
-        ; Reuse a successfully guarded packet while the camera pose is
-        ; unchanged instead of repeating the full-world selector/painter pass.
-        ; Packet geometry depends on camera pose, not technique, diagnostic
-        ; mode, demo/manual source, or the bookkeeping revision. Keep the
-        ; full-Q8 position so every fly-camera movement still invalidates the
-        ; selector even before it crosses a packed whole-unit boundary.
-        REQUIRE_ACTIVE_PACKET_CAMERA_MATCH RenderRunSelector
-        bra     RenderReusePacket
-RenderReusePacket:
-        RW_forced a8i16
-        jmp     RenderSelectorComplete
-
-RenderRunSelector:
-        ; StageCommand deliberately returns in 16-bit accumulator mode.
-        ; Force the runtime mode back to 8-bit before the immediate below;
-        ; relying on assembler width tracking across JSR would misdecode it.
-        RW_forced a16i16
-        inc     gsu_job_counter
-        RW_forced a8i16
-        FX3_JOB_START FX3_SCMR_128X128_4BPP_ROM, .loword(GSU_SelectVisibility), set
-        BSP_SOUND_FX3_JOB_JOIN
-        stz     FX3_SCMR
-        jsr     CaptureSelectorTelemetry
-RenderAfterSelectorCapture:
-        jsr     UpdateRealtimeDemo
-        RW_forced a16i16
-        lda     demo_schedule_revision
-        cmp     render_demo_epoch
-        bne     RenderDiscardSelector
-        lda     demo_mode
-        beq     RenderSelectorComplete
-        lda     demo_schedule
-        bne     RenderSelectorComplete
-        lda     control_revision
-        cmp     render_camera+12
-        beq     RenderSelectorComplete
-RenderDiscardSelector:
-        stz     stage_frame_required
-        rts
-RenderSelectorComplete:
-        RW_forced a16i16
-        lda     runtime_menu_open
-        beq     :+
-        stz     stage_frame_required
-        rts
-:
-        jmp     RenderStartRenderer
-.include "quake/RendererDispatch.s"
-.include "quake/TextureColormapModes.s"
+.include "quake/FramePipeline.s"
+.include "Data/Fly3x/quake/FramePipeline.s.inc"
+.include "quake/FlyViewport.s"
 ;-------------------------------------------------------------------------------
 CaptureSelectorTelemetry:
         RW_forced a16i16
@@ -938,7 +578,7 @@ CaptureSelectorTelemetry:
         lda     render_camera_q8+4
         sta     active_packet_camera_q8+4
         rts
-.include "quake/VideoInit.s"
+
 ;-------------------------------------------------------------------------------
 ; Joypad sampling remains at 60 Hz even when rendering or presentation takes
 ; several video frames. Start toggles native demo1 playback/manual flight;
@@ -954,6 +594,7 @@ BSPVBlank:
 :
         RW_forced a16i16
         inc     video_tick
+        inc     hdma_nmi_counter
         jsr     UpdateFlySkyClock
         jsr     UpdateFlyAliasClock
         jsr     UpdateFlyTurbulenceClock
@@ -961,13 +602,23 @@ BSPVBlank:
         jsr     UpdateRuntimeMenu
         RW_forced a16i16
         lda     runtime_menu_open
+        bne     @FlyInputDone
+        lda     demo_mode
+        bne     @FlyInputDone
+        jsr     PollFlyMouse
+@FlyInputDone:
+        RW_forced a16i16
+        lda     runtime_menu_open
         bne     @ControlsDone
         lda     demo_mode
         beq     @ControlsDone           ; Fly collision work follows the upload.
         RW_forced a8i16
         jsr     UpdateCameraControls
+        jsr     UpdateWarpOrderedDemo
         jsr     UpdateRealtimeDemo
 @ControlsDone:
+        RW_forced a16i16
+        jsr     UpdateFlyMode7Warp
         RW_forced a8i16
 
         lda     upload_active
@@ -1012,6 +663,15 @@ BSPVBlank:
 @NaturalTexturePalette:
         stz     upload_palette_mode
 @TextureUploadFormatReady:
+        lda     upload_slot
+        asl
+        tax
+        lda     slot_present_direct,x
+        cmp     #.loword(F3_UploadPresentDirect)
+        bne     @PlanarTextureFormat
+        lda     #BSP_UPLOAD_FORMAT_MODE7
+        bra     @UploadFormatReady
+@PlanarTextureFormat:
         lda     #BSP_UPLOAD_FORMAT_TEXTURE
 @UploadFormatReady:
         sta     upload_format
@@ -1028,22 +688,32 @@ BSPVBlank:
         jsr     UploadFrameChunk
 @SoundVBlank:
 .include "quake/SoundVBlank.s"
+        ; Pixel, palette and Mode 7 publication are finished for both demo
+        ; and flight. Camera snapshots are CPU-only and may follow unblank.
+        RW_forced a8i16
+        lda     SFX_inidisp
+        sta     INIDISP
         RW_forced a16i16
         lda     runtime_menu_open
         bne     BSPVBlankDone
         lda     demo_mode
-        bne     BSPVBlankDone
+        beq     @FlyControls
+        jsr     FinishDemoWarpCamera
+        bra     BSPVBlankDone
+@FlyControls:
         RW_forced a8i16
-        ; All VRAM/palette/page work is complete. Release libSFX forced blank
-        ; before CPU-only fly movement, which may extend into active display.
-        lda     SFX_inidisp
-        sta     INIDISP
 FlyControlsVisible:
         jsr     UpdateCameraControls
+        jsr     FinishHdmaWarpCamera
 BSPVBlankDone:
+        jsr     ServiceHdmaWarpDeadline
+        ; Menu/demo exits can arrive here in A16; retain the byte-wide callback
+        ; contract for the libSFX epilogue's NMITIMEN and INIDISP writes.
+        RW_forced a8i16
         rtl
 .include "quake/RuntimeControls.s"
 .include "quake/DemoAdvance.s"
+.include "quake/DemoRenderPrediction.s"
 ; Start a new schedule epoch at pose zero. Ordered mode advances only after a
 ; completed frame is staged; real-time mode advances from video_tick in
 ; UpdateRealtimeDemo. Both publish through the same camera/control revision.
@@ -1066,7 +736,7 @@ RestartDemoPlayback:
         inc     demo_source_due_counter
         rts
 ; Consume the next canonical track/timing cursor. Step mode uses the derived
-; 2 Hz stride and wraps for visible playback. Real-time advances one canonical
+; 3 Hz stride and wraps for visible playback. Real-time advances one canonical
 ; configured-rate record and stops at the end so a fixed-duration benchmark
 ; cannot enter a second epoch.
 AdvanceDemoCursor:
@@ -1163,11 +833,7 @@ LoadDemoPoseRecord:
         clc
         adc     #$0400
         xba
-        and     #$00FF
-        lsr
-        lsr
-        lsr
-        and     #$001F
+        and     #$00F8                 ; Keep the recorded 32-step path exact.
         sta     yaw_index
         lda     #$0000
         sec
@@ -1175,18 +841,17 @@ LoadDemoPoseRecord:
         clc
         adc     #$0400
         xba
-        and     #$00FF
-        lsr
-        lsr
-        lsr
-        and     #$001F
-        bit     #$0010
+        and     #$00F8
+        bit     #$0080
         beq     @StorePitch
-        ora     #$FFE0
+        ora     #$FF00
 @StorePitch:
         sta     pitch_level
         rts
 ; Publish the newest pose due at shifted source time; retain due coalescing.
+UpdateRealtimeInactiveReturn:
+        RW_forced a8i16
+        rts
 UpdateRealtimeDemo:
         RW_forced a16i16
         BSP_SOUND_HOLD_DEMO UpdateRealtimeReturn
@@ -1197,9 +862,9 @@ UpdateRealtimeDemo:
 :
         RW_assume a16i16
         lda     demo_mode
-        beq     UpdateRealtimeReturn
+        beq     UpdateRealtimeInactiveReturn
         lda     demo_schedule
-        beq     UpdateRealtimeReturn
+        beq     UpdateRealtimeInactiveReturn
         lda     video_tick
         sec
         sbc     demo_playhead_origin
@@ -1215,7 +880,7 @@ UpdateRealtimeDemo:
 @CheckDue:
         lda     demo_timing_offset
         cmp     #BSP_DEMO_PRECISE_TIMING_BYTES
-        bcs     @Publish
+        bcs     @RealtimeEnd
         tax
         lda     f:QuakeBSPDemoPreciseTiming,x
         cmp     demo_playhead_tick
@@ -1232,6 +897,13 @@ UpdateRealtimeDemo:
         inc     demo_source_due_counter
         inc     realtime_due_batch
         bra     @CheckDue
+@RealtimeEnd:
+.if BSP_SOUND_ENABLED
+        ; Keep the ordinary source-clock and refill cadence byte-for-byte in
+        ; timing: loop coordination runs only after the cursor is exhausted.
+        jsr     QuakeSoundRealtimeLoop
+        bcs     UpdateRealtimeReturn
+.endif
 @Publish:
         lda     realtime_due_batch
         beq     UpdateRealtimeReturn
@@ -1258,6 +930,12 @@ UpdateRealtimeReturn:
 ; Drain one chunk each VBlank; present only after the complete page is resident.
 UploadFrameChunk:
         RW_forced a16i16
+        lda     upload_format
+        cmp     #BSP_UPLOAD_FORMAT_MODE7
+        bne     :+
+        jmp     UploadFlyMode7Chunk
+:
+        jsr     RestorePlanarMenuFont
         lda     upload_offset
         lsr
         tay
@@ -1353,7 +1031,7 @@ UploadChunkDestinationReady:
         jmp     UploadPresentFlat
 UploadPresentTexture:
         lda     presented_format
-        cmp     #BSP_UPLOAD_FORMAT_TEXTURE
+        cmp     upload_format
         bne     UploadLoadTexturePalette
         lda     upload_palette_mode
         cmp     presented_palette_mode
@@ -1371,10 +1049,20 @@ UploadTexturePaletteLoaded:
         lda     upload_palette_mode
         sta     presented_palette_mode
 UploadTexturePaletteReady:
+        stz     BG1HOFS
+        stz     BG1HOFS
         lda     #bgmode(BG_MODE_3, BG3_PRIO_NORMAL, BG_SIZE_8X8, BG_SIZE_8X8, BG_SIZE_8X8, BG_SIZE_8X8)
         sta     BGMODE                 ; Mode 3 gives BG1 all eight bitplanes.
-        jmp     UploadPresentDirect
+        RW      a16
+        lda     upload_slot
+        asl
+        tax
+        RW      a8
+        jmp     (slot_present_direct,x)
 UploadPresentDirect:
+        stz     TMW
+        lda     #2
+        sta     presented_render_scale
         lda     #$11                    ; Mosaic size 2, BG1 enabled.
         sta     MOSAIC
         lda     #bgsc(VRAM_TEXTURE_TILEMAP, SC_SIZE_32X32)
@@ -1399,6 +1087,8 @@ UploadPresentFlat:
         beq     UploadFlatPaletteReady
         CGRAM_memcpy 0, QuakeBSPPalette, 32
 UploadFlatPaletteReady:
+        stz     BG1HOFS
+        stz     BG1HOFS
         lda     #bgmode(BG_MODE_1, BG3_PRIO_NORMAL, BG_SIZE_8X8, BG_SIZE_8X8, BG_SIZE_8X8, BG_SIZE_8X8)
         sta     BGMODE
         stz     MOSAIC
@@ -1447,6 +1137,7 @@ UploadFrameReturn:
         rts
 
 PublishUploadSlotState:
+        RW_assume a16i16
         ldx     #0
         lda     upload_slot
         beq     @PresentedCameraReady
@@ -1469,18 +1160,32 @@ PublishUploadSlotState:
         lda     slot_camera+14,x
         sta     presented_camera+14
 
-        ldx     #0
         lda     upload_slot
-        beq     @PresentedBrushStateReady
-        ldx     #2
+        asl
+        tax
 @PresentedBrushStateReady:
+        lda     slot_metadata_only,x
+        bne     @WarpReferenceReady
+        lda     presented_camera+0
+        sta     presented_warp_yaw
+        lda     presented_camera+2
+        sta     presented_warp_pitch
+        lda     slot_warp_strafe,x
+        sta     presented_warp_strafe
+        lda     slot_warp_forward,x
+        sta     presented_warp_forward
+        lda     slot_demo_epoch,x
+        sta     presented_warp_epoch
+        lda     slot_warp_x,x
+        sta     presented_warp_x
+        lda     slot_warp_y,x
+        sta     presented_warp_y
+        lda     slot_warp_z,x
+        sta     presented_warp_z
+@WarpReferenceReady:
         lda     slot_brush_visual_state,x
         sta     presented_brush_visual_state
 
-        ldx     #0
-        lda     upload_slot
-        beq     @PresentedCoverageReady
-        ldx     #2
 @PresentedCoverageReady:
         lda     slot_coverage_mode,x
         sta     presented_coverage_mode
@@ -1491,8 +1196,8 @@ PublishUploadSlotState:
         sta     presented_demo_due_tick
         lda     slot_demo_epoch,x
         sta     presented_demo_epoch
-        jsr     PresentSkyStateFromSlot
-        jsr     PresentTurbulenceStateFromSlot
+        jsr     PresentSkyStateFromSlot       ; X: word offset -> Q16 offset.
+        jsr     PresentTurbulenceStateFromSlot ; Reuse that immutable slot offset.
         rts
 .segment "ZEROPAGE"
 camera_collision_mask: .res 1
@@ -1666,6 +1371,7 @@ RuntimeMenuBuildColumns: .res 2
 RuntimeMenuOAM:     .res 512+32
 sky_phase_override_valid: .res 2
 sky_phase_override_q16: .res 4
+warp_background_active: .res 2
 .segment "EXRAM"
 QuakeBSPCollisionRAM:
         .res BSP_COLLISION_PAYLOAD_BYTES
@@ -1740,6 +1446,7 @@ QuakeBSPWorldNodes:
         .incbin "Data/QuakeBSPWorldNodes.bin"
 QuakeBSPWorldNodesEnd:
 .assert QuakeBSPWorldNodesEnd - QuakeBSPWorldNodes = BSP_WORLD_NODE_COUNT * BSP_WORLD_NODE_RECORD_BYTES, error, "Full-map node asset size disagrees with generated counts"
+
 .segment "BSP_WORLD_PLANES"
 QuakeBSPWorldPlanes:
         .incbin "Data/QuakeBSPWorldPlanes.bin"
@@ -1793,7 +1500,8 @@ QuakeBSPDemoPreciseTrack:
         .incbin "Data/QuakeBSPDemoPrecise.bin"
 QuakeBSPDemoPreciseTrackEnd:
 .assert QuakeBSPDemoPreciseTrackEnd - QuakeBSPDemoPreciseTrack = BSP_DEMO_PRECISE_TRACK_BYTES, error, "demo1 precise track asset size disagrees with generated constants"
-.segment "BSP_DEMO_TIMING"
+.segment "BSP_DEMO_CLOCK"
+; ROM112's physical $380000 payload is read by the CPU through $F8:0000.
 QuakeBSPDemoPreciseTiming:
         .incbin "Data/QuakeBSPDemoPreciseTiming.bin"
 QuakeBSPDemoPreciseTimingEnd:
@@ -1836,7 +1544,7 @@ QuakeBSPWorldTextureDirectory:
         .incbin "Data/QuakeBSPWorldTextureDirectory.bin"
 QuakeBSPWorldTextureDirectoryEnd:
 QuakeBSPTexturePalette:
-        .incbin "Data/QuakeBSPTexturePalette.bin"
+        .incbin "Data/Warp/QuakeBSPTexturePalette.bin"
 QuakeBSPTexturePaletteEnd:
 .include "quake/TexturelessPalette.s"
 QuakeBSPTextureTilemap:
@@ -1852,17 +1560,17 @@ QuakeBSPTextureCoordinateMapEnd:
 .assert QuakeBSPTextureTilemapEnd - QuakeBSPTextureTilemap = $0800, error, "Exact texture tilemap must be 32x32"
 .assert QuakeBSPTextureCoordinateMapEnd - QuakeBSPTextureCoordinateMap = GSU_TEXTURE_COORD_MAP_BYTES, error, "Exact texture coordinate-map size disagrees"
 .segment "BSP_WORLD_TEXTURE_0"
-        .incbin "Data/QuakeBSPWorldTexturePixels0.bin"
+        .incbin "Data/Warp/QuakeBSPWorldTexturePixels0.bin"
 .segment "BSP_WORLD_TEXTURE_1"
-        .incbin "Data/QuakeBSPWorldTexturePixels1.bin"
+        .incbin "Data/Warp/QuakeBSPWorldTexturePixels1.bin"
 .segment "BSP_WORLD_TEXTURE_2"
-        .incbin "Data/QuakeBSPWorldTexturePixels2.bin"
+        .incbin "Data/Warp/QuakeBSPWorldTexturePixels2.bin"
 .segment "BSP_WORLD_TEXTURE_3"
-        .incbin "Data/QuakeBSPWorldTexturePixels3.bin"
+        .incbin "Data/Warp/QuakeBSPWorldTexturePixels3.bin"
 .segment "BSP_WORLD_TEXTURE_4"
-        .incbin "Data/QuakeBSPWorldTexturePixels4.bin"
+        .incbin "Data/Warp/QuakeBSPWorldTexturePixels4.bin"
 .segment "BSP_WORLD_TEXTURE_5"
-        .incbin "Data/QuakeBSPWorldTexturePixels5.bin"
+        .incbin "Data/Warp/QuakeBSPWorldTexturePixels5.bin"
 .segment "BSP_WORLD_LIGHTMAP_DIRECTORY"
         .incbin "Data/QuakeBSPWorldLightmapDirectory.bin"
 .segment "BSP_WORLD_LIGHTMAP_0"
@@ -1875,17 +1583,19 @@ QuakeBSPTextureCoordinateMapEnd:
         .incbin "Data/QuakeBSPWorldLightmapSamples3.bin"
 .segment "BSP_LIGHTMAP_COLORMAPS"
 QuakeBSPLightmapLevelZeroColormap:
-        .incbin "Data/QuakeBSPLightmapLevelZeroColormap.bin"
+        .incbin "Data/Warp/QuakeBSPLightmapLevelZeroColormap.bin"
 QuakeBSPLightmapLevelZeroColormapEnd:
 .assert QuakeBSPLightmapLevelZeroColormapEnd - QuakeBSPLightmapLevelZeroColormap = 256, error, "Quake lightmap level-zero colormap must contain 256 indices"
 QuakeBSPLightmapColormap:
-        .incbin "Data/QuakeBSPLightmapColormap.bin"
+        .incbin "Data/Warp/QuakeBSPLightmapColormap.bin"
 QuakeBSPLightmapColormapEnd:
 .assert QuakeBSPLightmapColormapEnd - QuakeBSPLightmapColormap = GSU_LIGHTMAP_COLORMAP_BYTES, error, "Natural lightmap colormap size disagrees"
 .include "quake/DivideQ12ReciprocalAssets.s"
+.include "quake/FlyMouseState.s"
+.include "quake/CameraAngles.s"
 .include "quake/DynamicBrushAssets.s"
-.include "Data/QuakeBSPComposedCacheAssets.s"
-.include "Data/QuakeBSPAliasAssets.s"
+.include "Data/Warp/QuakeBSPComposedCacheAssets.s"
+.include "Data/Warp/QuakeBSPAliasAssets.s"
 .include "Data/QuakeBSPAliasVisibility.s"
 .segment "BSP_COLLISION_PACKED_0"
 QuakeBSPCollisionPacked0:
@@ -1903,3 +1613,20 @@ QuakeBSPCollisionPacked1End:
 ; the hot renderer or sound state across an indexed-address page boundary.
 .segment "BSS"
 temporal_reuse_enabled: .res 2
+; Keep mode state after existing BSS declarations. BSS growth can still move
+; the following LORAM segment; qualify its final addresses and frame timing.
+frame_pipeline_entry: .res 2
+fly_playback_mode: .res 2
+active_render_scale: .res 2
+presented_render_scale: .res 2
+slot_present_direct: .res 4
+.include "quake/FlyMode7WarpState.s"
+runtime_menu_draft_scale: .res 2
+.include "quake/DemoMode7WarpState.s"
+.include "quake/HdmaWarpState.s"
+; Append immutable image input positions without relocating the hot state.
+; Each axis has two producer slots; metadata-only reuse never republishes it.
+slot_warp_x: .res 4
+slot_warp_y: .res 4
+slot_warp_z: .res 4
+.include "quake/WarpBackgroundState.s"

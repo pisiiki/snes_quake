@@ -100,7 +100,10 @@ QuakeSoundDriver:
         mov     stream_request_counter,#$00
         mov     stream_end_counter,#$00
         mov     natural_end_counter,#$00
-        mov     request_scan_start,#$00
+        mov     request_clock,#$00
+        mov     CONTROL,#$00
+        mov     T0DIV,#32             ; 8 kHz timer / 32 = one tick per 4 ms.
+        mov     CONTROL,#CONTROL_ST0_START
         mov     cache_ready_count,#$00
         mov     invalid_command_counter,#$00
         mov     invalid_command,#$FF
@@ -227,7 +230,6 @@ CommandStopAll:
         dec     x
         bpl     @ClearActive
         mov     x,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT-1
-        mov     request_scan_start,a
 @ClearRequests:
         mov     !stream_ready+x,a
         mov     !stream_request+x,a
@@ -296,6 +298,7 @@ CommandStartVoice:
         DSP_set ENDX, a
         DSP_set KOF, #$00
         DSP_set KON, a
+        call    !RequestStartTail
         inc     command_counter
         call    !FinishCommand
         jmp     !DriverLoop
@@ -349,15 +352,50 @@ ReceiveChunk:
         mov     transfer_packets,#<BSP_SOUND_STREAM_CHUNK_PACKETS
         mov     transfer_packets+1,#>BSP_SOUND_STREAM_CHUNK_PACKETS
 @WaitPacket:
+        ; Give the S-CPU time to stage its next packet before servicing ENDX.
+        ; During a long CPU/NMI gap the bounded poll still services voice ends
+        ; much sooner than a 128 ms chunk boundary.
+        mov     x,#16
+@PollPacket:
         mov     a,CPUIO3
         cmp     a,command_token
         bne     @PacketReady
+        dec     x
+        bne     @PollPacket
         mov     transfer_offset,y
         call    !HandleVoiceEnds
         mov     y,transfer_offset
         bra     @WaitPacket
 @PacketReady:
         mov     command_token,a
+        decw    transfer_packets
+        mov     a,transfer_packets
+        or      a,transfer_packets+1
+        beq     @LastPacket
+        mov     a,CPUIO0
+        mov     [transfer_pointer]+y,a
+        inc     y
+        bne     :+
+        inc     transfer_pointer+1
+:
+        mov     a,CPUIO1
+        mov     [transfer_pointer]+y,a
+        inc     y
+        bne     :+
+        inc     transfer_pointer+1
+:
+        mov     a,CPUIO2
+        ; All payload ports have been latched. Let the CPU stage its next
+        ; triplet while the SPC finishes this store and pointer update.
+        mov     CPUIO3,command_token
+        mov     [transfer_pointer]+y,a
+        inc     y
+        bne     :+
+        inc     transfer_pointer+1
+:
+        bra     @WaitPacket
+@LastPacket:
+        ; The final ACK still waits for the caller to publish ready/status.
         mov     a,CPUIO0
         mov     [transfer_pointer]+y,a
         inc     y
@@ -372,16 +410,6 @@ ReceiveChunk:
 :
         mov     a,CPUIO2
         mov     [transfer_pointer]+y,a
-        inc     y
-        bne     :+
-        inc     transfer_pointer+1
-:
-        decw    transfer_packets
-        mov     a,transfer_packets
-        or      a,transfer_packets+1
-        beq     @Done
-        mov     CPUIO3,command_token
-        bra     @WaitPacket
 @Done:
         mov     transfer_active,#$00
         ret
@@ -488,6 +516,10 @@ StopVoiceState:
         ret
 
 HandleVoiceEnds:
+        mov     a,T0OUT
+        clrc
+        adc     a,request_clock
+        mov     request_clock,a
         DSP_get ENDX, a
         mov     end_flags,a
         beq     @Return
@@ -613,11 +645,12 @@ AdvanceVoiceChunk:
         bcs     @StreamFinal
 @RequestFreedSlot:
         mov     x,upload_descriptor
-        mov     a,#$00
-        mov     !stream_ready+x,a
-        mov     a,#$01
-        mov     !stream_request+x,a
-        inc     stream_request_counter
+        mov     a,!stream_request+x
+        bne     @StreamFinal
+        mov     a,request_clock
+        clrc
+        adc     a,#96                ; Three 128 ms chunks until reuse.
+        call    !QueueStreamRequest
 @StreamFinal:
         ret
 @NaturalEnd:
@@ -625,6 +658,72 @@ AdvanceVoiceChunk:
         call    !StopVoiceState
         ret
 
+; Start after two chunks; request the remaining lookahead asynchronously.
+; The 256/384 ms deadlines share the steady-state refill priority queue.
+RequestStartTail:
+        mov     x,voice_index
+        mov     a,voice_cached+x
+        bne     @Return
+        mov     a,voice_index
+        call    !VoiceFirstStreamDescriptor
+        clrc
+        adc     a,#2
+        mov     upload_descriptor,a
+        mov     request_lead,#2
+@Next:
+        mov     x,voice_index
+        mov     a,voice_sample_flags+x
+        and     a,#SOUND_SAMPLE_FLAG_LOOP
+        bne     @Queue
+        mov     a,voice_current_chunk+x
+        clrc
+        adc     a,request_lead
+        cmp     a,voice_chunk_count+x
+        bcs     @Return
+@Queue:
+        mov     a,request_lead
+        xcn     a
+        asl     a
+        clrc
+        adc     a,request_clock
+        mov     x,upload_descriptor
+        call    !QueueStreamRequest
+        inc     upload_descriptor
+        inc     request_lead
+        cmp     request_lead,#BSP_SOUND_STREAM_BUFFER_COUNT
+        bne     @Next
+@Return:
+        ret
+
+; A = deadline modulo 1024 ms, X = descriptor. Signed distance orders the
+; bounded (<512 ms) queue across clock wrap. Keep the published head stable
+; unless a genuinely earlier start-tail deadline arrives.
+QueueStreamRequest:
+        mov     !stream_request_deadline+x,a
+        setc
+        sbc     a,request_clock
+        eor     a,#$80
+        mov     request_candidate_key,a
+        mov     a,#$00
+        mov     !stream_ready+x,a
+        mov     a,#$01
+        mov     !stream_request+x,a
+        inc     stream_request_counter
+        mov     y,published_request
+        cmp     y,#SOUND_REQUEST_NONE
+        beq     @Head
+        mov     a,!stream_request+y
+        beq     @Head
+        mov     a,!stream_request_deadline+y
+        setc
+        sbc     a,request_clock
+        eor     a,#$80
+        cmp     a,request_candidate_key
+        bcc     @Return
+@Head:
+        mov     published_request,x
+@Return:
+        ret
 ; Return C=1 and A=following relative chunk, or C=0 for a terminal one-shot.
 FollowingRelativeChunk:
         mov     x,voice_index
@@ -701,26 +800,30 @@ FinishCommand:
         ret
 
 PublishStatus:
+        ; Earliest deadline first, including the shorter initial lookahead.
+        mov     x,published_request
+        cmp     x,#SOUND_REQUEST_NONE
+        beq     @FindOldest
+        mov     a,!stream_request+x
+        bne     @RequestReady
+@FindOldest:
         mov     published_request,#SOUND_REQUEST_NONE
-        mov     x,request_scan_start
+        mov     request_best_key,#$FF
+        mov     x,#$00
         mov     request_scan_count,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
 @FindRequest:
         mov     a,!stream_request+x
         beq     @NextRequest
+        mov     a,!stream_request_deadline+x
+        setc
+        sbc     a,request_clock
+        eor     a,#$80
+        cmp     a,request_best_key
+        bcs     @NextRequest
+        mov     request_best_key,a
         mov     published_request,x
-        inc     x
-        cmp     x,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
-        bcc     :+
-        mov     x,#$00
-:
-        mov     request_scan_start,x
-        bra     @RequestReady
 @NextRequest:
         inc     x
-        cmp     x,#BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
-        bcc     :+
-        mov     x,#$00
-:
         dec     request_scan_count
         bne     @FindRequest
 @RequestReady:
@@ -783,8 +886,11 @@ transfer_counter:     .res 1
 stream_request_counter: .res 1
 stream_end_counter:   .res 1
 natural_end_counter:  .res 1
-request_scan_start:   .res 1
 request_scan_count:   .res 1
+request_clock:        .res 1
+request_best_key:     .res 1
+request_candidate_key: .res 1
+request_lead:         .res 1
 cache_ready_count:    .res 1
 invalid_command_counter: .res 1
 invalid_command:       .res 1
@@ -822,6 +928,8 @@ voice_stream_slot:    .res BSP_SOUND_VOICE_COUNT
 stream_ready:
         .res BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
 stream_request:
+        .res BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
+stream_request_deadline:
         .res BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT
 QuakeSoundStreamBuffers:
         .res BSP_SOUND_VOICE_COUNT*BSP_SOUND_STREAM_BUFFER_COUNT*BSP_SOUND_STREAM_CHUNK_BYTES

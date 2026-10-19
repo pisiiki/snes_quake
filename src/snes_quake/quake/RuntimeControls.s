@@ -10,8 +10,9 @@ RUNTIME_MENU_ROW_TEXTURES = 2
 RUNTIME_MENU_ROW_LIGHTING = 3
 RUNTIME_MENU_ROW_BRUSHES  = 4
 RUNTIME_MENU_ROW_ENTITIES = 5
-RUNTIME_MENU_ROW_RESTART  = 6
-RUNTIME_MENU_ROW_COUNT    = 7
+RUNTIME_MENU_ROW_SCALE    = 6
+RUNTIME_MENU_ROW_RESTART  = 7
+RUNTIME_MENU_ROW_COUNT    = 8
 RUNTIME_MENU_COLUMNS      = 14
 RUNTIME_MENU_VALUE_COLUMN = 8
 RUNTIME_MENU_VALUE_BYTES  = 6
@@ -29,13 +30,14 @@ RUNTIME_MENU_COLOR_WINDOW_OPEN   = $00 ; permit fixed-black math everywhere
 RUNTIME_MENU_COLOR_WINDOW_CLOSED = $30 ; LibSFX idle state: prevent math
 RUNTIME_MENU_TILE_SPACE   = .lobyte(RUNTIME_MENU_TILE_BASE)
 RUNTIME_MENU_TILE_CURSOR  = .lobyte(RUNTIME_MENU_TILE_BASE + (62 - RUNTIME_MENU_ASCII_FIRST))
-RUNTIME_MENU_PLAYBACK_ORDERED_2HZ  = 0
+RUNTIME_MENU_PLAYBACK_ORDERED_3HZ  = 0
 RUNTIME_MENU_PLAYBACK_REALTIME     = 1
 RUNTIME_MENU_PLAYBACK_FLY          = 2
 RUNTIME_MENU_PLAYBACK_HALF         = 3
 RUNTIME_MENU_PLAYBACK_QUARTER      = 4
-RUNTIME_MENU_PLAYBACK_ORDERED_20HZ = 5
-RUNTIME_MENU_PLAYBACK_COUNT        = 6
+RUNTIME_MENU_PLAYBACK_ORDERED_30HZ = 5
+RUNTIME_MENU_PLAYBACK_FLY3X        = 6
+RUNTIME_MENU_PLAYBACK_COUNT        = 7
 DEMO_PLAYBACK_RATE_REALTIME    = 0
 DEMO_PLAYBACK_RATE_HALF        = 1
 DEMO_PLAYBACK_RATE_QUARTER     = 2
@@ -47,8 +49,8 @@ RUNTIME_MENU_TEXTURES_COUNT     = 2
 RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE = 2
 RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP = BSP_TECHNIQUE_TEXTURED_LIGHTMAP
 RUNTIME_MENU_TECHNIQUE_UNTEXTURED_LIGHTMAP = BSP_TECHNIQUE_UNTEXTURED_LIGHTMAP
-CAMERA_PITCH_MIN               = $FFF8 ; -8 * 11.25 degrees = -90
-CAMERA_PITCH_MAX               = $0008 ; +8 * 11.25 degrees = +90
+CAMERA_PITCH_MIN               = .loword(-CAMERA_ANGLE_QUARTER) ; -90 degrees
+CAMERA_PITCH_MAX               = CAMERA_ANGLE_QUARTER ; +90 degrees
 CAMERA_FORWARD_SCALE_ROUND     = $0010
 
 BOOT_PARAMETERS_VERSION       = $0004
@@ -159,7 +161,7 @@ BootParametersValidateFixedStepSample:
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
         beq     :+
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
         beq     :+
         jmp     BootParametersErrorFixedStepSample
 :
@@ -194,7 +196,7 @@ BootParametersValidateOrderedSourcePose:
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
         beq     @ValidateSourceRange
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
         beq     @ValidateSourceRange
         jmp     BootParametersErrorOrderedSourcePose
 @ValidateSourceRange:
@@ -213,7 +215,7 @@ BootParametersValidateOrderedStride:
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
         beq     @ValidateStrideValue
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
         beq     @ValidateStrideValue
         jmp     BootParametersErrorOrderedStride
 @ValidateStrideValue:
@@ -225,27 +227,31 @@ BootParametersValidateOrderedStride:
         beq     :+
         jmp     BootParametersErrorOrderedStride
 :
-        ; The explicit 20 Hz mode cannot be contradicted by a 2 Hz stride.
+        ; The explicit 30 Hz mode cannot be contradicted by a 3 Hz stride.
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
         beq     BootParametersApplyPlayback
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
         bne     BootParametersApplyPlayback
         jmp     BootParametersErrorOrderedStride
 
 BootParametersApplyPlayback:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
-        beq     BootParametersApplyTechnique
+        bne     :+
+        jmp     BootParametersApplyTechnique
+:
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
         sta     runtime_menu_draft_playback
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
-        beq     BootParametersPlaybackOrdered20Hz
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
+        beq     BootParametersPlaybackOrdered30Hz
         cmp     #RUNTIME_MENU_PLAYBACK_REALTIME
         beq     BootParametersPlaybackRealtime
+        cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
+        beq     BootParametersPlaybackFly3x
         cmp     #RUNTIME_MENU_PLAYBACK_FLY
         beq     BootParametersPlaybackFly
         cmp     #RUNTIME_MENU_PLAYBACK_HALF
@@ -255,7 +261,7 @@ BootParametersApplyPlayback:
         lda     #BSP_DEMO_ORDERED_POSE_STRIDE
         sta     demo_ordered_pose_stride
         bra     BootParametersPlaybackOrdered
-BootParametersPlaybackOrdered20Hz:
+BootParametersPlaybackOrdered30Hz:
         lda     #$0001
         sta     demo_ordered_pose_stride
 BootParametersPlaybackOrdered:
@@ -270,8 +276,11 @@ BootParametersPlaybackRealtime:
         sta     demo_schedule
         stz     demo_playback_rate_shift
         bra     BootParametersApplyTechnique
+BootParametersPlaybackFly3x:
+        lda     #RUNTIME_MENU_SCALE_WARP
+        sta     runtime_menu_draft_scale
+        jsr     RequestFlyViewport
 BootParametersPlaybackFly:
-        jsr     EnsureFlyAliasCode
         stz     demo_mode
         stz     demo_schedule
         stz     demo_playback_rate_shift
@@ -386,7 +395,7 @@ BootParametersDone:
         RW_forced a16i16
         rts
 
-; Seed an ordered restart at either an exact source row or a 2 Hz sample. The
+; Seed an ordered restart at either an exact source row or a 3 Hz sample. The
 ; one-based fields distinguish row/sample zero from an omitted request and are
 ; consumed once.
 ApplyBootDemoCursor:
@@ -512,6 +521,8 @@ RuntimeMenuUpdateDone:
 
 OpenRuntimeMenu:
         RW_assume a16i16
+        stz     fly_mouse_dx
+        stz     fly_mouse_dy
         jsr     InvalidateScheduledFrameIdentity
         jsr     SyncRuntimeMenuDrafts
         stz     runtime_menu_selection
@@ -523,6 +534,7 @@ OpenRuntimeMenu:
         sta     runtime_menu_saved_playhead_tick
         lda     #$0001
         sta     runtime_menu_open
+        stz     warp_background_active
         jsr     RefreshRuntimeMenuOAM
         RW      a8
         lda     #tm(ON, OFF, OFF, OFF, ON)
@@ -546,6 +558,7 @@ CloseRuntimeMenu:
         stz     CGADSUB
         lda     #RUNTIME_MENU_COLOR_WINDOW_CLOSED
         sta     CGSWSEL
+        jsr     RefreshWarpBackground
         RW_forced a16i16
         rts
 
@@ -572,16 +585,17 @@ SyncRuntimeMenuDrafts:
 @Ordered:
         lda     demo_ordered_pose_stride
         cmp     #$0001
-        beq     @Ordered20Hz
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
+        beq     @Ordered30Hz
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
         bra     @PlaybackReady
-@Ordered20Hz:
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+@Ordered30Hz:
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
         bra     @PlaybackReady
 @Fly:
         lda     #RUNTIME_MENU_PLAYBACK_FLY
 @PlaybackReady:
         sta     runtime_menu_draft_playback
+        jsr     SyncRuntimeMenuScaleDraft
         lda     technique
         sta     runtime_menu_draft_technique
         cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE
@@ -630,9 +644,9 @@ ComposeRuntimeMenuTechnique:
         rts
 
 ; Public state application path for both the UI and host tooling:
-;   runtime_menu_draft_playback: 0 ordered 2 Hz, 1 real-time, 2 fly,
+;   runtime_menu_draft_playback: 0 ordered 3 Hz, 1 real-time, 2 fly,
 ;                                3 half real-time, 4 quarter real-time,
-;                                5 ordered 20 Hz
+;                                5 ordered 30 Hz
 ;   runtime_menu_draft_technique: supported numeric technique 2, 4, or 7
 ;   runtime_menu_draft_textures: 0 off, 1 on
 ;   runtime_menu_draft_lighting: 0 None, 1 LightMap
@@ -645,19 +659,25 @@ ApplyRuntimeMenuSelection:
         lda     runtime_menu_draft_playback
         cmp     #RUNTIME_MENU_PLAYBACK_REALTIME
         beq     @ApplyRealtime
+        cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
+        bne     :+
+        jmp     @ApplyFly
+:
         cmp     #RUNTIME_MENU_PLAYBACK_FLY
-        beq     @ApplyFly
+        bne     :+
+        jmp     @ApplyFly
+:
         cmp     #RUNTIME_MENU_PLAYBACK_HALF
         beq     @ApplyHalf
         cmp     #RUNTIME_MENU_PLAYBACK_QUARTER
         beq     @ApplyQuarter
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
-        beq     @ApplyOrdered20Hz
+        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
+        beq     @ApplyOrdered30Hz
 
 @ApplyOrdered:
         ldx     #BSP_DEMO_ORDERED_POSE_STRIDE
         bra     @ApplyOrderedStride
-@ApplyOrdered20Hz:
+@ApplyOrdered30Hz:
         ldx     #$0001
 @ApplyOrderedStride:
         txa
@@ -715,7 +735,6 @@ ApplyRuntimeMenuSelection:
         jsr     SeedFlySkyClockFromDemo
         jsr     SeedFlyAliasClockFromDemo
         jsr     SeedFlyTurbulenceClockFromDemo
-        jsr     EnsureFlyAliasCode
         stz     demo_mode
         inc     runtime_menu_apply_flags
 
@@ -753,7 +772,7 @@ ApplyRuntimeMenuSelection:
         jsr     RestartDemoPlayback
         bra     @ApplyRenderer
 @RecenterFlyCamera:
-        lda     #BSP_START_YAW_INDEX
+        lda     #BSP_START_YAW_INDEX*CAMERA_ANGLE_LEGACY_STEP
         sta     yaw_index
         stz     pitch_level
         lda     #BSP_WORLD_START_X_Q8
@@ -768,6 +787,8 @@ ApplyRuntimeMenuSelection:
         jsr     InvalidateScheduledFrameIdentity
 
 @ApplyRenderer:
+        jsr     ApplyRuntimeMenuScale
+        jsr     RequestFlyViewport
         lda     runtime_menu_draft_technique
         cmp     technique
         beq     @ApplyBrushes
@@ -823,12 +844,16 @@ RuntimeMenuPreviousValue:
         beq     @Brushes
         cmp     #RUNTIME_MENU_ROW_ENTITIES
         beq     @Entities
+        cmp     #RUNTIME_MENU_ROW_SCALE
+        bne     :+
+        jmp     PreviousRuntimeMenuScale
+:
         rts
 @Playback:
         lda     runtime_menu_draft_playback
         cmp     #RUNTIME_MENU_PLAYBACK_COUNT
         bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
 :
         asl
         tax
@@ -888,12 +913,16 @@ RuntimeMenuNextValue:
         beq     @NextBrushes
         cmp     #RUNTIME_MENU_ROW_ENTITIES
         beq     @NextEntities
+        cmp     #RUNTIME_MENU_ROW_SCALE
+        bne     :+
+        jmp     NextRuntimeMenuScale
+:
         rts
 @NextPlayback:
         lda     runtime_menu_draft_playback
         cmp     #RUNTIME_MENU_PLAYBACK_COUNT
         bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
 :
         asl
         tax
@@ -1011,6 +1040,7 @@ PatchRuntimeMenuOAM:
         sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 4) + 2
         sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 5) + 2
         sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 6) + 2
+        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 7) + 2
         RW      a16
         lda     runtime_menu_selection
         cmp     #RUNTIME_MENU_ROW_PLAYBACK
@@ -1023,6 +1053,8 @@ PatchRuntimeMenuOAM:
         beq     @CursorBrushes
         cmp     #RUNTIME_MENU_ROW_ENTITIES
         beq     @CursorEntities
+        cmp     #RUNTIME_MENU_ROW_SCALE
+        beq     @CursorScale
         cmp     #RUNTIME_MENU_ROW_RESTART
         beq     @CursorRestart
         ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_RESUME) + 2
@@ -1042,6 +1074,9 @@ PatchRuntimeMenuOAM:
 @CursorEntities:
         ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_ENTITIES) + 2
         bra     @CursorReady
+@CursorScale:
+        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_SCALE) + 2
+        bra     @CursorReady
 @CursorRestart:
         ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_RESTART) + 2
 @CursorReady:
@@ -1053,7 +1088,7 @@ PatchRuntimeMenuOAM:
         lda     runtime_menu_draft_playback
         cmp     #RUNTIME_MENU_PLAYBACK_COUNT
         bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
+        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
 :
         asl
         asl
@@ -1187,6 +1222,7 @@ PatchRuntimeMenuOAM:
         bne     @EntitiesValue
 
 @PatchDone:
+        jsr     PatchRuntimeMenuScaleOAM
         RW_forced a8i16
         rts
 
@@ -1196,10 +1232,23 @@ UpdateCameraControls:
         RW_forced a16i16
         stz     control_dirty
         inc     control_divider
+        lda     #CAMERA_ANGLE_LEGACY_STEP
+        sta     fly_look_step_limit
+        lda     fly_playback_mode
+        cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
+        bne     :+
+        lsr     fly_look_step_limit
+:
+        lda     z:SFX_joy1cont
+        sta     camera_input_buttons
+        lda     demo_mode
+        bne     :+
+        jsr     ReadFlyMouseControls
+:
 
         lda     runtime_menu_release_gate
         beq     @TechniqueToggle
-        lda     z:SFX_joy1cont
+        lda     camera_input_buttons
         beq     :+
         jmp     @Return
 :
@@ -1244,52 +1293,81 @@ UpdateCameraControls:
         jmp     @Clamp
 
 @AngleStep:
+        lda     fly_playback_mode
+        cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
+        beq     @ApplyAngles
         lda     control_divider
         and     #$0001
-        bne     @MovementControls
-        lda     z:SFX_joy1cont
+        beq     :+
+        jmp     @MovementControls
+:
+@ApplyAngles:
+        ; 3x takes half-sized joypad/capped mouse steps every video frame;
+        ; 2x retains the old alternate-frame cadence and the same turn speed.
+        ldx     camera_input_buttons
+        txa
         and     #JOY_LEFT
         beq     @YawRight
-        lda     yaw_index
-        dec
-        and     #$001F
-        sta     yaw_index
-        inc     control_dirty
-        bra     @PitchUp
+        lda     fly_mouse_yaw_step
+        sec
+        sbc     fly_look_step_limit
+        bra     @YawApply
 @YawRight:
-        lda     z:SFX_joy1cont
+        txa
         and     #JOY_RIGHT
+        beq     @YawMouse
+        lda     fly_mouse_yaw_step
+        clc
+        adc     fly_look_step_limit
+        bra     @YawApply
+@YawMouse:
+        lda     fly_mouse_yaw_step
+@YawApply:
         beq     @PitchUp
-        lda     yaw_index
-        inc
-        and     #$001F
+        clc
+        adc     yaw_index
+        and     #CAMERA_ANGLE_MASK
         sta     yaw_index
         inc     control_dirty
-
 @PitchUp:
-        lda     z:SFX_joy1cont
+        txa
         and     #JOY_UP
         beq     @PitchDown
-        lda     pitch_level
-        cmp     #CAMERA_PITCH_MAX
-        beq     @MovementControls
-        inc
-        sta     pitch_level
-        inc     control_dirty
-        bra     @MovementControls
+        lda     fly_mouse_pitch_step
+        clc
+        adc     fly_look_step_limit
+        bra     @PitchApply
 @PitchDown:
-        lda     z:SFX_joy1cont
+        txa
         and     #JOY_DOWN
+        beq     @PitchMouse
+        lda     fly_mouse_pitch_step
+        sec
+        sbc     fly_look_step_limit
+        bra     @PitchApply
+@PitchMouse:
+        lda     fly_mouse_pitch_step
+@PitchApply:
         beq     @MovementControls
-        lda     pitch_level
+        clc
+        adc     pitch_level
+        bmi     @PitchNegative
+        cmp     #CAMERA_PITCH_MAX+1
+        bcc     @PitchStore
+        lda     #CAMERA_PITCH_MAX
+        bra     @PitchStore
+@PitchNegative:
         cmp     #CAMERA_PITCH_MIN
+        bcs     @PitchStore
+        lda     #CAMERA_PITCH_MIN
+@PitchStore:
+        cmp     pitch_level
         beq     @MovementControls
-        dec
         sta     pitch_level
         inc     control_dirty
 
 @MovementControls:
-        lda     z:SFX_joy1cont
+        lda     camera_input_buttons
         and     #(JOY_X | JOY_B | JOY_Y | JOY_A)
         bne     :+
         jmp     @Clamp
@@ -1306,12 +1384,12 @@ UpdateCameraControls:
         lda     camera_z
         sta     camera_collision_previous_z
 
-        lda     z:SFX_joy1cont
+        lda     camera_input_buttons
         and     #(JOY_X | JOY_B)
         beq     @StrafeBasis
         jsr     BuildCameraForwardVector
 
-        lda     z:SFX_joy1cont
+        lda     camera_input_buttons
         and     #JOY_X
         beq     @Backward
         lda     camera_x
@@ -1328,7 +1406,7 @@ UpdateCameraControls:
         sta     camera_z
         inc     control_dirty
 @Backward:
-        lda     z:SFX_joy1cont
+        lda     camera_input_buttons
         and     #JOY_B
         beq     @StrafeBasis
         lda     camera_x
@@ -1347,34 +1425,34 @@ UpdateCameraControls:
 
 @StrafeBasis:
         lda     yaw_index
-        and     #$001F
+        and     #CAMERA_ANGLE_MASK
         asl
         tax
 
 @StrafeLeft:
-        lda     z:SFX_joy1cont
+        lda     camera_input_buttons
         and     #JOY_Y
         beq     @StrafeRight
         lda     camera_x
         clc
-        adc     f:BSPCameraMoveSin,x
+        adc     f:CameraMoveSin,x
         sta     camera_x
         lda     camera_y
         sec
-        sbc     f:BSPCameraMoveCos,x
+        sbc     f:CameraMoveCos,x
         sta     camera_y
         inc     control_dirty
 @StrafeRight:
-        lda     z:SFX_joy1cont
+        lda     camera_input_buttons
         and     #JOY_A
         beq     @ResolveMovement
         lda     camera_x
         sec
-        sbc     f:BSPCameraMoveSin,x
+        sbc     f:CameraMoveSin,x
         sta     camera_x
         lda     camera_y
         clc
-        adc     f:BSPCameraMoveCos,x
+        adc     f:CameraMoveCos,x
         sta     camera_y
         inc     control_dirty
 
@@ -1397,6 +1475,7 @@ UpdateCameraControls:
         pla
         inc
         sta     control_dirty
+        jsr     AccumulateFlyMode7Movement
 @MovementResolved:
         lda     control_dirty
         beq     @Return
@@ -1451,6 +1530,9 @@ LoadMonsterCamera:
         lda     f:QuakeBSPMonsterCameras+4,x
         sta     camera_z
         lda     f:QuakeBSPMonsterCameras+6,x
+        asl
+        asl
+        asl
         sta     yaw_index
         stz     pitch_level
         inc     control_dirty
@@ -1461,44 +1543,51 @@ LoadMonsterCamera:
 BuildCameraForwardVector:
         RW_assume a16i16
         lda     pitch_level
-        and     #$001F
+        and     #CAMERA_ANGLE_MASK
         asl
         tax
-        lda     f:BSPCameraMoveCos,x
+        lda     f:CameraMoveCos,x
         sta     camera_forward_pitch_cos
-        lda     f:BSPCameraMoveSin,x
+        lda     f:CameraMoveSin,x
         sta     camera_forward_z
 
         lda     yaw_index
-        and     #$001F
+        and     #CAMERA_ANGLE_MASK
         asl
         tax
-        lda     f:BSPCameraMoveCos,x
+        lda     f:CameraMoveCos,x
         tax
         jsr     ScaleCameraForwardHorizontal
         sta     camera_forward_x
 
         lda     yaw_index
-        and     #$001F
+        and     #CAMERA_ANGLE_MASK
         asl
         tax
-        lda     f:BSPCameraMoveSin,x
+        lda     f:CameraMoveSin,x
         tax
         jsr     ScaleCameraForwardHorizontal
         sta     camera_forward_y
         rts
 
-; Signed round-to-nearest of X * pitchCos / 32. The Mode-7 multiplier remains
-; available in this Mode-3 VBlank path and returns the bounded product in MPYL.
+; Signed round-to-nearest of X * pitchCos / 32. |X| <= 32; the clamped
+; pitch keeps pitchCos in 0..32. Use the S-CPU's unsigned multiplier:
+; M7A/M7B belong to the live FLY3X display, including between page flips.
 ScaleCameraForwardHorizontal:
         RW_assume a16i16
-        RW      a8
-        lda     camera_forward_pitch_cos
-        muls    x, a
-        RW      a16
-        lda     MPYL
-        bpl     @Positive
+        txa
+        bpl     @Magnitude
         neg
+@Magnitude:
+        RW      a8
+        sta     WRMPYA
+        lda     camera_forward_pitch_cos
+        sta     WRMPYB
+        RW      a16
+        ; REP + TXA + branch + LDA delay the read past the 8-cycle product.
+        txa
+        bpl     @Positive
+        lda     RDMPYL
         clc
         adc     #CAMERA_FORWARD_SCALE_ROUND
         lsr
@@ -1509,6 +1598,7 @@ ScaleCameraForwardHorizontal:
         neg
         rts
 @Positive:
+        lda     RDMPYL
         clc
         adc     #CAMERA_FORWARD_SCALE_ROUND
         lsr
@@ -1761,34 +1851,38 @@ RuntimeMenuText:
         .byte   " LIGHT        "
         .byte   " D-BRSH       "
         .byte   " ENTITY       "
+        .byte   " SCALE        "
         .byte   " RESTART      "
 RuntimeMenuTextEnd:
 .assert RuntimeMenuTextEnd - RuntimeMenuText = RUNTIME_MENU_ROW_COUNT * RUNTIME_MENU_COLUMNS, error, "Runtime-menu text dimensions changed"
 
 RuntimeMenuPlaybackValues:
-        .byte   "ORDER 2HZ       "
+        .byte   "ORDER 3HZ       "
         .byte   "REALTIME        "
         .byte   "FLY             "
         .byte   "HALF            "
         .byte   "QUARTER         "
-        .byte   "ORDER 20HZ      "
+        .byte   "ORDER 30HZ      "
+        .byte   "FLY3X           "
 RuntimeMenuPlaybackValuesEnd:
 .assert RuntimeMenuPlaybackValuesEnd - RuntimeMenuPlaybackValues = RUNTIME_MENU_PLAYBACK_COUNT * RUNTIME_MENU_PLAYBACK_RECORD_BYTES, error, "Runtime-menu playback values must stay fixed-width"
 
 RuntimeMenuPlaybackNext:
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
         .word   RUNTIME_MENU_PLAYBACK_HALF
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
         .word   RUNTIME_MENU_PLAYBACK_QUARTER
         .word   RUNTIME_MENU_PLAYBACK_FLY
         .word   RUNTIME_MENU_PLAYBACK_REALTIME
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
 RuntimeMenuPlaybackPrevious:
         .word   RUNTIME_MENU_PLAYBACK_FLY
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_20HZ
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
         .word   RUNTIME_MENU_PLAYBACK_QUARTER
         .word   RUNTIME_MENU_PLAYBACK_REALTIME
         .word   RUNTIME_MENU_PLAYBACK_HALF
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_2HZ
+        .word   RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
+        .word   RUNTIME_MENU_PLAYBACK_FLY
 
 RuntimeMenuLightingValues:
         .byte   "NONE    "
@@ -1809,4 +1903,6 @@ RuntimeMenuToggleValuesEnd:
 .assert RuntimeMenuToggleValuesEnd - RuntimeMenuToggleValues = 2 * 8, error, "Runtime-menu toggle values must stay fixed-width"
 
 .include "RuntimeMenuFont.s"
+.include "FlyMouse.s"
 .segment "CODE"
+.include "GraphicsScale.s"

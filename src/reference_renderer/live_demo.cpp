@@ -31,7 +31,9 @@ int run_source_realtime_demo(
     const QuakeSoundAssets* sound_assets,
     bool sound_enabled,
     float sound_volume,
-    ReferenceInstrumentationConfig instrumentation
+    ReferenceInstrumentationConfig instrumentation,
+    const ParticleReplay* particles,
+    bool particles_enabled
 )
 {
     const auto canonical_cameras = load_precise_demo_track(track_path);
@@ -41,33 +43,37 @@ int run_source_realtime_demo(
     }
     const double precise_rate = brush_replay.sample_rate;
     const double duration_seconds = constant_step_duration(canonical_cameras.size(), precise_rate);
+    std::optional<SourceCamera> capture_camera;
+    const auto camera_at_pose = [&](std::size_t pose) { return capture_camera.value_or(canonical_cameras.at(pose)); };
     return run_live_demo(
         world,
         canonical_cameras,
         duration_seconds,
         [&](double seconds) { return constant_step_pose_at_time(canonical_cameras.size(), seconds, precise_rate); },
         [precise_rate](std::size_t pose) { return static_cast<double>(pose) / precise_rate; },
-        [&](std::size_t pose) { return source_view_transform(canonical_cameras.at(pose)); },
+        [&](std::size_t pose) { return source_view_transform(camera_at_pose(pose)); },
         [&](std::size_t pose,
+            std::size_t scene_pose,
             RenderMode mode,
             bool legacy_material,
             bool brushes,
             bool entities,
-            bool external_models) {
+            bool external_models,
+            bool show_particles) {
             auto frame = render_source_reference_with_brushes(
                 world,
                 bvh,
                 brush_scene,
-                canonical_cameras.at(pose),
+                camera_at_pose(pose),
                 brush_replay,
-                pose,
+                scene_pose,
                 flat,
                 brushes
             );
             ExternalBspCoverage external_coverage;
             if (external_replay != nullptr)
             {
-                external_coverage = external_bsp_row_coverage(*external_replay, pose);
+                external_coverage = external_bsp_row_coverage(*external_replay, scene_pose);
                 if (external_models)
                 {
                     if (external_scene == nullptr)
@@ -76,11 +82,11 @@ int run_source_realtime_demo(
                     }
                     compose_source_external_bsp_models(
                         *external_scene,
-                        external_replay->row(pose),
-                        pose,
-                        external_bsp_server_time(*external_replay, pose),
+                        external_replay->row(scene_pose),
+                        scene_pose,
+                        external_bsp_server_time(*external_replay, scene_pose),
                         flat,
-                        source_view_transform(canonical_cameras.at(pose)),
+                        source_view_transform(camera_at_pose(pose)),
                         frame,
                         &external_coverage
                     );
@@ -91,11 +97,11 @@ int run_source_realtime_demo(
                 {"available", false},
                 {"reason", "textures are disabled for this frame"}
             };
-            const auto view = source_view_transform(canonical_cameras.at(pose));
+            const auto view = source_view_transform(camera_at_pose(pose));
             if (mode.textures && !legacy_material)
             {
                 const double surface_time =
-                    brush_replay.first_server_time + (static_cast<double>(pose) / brush_replay.sample_rate);
+                    brush_replay.first_server_time + (static_cast<double>(scene_pose) / brush_replay.sample_rate);
                 auto albedo = render_quake_sky_presentation(
                     frame.texture_indices,
                     frame.faces,
@@ -120,15 +126,19 @@ int run_source_realtime_demo(
             }
             if (entities)
             {
-                compose_alias_billboards(frame, world, view, alias_assets, pose);
+                compose_alias_billboards(frame, world, view, alias_assets, scene_pose);
             }
             LiveRenderResult result{select_live_indices(frame, mode, legacy_material)};
+            surface_inspection["liquidLighting"] = liquid_lighting_inspection(frame, mode);
+            if (show_particles && particles != nullptr)
+                surface_inspection["particles"] =
+                    compose_particles(result.indices, frame.depths, view, *particles, scene_pose, mode);
             result.surface_inspection = std::move(surface_inspection);
             if (external_replay != nullptr)
             {
                 result.external_bsp_inspection = external_bsp_inspection(
                     *external_replay,
-                    pose,
+                    scene_pose,
                     external_models,
                     external_models,
                     external_coverage
@@ -137,14 +147,14 @@ int run_source_realtime_demo(
             return result;
         },
         LiveDemoConfiguration{
-            .playback_contract = "source renderer | configured fixed-rate point samples | Q3 "
-                                 "position + u16 angles | no interpolation",
+            .playback_contract = "source renderer | offline interpolated fixed-rate cameras | Q3 "
+                                 "position + u16 angles | no runtime interpolation",
             .initial_mode = initial_mode,
             .initial_legacy_material = initial_legacy_material,
             .initial_playback_speed = initial_playback_speed,
             .playback_speed_control = true,
             .playback_schedule = PlaybackSchedule::NewestDue,
-            .initial_presentation_rate_hz = 2,
+            .initial_presentation_rate_hz = 3,
             .instrumentation_config = std::move(instrumentation),
             .sound_assets = sound_assets,
             .initial_sound_enabled = sound_enabled,
@@ -153,9 +163,13 @@ int run_source_realtime_demo(
             .brush_control = true,
             .entity_control = true,
             .external_bsp_model_control = external_replay != nullptr,
+            .particle_control = particles != nullptr,
             .initial_brushes = brushes_enabled,
             .initial_entities = entities_enabled,
-            .initial_external_bsp_models = external_bsp_models_enabled
+            .initial_external_bsp_models = external_bsp_models_enabled,
+            .initial_particles = particles_enabled,
+            .scene_pose_control = true,
+            .capture_camera_setter = [&](std::optional<SourceCamera> camera) { capture_camera = std::move(camera); }
         }
     );
 }
@@ -188,9 +202,17 @@ int run_packed_realtime_demo(
         },
         [&](std::size_t pose) { return static_cast<double>(timing.at(pose)) / kNtscFramesPerSecond; },
         [&](std::size_t pose) { return packed_view_transform(world, cameras.at(pose)); },
-        [&](std::size_t pose, RenderMode mode, bool legacy_material, bool, bool, bool) {
-            const auto frame = render_source_reference(world, bvh, cameras.at(pose), flat);
-            return LiveRenderResult{select_live_indices(frame, mode, legacy_material)};
+        [&](std::size_t pose, std::size_t, RenderMode mode, bool legacy_material, bool, bool, bool, bool) {
+            const auto frame = render_source_reference(
+                world,
+                bvh,
+                cameras.at(pose),
+                flat,
+                static_cast<double>(timing.at(pose)) / kNtscFramesPerSecond
+            );
+            LiveRenderResult result{select_live_indices(frame, mode, legacy_material)};
+            result.surface_inspection["liquidLighting"] = liquid_lighting_inspection(frame, mode);
+            return result;
         },
         LiveDemoConfiguration{
             .playback_contract = "packed SNES parity | 5-byte poses + NTSC due ticks | no "
@@ -200,7 +222,7 @@ int run_packed_realtime_demo(
             .initial_playback_speed = initial_playback_speed,
             .playback_speed_control = true,
             .playback_schedule = PlaybackSchedule::NewestDue,
-            .initial_presentation_rate_hz = 2,
+            .initial_presentation_rate_hz = 3,
             .instrumentation_config = std::move(instrumentation),
             .sound_assets = nullptr,
             .initial_sound_enabled = false,

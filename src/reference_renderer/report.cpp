@@ -7,6 +7,69 @@
 
 namespace quake_bsp_reference {
 
+Json texture_mapping_fidelity_json(const TextureMappingFidelity* fidelity, std::string_view contract)
+{
+    if (fidelity == nullptr)
+    {
+        return nullptr;
+    }
+    const bool available = fidelity->comparable_pixels > 0;
+    const auto ratio = [&](std::int64_t count) -> Json {
+        return available ? Json(static_cast<double>(count) / fidelity->comparable_pixels) : Json(nullptr);
+    };
+    Json first_beyond_two_texels = nullptr;
+    if (fidelity->first_beyond_two_texels >= 0)
+    {
+        const int pixel = fidelity->first_beyond_two_texels;
+        first_beyond_two_texels = {
+            {"pixel", pixel},
+            {"x", pixel % kLogicalWidth},
+            {"y", pixel / kLogicalWidth},
+            {"face", fidelity->first_face},
+            {"sourceSQ4", fidelity->first_source_s_q4},
+            {"sourceTQ4", fidelity->first_source_t_q4},
+            {"packedSQ4", fidelity->first_packed_s_q4},
+            {"packedTQ4", fidelity->first_packed_t_q4},
+            {"sErrorQ4", fidelity->first_s_error_q4},
+            {"tErrorQ4", fidelity->first_t_error_q4},
+            {"sourceIndex", fidelity->first_source_index},
+            {"packedIndex", fidelity->first_packed_index},
+        };
+    }
+    Json first_beyond_four_texels = nullptr;
+    if (fidelity->first_beyond_four_texels >= 0)
+    {
+        const int pixel = fidelity->first_beyond_four_texels;
+        first_beyond_four_texels = {
+            {"pixel", pixel},
+            {"x", pixel % kLogicalWidth},
+            {"y", pixel / kLogicalWidth},
+        };
+    }
+    return {
+        {"contract", contract},
+        {"available", available},
+        {"unavailableReason", available ? Json(nullptr) : Json("no-same-owner-geometry-pixels")},
+        {"ownerMatchPixels", fidelity->owner_match_pixels},
+        {"ownerMismatchPixels", fidelity->owner_mismatch_pixels},
+        {"comparablePixels", fidelity->comparable_pixels},
+        {"exactTexelPixels", fidelity->exact_texel_pixels},
+        {"exactTexelRatio", ratio(fidelity->exact_texel_pixels)},
+        {"withinOneTexelPixels", fidelity->within_one_texel_pixels},
+        {"withinOneTexelRatio", ratio(fidelity->within_one_texel_pixels)},
+        {"withinTwoTexelsPixels", fidelity->within_two_texel_pixels},
+        {"withinTwoTexelsRatio", ratio(fidelity->within_two_texel_pixels)},
+        {"withinFourTexelsPixels", fidelity->within_four_texel_pixels},
+        {"withinFourTexelsRatio", ratio(fidelity->within_four_texel_pixels)},
+        {"meanSErrorQ4", ratio(fidelity->total_s_error_q4)},
+        {"meanTErrorQ4", ratio(fidelity->total_t_error_q4)},
+        {"maxSErrorQ4", available ? Json(fidelity->max_s_error_q4) : Json(nullptr)},
+        {"maxTErrorQ4", available ? Json(fidelity->max_t_error_q4) : Json(nullptr)},
+        {"firstBeyondTwoTexels", first_beyond_two_texels},
+        {"firstBeyondFourTexels", first_beyond_four_texels},
+    };
+}
+
 void write_json_report(
     const fs::path& path,
     const Options& options,
@@ -91,10 +154,14 @@ void write_json_report(
          {{"contract", "quake-techniques-2-4-7-v1"},
           {"selected", render_mode_name({!options.no_textures, options.lighting})},
           {"technique", render_mode_technique({!options.no_textures, options.lighting})},
-          {"packedContract",
-           packed_render_contract({!options.no_textures, options.lighting}, false)},
+          {"packedContract", packed_render_contract({!options.no_textures, options.lighting}, false)},
           {"textures", !options.no_textures},
           {"lighting", kLightingLabels.at(static_cast<std::size_t>(options.lighting))},
+          {"liquidLighting",
+           liquid_lighting_inspection(
+               frame,
+               {!options.no_textures, options.lighting, options.liquid_lighting, options.liquid_turbulence}
+           )},
           {"untexturedGradient",
            {{"contract", "neutral-bgr555-ramp64-v1"},
             {"paletteEntries", kUntexturedPalette.size()},
@@ -375,62 +442,6 @@ void write_json_report(
         report["convexPainter"] = nullptr;
         report["frontToBackUncovered"] = nullptr;
     }
-    const auto texture_fidelity_json = [&](const TextureMappingFidelity* fidelity, std::string_view contract) -> Json {
-        if (fidelity == nullptr)
-        {
-            return nullptr;
-        }
-        const auto ratio = [&](int count) { return static_cast<double>(count) / fidelity->comparable_pixels; };
-        Json first_beyond_two_texels = nullptr;
-        if (fidelity->first_beyond_two_texels >= 0)
-        {
-            const int pixel = fidelity->first_beyond_two_texels;
-            first_beyond_two_texels = {
-                {"pixel", pixel},
-                {"x", pixel % kLogicalWidth},
-                {"y", pixel / kLogicalWidth},
-                {"face", fidelity->first_face},
-                {"sourceSQ4", fidelity->first_source_s_q4},
-                {"sourceTQ4", fidelity->first_source_t_q4},
-                {"packedSQ4", fidelity->first_packed_s_q4},
-                {"packedTQ4", fidelity->first_packed_t_q4},
-                {"sErrorQ4", fidelity->first_s_error_q4},
-                {"tErrorQ4", fidelity->first_t_error_q4},
-                {"sourceIndex", fidelity->first_source_index},
-                {"packedIndex", fidelity->first_packed_index},
-            };
-        }
-        Json first_beyond_four_texels = nullptr;
-        if (fidelity->first_beyond_four_texels >= 0)
-        {
-            const int pixel = fidelity->first_beyond_four_texels;
-            first_beyond_four_texels = {
-                {"pixel", pixel},
-                {"x", pixel % kLogicalWidth},
-                {"y", pixel / kLogicalWidth},
-            };
-        }
-        return {
-            {"contract", contract},
-            {"ownerMatchPixels", fidelity->owner_match_pixels},
-            {"ownerMismatchPixels", fidelity->owner_mismatch_pixels},
-            {"comparablePixels", fidelity->comparable_pixels},
-            {"exactTexelPixels", fidelity->exact_texel_pixels},
-            {"exactTexelRatio", ratio(fidelity->exact_texel_pixels)},
-            {"withinOneTexelPixels", fidelity->within_one_texel_pixels},
-            {"withinOneTexelRatio", ratio(fidelity->within_one_texel_pixels)},
-            {"withinTwoTexelsPixels", fidelity->within_two_texel_pixels},
-            {"withinTwoTexelsRatio", ratio(fidelity->within_two_texel_pixels)},
-            {"withinFourTexelsPixels", fidelity->within_four_texel_pixels},
-            {"withinFourTexelsRatio", ratio(fidelity->within_four_texel_pixels)},
-            {"meanSErrorQ4", static_cast<double>(fidelity->total_s_error_q4) / fidelity->comparable_pixels},
-            {"meanTErrorQ4", static_cast<double>(fidelity->total_t_error_q4) / fidelity->comparable_pixels},
-            {"maxSErrorQ4", fidelity->max_s_error_q4},
-            {"maxTErrorQ4", fidelity->max_t_error_q4},
-            {"firstBeyondTwoTexels", first_beyond_two_texels},
-            {"firstBeyondFourTexels", first_beyond_four_texels},
-        };
-    };
     const auto packed_texture_layer =
         [&](const PackedTextureRaster* raster,
             std::string_view contract,
@@ -482,7 +493,7 @@ void write_json_report(
                with_suffix(options.output_prefix, artifact_suffix + ".lightmapped.levels").generic_string()},
               {"image", with_suffix(options.output_prefix, artifact_suffix + ".bmp").generic_string()},
               {"nativeImage", with_suffix(options.output_prefix, artifact_suffix + ".native.bmp").generic_string()}}},
-            {"sourceMappingFidelity", texture_fidelity_json(fidelity, fidelity_contract)},
+            {"sourceMappingFidelity", texture_mapping_fidelity_json(fidelity, fidelity_contract)},
         };
         return layer;
     };

@@ -77,29 +77,33 @@ void write_index_outputs(
 {
     const auto suffix = std::string(layer_suffix);
     write_file(with_suffix(prefix, suffix + ".idx"), indices);
+    if (indices.size() != kLogicalPixels)
+        fail("reference index plane has an invalid size");
+    const int width = render_width();
+    const int height = render_height();
     std::vector<Rgb> pixels;
-    pixels.reserve(indices.size());
-    for (const auto index : indices)
+    pixels.reserve(static_cast<std::size_t>(width * height));
+    for (int y = 0; y < height; ++y)
     {
-        if (index >= palette.size())
+        for (int x = 0; x < width; ++x)
         {
-            fail("reference index escapes its palette");
+            const auto index = indices[logical_pixel_index(x, y)];
+            if (index >= palette.size())
+                fail("reference index escapes its palette");
+            pixels.push_back(palette[index]);
         }
-        pixels.push_back(palette[index]);
     }
-    write_bmp(with_suffix(prefix, suffix + ".bmp"), pixels, kLogicalWidth, kLogicalHeight);
+    write_bmp(with_suffix(prefix, suffix + ".bmp"), pixels, width, height);
     std::vector<Rgb> native_pixels(std::size_t{256} * 224U);
-    for (int y = 0; y < kLogicalHeight; ++y)
+    const int scale = active_render_scale == RenderScale::X2 ? 2 : 3;
+    for (int y = 0; y < height; ++y)
     {
-        for (int x = 0; x < kLogicalWidth; ++x)
+        for (int x = 0; x < width; ++x)
         {
-            const auto color = pixels[logical_pixel_index(x, y)];
-            const int native_x = x * 2;
-            const int native_y = y * 2;
-            native_pixels[row_major_index(native_x, native_y, 256)] = color;
-            native_pixels[row_major_index(native_x + 1, native_y, 256)] = color;
-            native_pixels[row_major_index(native_x, native_y + 1, 256)] = color;
-            native_pixels[row_major_index(native_x + 1, native_y + 1, 256)] = color;
+            const auto color = pixels[row_major_index(x, y, width)];
+            for (int dy = 0; dy < scale; ++dy)
+                for (int dx = 0; dx < scale; ++dx)
+                    native_pixels[row_major_index(x * scale + dx, y * scale + dy, 256)] = color;
         }
     }
     write_bmp(with_suffix(prefix, suffix + ".native.bmp"), native_pixels, 256, 224);
@@ -133,7 +137,14 @@ void write_quake_sky_artifacts(
     {
         fail("cannot create " + inspection_path.string());
     }
-    output << inspection.dump(2) << '\n';
+    auto annotated = inspection;
+    annotated["projection"] = {
+        {"renderScale", render_scale_name(active_render_scale)},
+        {"center", {render_center_x(), render_center_y()}},
+        {"focal", render_focal_length()},
+        {"diagnosticSource", active_source_focal != 64},
+    };
+    output << annotated.dump(2) << '\n';
     if (!output)
     {
         fail("cannot write " + inspection_path.string());
@@ -628,10 +639,7 @@ TextureMappingFidelity compare_texture_mapping_fidelity(
             result.first_beyond_four_texels = static_cast<int>(pixel);
         }
     }
-    if (result.comparable_pixels == 0)
-    {
-        fail("texture fidelity found no same-owner geometry pixels");
-    }
+    // Valid close-ups can have no shared geometry; reporting marks that diagnostic unavailable.
     return result;
 }
 
@@ -831,6 +839,14 @@ void declare_artifact_options(CLI::App& app, Options& options)
 namespace {
 void declare_replay_options(CLI::App& app, Options& options, RawOptionValues& raw)
 {
+    app.add_option("--particle-replay", options.particle_replay, "QPR1 deterministic smoke/blood replay")
+        ->check(CLI::ExistingFile);
+    app.add_flag("--particles,!--no-particles", options.particles, "Enable particles (default off until SNES support)");
+    app.add_option(
+        "--particle-output",
+        options.particle_output,
+        "Write source particle indices and inspection at --demo-pose"
+    );
     app.add_option(
            "--realtime-demo",
            options.realtime_demo_track,
@@ -857,11 +873,11 @@ void declare_replay_options(CLI::App& app, Options& options, RawOptionValues& ra
         "Write the QAV1 packed opaque-depth visibility corpus for every "
         "ordered row"
     );
-    app.add_flag("--ordered-2hz", options.ordered_2hz, "Render every derived 2 Hz row in canonical order");
-    app.add_flag("--step-by-step", options.ordered_2hz, "Deprecated alias for --ordered-2hz");
-    app.add_flag("--ordered-fast", options.ordered_fast, "Advance ordered 2 Hz rows after each completed render");
-    app.add_option("--ordered-rate-hz", options.ordered_presentation_hz, "Timed ordered presentation rate: 2 or 20 Hz")
-        ->check(CLI::IsMember({2, 20}))
+    app.add_flag("--ordered-3hz", options.ordered_3hz, "Render every derived 3 Hz row in canonical order");
+    app.add_flag("--step-by-step", options.ordered_3hz, "Deprecated alias for --ordered-3hz");
+    app.add_flag("--ordered-fast", options.ordered_fast, "Advance ordered 3 Hz rows after each completed render");
+    app.add_option("--ordered-rate-hz", options.ordered_presentation_hz, "Timed ordered presentation rate: 3 or 30 Hz")
+        ->check(CLI::IsMember({3, 30}))
         ->capture_default_str();
     app.add_option("--playback-speed", raw.playback_speed, "Live source-clock speed: realtime, half, or quarter")
         ->check(CLI::IsMember({"realtime", "half", "quarter"}))
@@ -871,9 +887,14 @@ void declare_replay_options(CLI::App& app, Options& options, RawOptionValues& ra
     app.add_flag(
         "--external-bsp-models",
         options.external_bsp_models,
-        "Start with reference-only external BSP models enabled"
+        "Enable source-renderer external BSP models; packed pickups follow brush/entity controls"
     );
     app.add_flag("--no-sound", options.no_sound, "Start with configured demo sound disabled");
+    app.add_flag(
+        "--inspect-packed-external-visibility",
+        options.inspect_packed_external_visibility,
+        "Inspect exact external BSP coverage over inline-only packed depth without modifying the image"
+    );
     app.add_option("--volume", options.volume, "Reference sound volume from 0.0 to 1.0")
         ->check(CLI::Range(0.0F, 1.0F))
         ->capture_default_str();
@@ -929,6 +950,20 @@ void declare_render_options(CLI::App& app, Options& options, RawOptionValues& ra
     app.add_option("--lighting", raw.lighting, "Selected lighting: none or lightmap")
         ->check(CLI::IsMember({"none", "lightmap"}))
         ->capture_default_str();
+    app.add_option(
+           "--liquid-lighting",
+           raw.liquid_lighting,
+           "Source textured liquids: none or lightmap; packed SNES stays fullbright"
+    )
+        ->check(CLI::IsMember({"none", "lightmap"}))
+        ->capture_default_str();
+    app.add_option(
+           "--liquid-turbulence",
+           raw.liquid_turbulence,
+           "Source textured liquids: none or snes-q4; packed SNES always uses snes-q4"
+    )
+        ->check(CLI::IsMember({"none", "snes-q4"}))
+        ->capture_default_str();
     app.add_flag("--self-test", options.self_test, "Run the internal BVH/ray/parity test");
     app.add_flag("--report-only", options.report_only, "Write JSON counters without framebuffer artifacts");
 }
@@ -940,9 +975,15 @@ void declare_camera_options(CLI::App& app, RawOptionValues& raw)
     const auto presets = std::set<std::string>{"spawn", "near", "far", "return-spawn", "yaw", "pitch"};
     auto* preset_option =
         app.add_option("--preset", raw.preset, "Named accepted camera")->check(CLI::IsMember(presets));
-    auto* camera_option = app.add_option("--camera", raw.camera, "Packed camera: X Y Z YAW PITCH")->expected(5);
+    auto* camera_option =
+        app.add_option("--camera", raw.camera, "Packed asset camera (32 steps): X Y Z YAW PITCH")->expected(5);
+    auto* native_option =
+        app.add_option("--camera-native", raw.native_camera, "SNES camera (256 steps): X Y Z YAW PITCH")->expected(5);
     preset_option->excludes(camera_option);
     camera_option->excludes(preset_option);
+    native_option->excludes(preset_option)->excludes(camera_option);
+    preset_option->excludes(native_option);
+    camera_option->excludes(native_option);
 }
 } // namespace
 
@@ -987,8 +1028,18 @@ void normalize_camera(Options& options, const RawOptionValues& raw)
     }
     else if (!raw.camera.empty())
     {
-        options.camera = {raw.camera[0], raw.camera[1], raw.camera[2], raw.camera[3], raw.camera[4]};
+        options.camera = {raw.camera[0], raw.camera[1], raw.camera[2], raw.camera[3] * 8, raw.camera[4] * 8};
         options.camera_label = "custom";
+    }
+    else if (!raw.native_camera.empty())
+    {
+        const auto& c = raw.native_camera;
+        if (c[3] < 0 || c[3] > 255 || c[4] < -64 || c[4] > 64)
+        {
+            fail("native camera requires yaw 0..255 and pitch -64..64");
+        }
+        options.camera = {c[0], c[1], c[2], c[3], c[4]};
+        options.camera_label = "native";
     }
 }
 } // namespace
@@ -1027,6 +1078,8 @@ void normalize_options(Options& options, const RawOptionValues& raw)
     options.surface_time_override = raw.surface_time_option->count() != 0;
     normalize_camera(options, raw);
     normalize_lighting(options, raw.lighting);
+    options.liquid_lighting = raw.liquid_lighting == "none" ? Lighting::None : Lighting::LightMap;
+    options.liquid_turbulence = raw.liquid_turbulence == "snes-q4" ? LiquidTurbulence::SnesQ4 : LiquidTurbulence::None;
     normalize_playback_speed(options, raw.playback_speed);
 }
 } // namespace
@@ -1051,7 +1104,8 @@ OptionFacts derive_option_facts(const Options& options)
     facts.raw_indices =
         facts.brush_indices || !options.packed_albedo_indices.empty() || !options.packed_lightmap_indices.empty() ||
         !options.packed_lightmap_levels.empty() || !options.packed_render_indices.empty() ||
-        !options.fly_alias_render_indices.empty() || !options.quake_sky_indices.empty();
+        !options.fly_alias_render_indices.empty() || !options.quake_sky_indices.empty() ||
+        !options.particle_output.empty();
     return facts;
 }
 } // namespace
@@ -1139,6 +1193,10 @@ class OptionContractValidator
 
     void validate_source_replay_contract() const
     {
+        if (!options_.particle_replay.empty() && !facts_.precise_demo)
+            fail("--particle-replay requires --realtime-demo");
+        if (!options_.particle_output.empty() && (options_.particle_replay.empty() || options_.demo_pose < 0))
+            fail("--particle-output requires --particle-replay and --demo-pose");
         if (!options_.external_bsp_replay.empty() && !facts_.precise_demo)
         {
             fail("--external-bsp-replay requires --realtime-demo");
@@ -1150,6 +1208,11 @@ class OptionContractValidator
         if (options_.external_bsp_models && options_.external_bsp_replay.empty())
         {
             fail("--external-bsp-models requires --external-bsp-replay");
+        }
+        if (options_.inspect_packed_external_visibility &&
+            (!options_.ordered_3hz || options_.external_bsp_replay.empty() || options_.demo_pose >= 0))
+        {
+            fail("--inspect-packed-external-visibility requires live ordered playback and --external-bsp-replay");
         }
         if (options_.fly_alias_render_indices.empty() && facts_.precise_demo != !options_.alias_assets.empty())
         {
@@ -1166,19 +1229,19 @@ class OptionContractValidator
 
     void validate_ordered_entry_contract() const
     {
-        if (options_.ordered_2hz && !facts_.precise_demo)
+        if (options_.ordered_3hz && !facts_.precise_demo)
         {
-            fail("--ordered-2hz requires --realtime-demo");
+            fail("--ordered-3hz requires --realtime-demo");
         }
-        if (options_.ordered_2hz && (options_.ordered_replay.empty() || options_.data_dir.empty()))
+        if (options_.ordered_3hz && (options_.ordered_replay.empty() || options_.data_dir.empty()))
         {
-            fail("--ordered-2hz requires --ordered-replay and --data-dir");
+            fail("--ordered-3hz requires --ordered-replay and --data-dir");
         }
-        if (!options_.ordered_replay.empty() && !options_.ordered_2hz && options_.demo_pose < 0 &&
+        if (!options_.ordered_replay.empty() && !options_.ordered_3hz && options_.demo_pose < 0 &&
             options_.ordered_alias_visibility.empty())
         {
             fail(
-                "--ordered-replay requires --ordered-2hz, --demo-pose, or "
+                "--ordered-replay requires --ordered-3hz, --demo-pose, or "
                 "--ordered-alias-visibility"
             );
         }
@@ -1221,7 +1284,7 @@ class OptionContractValidator
             );
         }
         if (!options_.ordered_alias_visibility.empty() &&
-            (options_.demo_pose >= 0 || options_.ordered_2hz || options_.no_entities ||
+            (options_.demo_pose >= 0 || options_.ordered_3hz || options_.no_entities ||
              !options_.instrumentation_session.empty()))
         {
             fail(
@@ -1234,21 +1297,21 @@ class OptionContractValidator
 
     void validate_ordered_render_contract() const
     {
-        if (options_.ordered_2hz && options_.material_view)
+        if (options_.ordered_3hz && options_.material_view)
         {
             fail("--material-view is unavailable in packed ordered playback");
         }
-        if (options_.ordered_2hz && options_.playback_speed != PlaybackSpeed::Realtime)
+        if (options_.ordered_3hz && options_.playback_speed != PlaybackSpeed::Realtime)
         {
-            fail("--ordered-2hz cannot use --playback-speed");
+            fail("--ordered-3hz cannot use --playback-speed");
         }
-        if (options_.ordered_fast && !options_.ordered_2hz)
+        if (options_.ordered_fast && !options_.ordered_3hz)
         {
-            fail("--ordered-fast requires --ordered-2hz");
+            fail("--ordered-fast requires --ordered-3hz");
         }
-        if (options_.ordered_presentation_hz != 2 && !options_.ordered_2hz)
+        if (options_.ordered_presentation_hz != 3 && !options_.ordered_3hz)
         {
-            fail("--ordered-rate-hz requires --ordered-2hz");
+            fail("--ordered-rate-hz requires --ordered-3hz");
         }
     }
 
@@ -1302,11 +1365,11 @@ class OptionContractValidator
         {
             fail("--demo-pose requires --realtime-demo and --brush-replay");
         }
-        if (options_.demo_pose >= 0 && options_.ordered_2hz)
+        if (options_.demo_pose >= 0 && options_.ordered_3hz)
         {
             fail(
                 "--demo-pose names a canonical row and cannot use "
-                "--ordered-2hz"
+                "--ordered-3hz"
             );
         }
         if (options_.demo_pose >= 0 && options_.playback_speed != PlaybackSpeed::Realtime)
@@ -1317,7 +1380,7 @@ class OptionContractValidator
             );
         }
         if (options_.demo_pose >= 0 && options_.output_prefix.empty() &&
-            !(options_.report_only && !options_.quake_sky_indices.empty()))
+            !(options_.report_only && (!options_.quake_sky_indices.empty() || !options_.particle_output.empty())))
         {
             fail("--demo-pose requires --output-prefix");
         }
@@ -1327,15 +1390,15 @@ class OptionContractValidator
     {
         if (!options_.fly_alias_render_indices.empty() &&
             (options_.data_dir.empty() || options_.packet_source_faces.empty() || options_.alias_assets.empty() ||
-             raw_.camera.empty()))
+             !raw_.has_camera()))
         {
             fail(
                 "--fly-alias-render-indices requires --data-dir, "
-                "--packet-source-faces, --alias-assets, and --camera"
+                "--packet-source-faces, --alias-assets, and a camera"
             );
         }
         if (!options_.fly_alias_render_indices.empty() &&
-            (options_.demo_pose >= 0 || facts_.precise_demo || facts_.packed_demo || options_.ordered_2hz ||
+            (options_.demo_pose >= 0 || facts_.precise_demo || facts_.packed_demo || options_.ordered_3hz ||
              !options_.ordered_replay.empty()))
         {
             fail("--fly-alias-render-indices is a static current-camera output");
@@ -1360,7 +1423,7 @@ class OptionContractValidator
     {
         if (options_.demo_pose >= 0 &&
             ((!facts_.packed_brush_indices &&
-              (!options_.data_dir.empty() || !options_.packet_source_faces.empty() || !raw_.camera.empty())) ||
+              (!options_.data_dir.empty() || !options_.packet_source_faces.empty() || raw_.has_camera())) ||
              !options_.json_path.empty() || !options_.snes_frame.empty() || !options_.snes_texture_indices.empty() ||
              !options_.packed_albedo_indices.empty() || !options_.packed_lightmap_indices.empty() ||
              !options_.packed_lightmap_levels.empty() || options_.allowed_holes != 0 ||
@@ -1375,9 +1438,10 @@ class OptionContractValidator
         {
             fail("--brush-*-indices requires --demo-pose");
         }
-        if (options_.report_only && options_.demo_pose >= 0 && !facts_.brush_indices)
+        if (options_.report_only && options_.demo_pose >= 0 && !facts_.brush_indices &&
+            options_.particle_output.empty())
         {
-            fail("--demo-pose --report-only requires a brush index output");
+            fail("--demo-pose --report-only requires a brush or particle index output");
         }
     }
 
@@ -1409,6 +1473,10 @@ class OptionContractValidator
         {
             fail("--packet-source-faces requires --data-dir");
         }
+        if (!options_.packet_source_faces.empty() && !options_.ordered_replay.empty() && options_.demo_pose < 0)
+        {
+            fail("--packet-source-faces with --ordered-replay requires a static --demo-pose");
+        }
         if ((!options_.packed_albedo_indices.empty() || !options_.packed_lightmap_indices.empty() ||
              !options_.packed_lightmap_levels.empty() || !options_.packed_render_indices.empty()) &&
             (options_.data_dir.empty() || options_.packet_source_faces.empty()))
@@ -1420,7 +1488,7 @@ class OptionContractValidator
         }
         if (facts_.packed_brush_indices &&
             (options_.data_dir.empty() ||
-             (options_.ordered_replay.empty() && (options_.packet_source_faces.empty() || raw_.camera.empty()))))
+             (options_.ordered_replay.empty() && (options_.packet_source_faces.empty() || !raw_.has_camera()))))
         {
             fail(
                 "--packed-brush-*-indices requires --data-dir plus either "
@@ -1445,15 +1513,95 @@ class OptionContractValidator
     const OptionFacts facts_;
 };
 
+bool run_particle_option_contract_self_test()
+{
+    Options options;
+    if (options.particles)
+        return false;
+    for (const auto* flag : {"--particles", "--no-particles"})
+    {
+        CLI::App app;
+        RawOptionValues flag_raw;
+        declare_replay_options(app, options, flag_raw);
+        std::vector<std::string> args{flag};
+        app.parse(args);
+        if (options.particles != (std::string_view(flag) == "--particles"))
+            return false;
+    }
+    options.pak = "fixture.pak";
+    options.map_entry = "maps/e1m3.bsp";
+    options.realtime_demo_track = "camera.bin";
+    options.brush_replay = "brush.bin";
+    options.alias_assets = "aliases";
+    options.particle_replay = "particles.json";
+    options.particle_output = "particles.idx";
+    options.demo_pose = 0;
+    options.report_only = true;
+    const RawOptionValues raw;
+    try
+    {
+        OptionContractValidator(options, raw).validate();
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+    options.particle_replay.clear();
+    try
+    {
+        OptionContractValidator(options, raw).validate();
+    }
+    catch (const std::exception&)
+    {
+        return true;
+    }
+    return false;
+}
+
 Options parse_options(int argc, char** argv)
 {
     Options options;
     RawOptionValues raw;
     CLI::App app{"Independent C++23 SNES Quake reference renderer", "quake_bsp_reference_renderer"};
     declare_options(app, options, raw);
+    app.add_option("--render-scale", options.render_scale, "Graphics scale: x2, x3 or x3-warp")
+        ->check(CLI::IsMember({"x2", "x3", "x3-warp"}));
+    auto* diagnostic_focal =
+        app.add_option(
+               "--diagnostic-source-focal",
+               options.diagnostic_source_focal,
+               "Native X3 focal [33,64], only for static demo-pose diagnostics; never a training target"
+        )
+            ->check(CLI::Range(33, 64));
+    auto* visibility_focal =
+        app.add_option(
+               "--visibility-source-focal",
+               options.diagnostic_source_focal,
+               "Projection-bound X3 visibility export focal [33,64]; requires --ordered-alias-visibility"
+        )
+            ->check(CLI::Range(33, 64));
+    app.add_option("--warp-model", options.warp_model, "Reference warp: projective, mode7 or hdma")
+        ->check(CLI::IsMember({"projective", "mode7", "hdma"}));
+    app.add_option("--warp-depth", options.warp_depth, "Translation plane depth in Quake units; 0 = rotation only");
+    app.add_option("--warp-bands", options.warp_bands, "HDMA band count: 1, 8, 16, 32 or 224");
+    app.add_option("--warp-profile-q16", options.warp_profile, "Three or five inverse-depth Q16 knots, top to bottom")
+        ->delimiter(',');
     parse_command_line(app, argc, argv);
     normalize_options(options, raw);
     OptionContractValidator(options, raw).validate();
+    if (visibility_focal->count() &&
+        (diagnostic_focal->count() || options.render_scale != "x3" || options.ordered_alias_visibility.empty()))
+        fail("visibility source focal requires an X3 ordered visibility export and cannot use diagnostic focal");
+    if (diagnostic_focal->count() &&
+        (options.render_scale != "x3" || options.demo_pose < 0 || options.output_prefix.empty() ||
+         !options.ordered_alias_visibility.empty()))
+        fail(
+            "diagnostic source focal requires static --render-scale x3, --demo-pose and --output-prefix; QAV export is "
+            "forbidden"
+        );
+    if (options.render_scale != "x2" && options.realtime_demo_track.empty() &&
+        options.packed_realtime_demo_track.empty())
+        fail("X3 graphics scale requires a demo track");
     return options;
 }
 

@@ -8,6 +8,7 @@
 #include "external_models.hpp"
 #include "aliases.hpp"
 #include "packed_brushes.hpp"
+#include "particles.hpp"
 
 namespace quake_bsp_reference {
 
@@ -33,7 +34,7 @@ struct OrderedPackedReplay
 
 constexpr bool supported_ordered_replay_step_rate(std::uint16_t rate)
 {
-    return rate == 2U || rate == 20U;
+    return rate == 3U || rate == 30U;
 }
 
 OrderedPackedReplay load_ordered_packed_replay(
@@ -42,6 +43,12 @@ OrderedPackedReplay load_ordered_packed_replay(
     const fs::path& data_dir,
     const SourceWorld& world
 );
+
+struct PackedExternalVisibilityInspection
+{
+    const ExternalBspScene& scene;
+    const ExternalBspReplay& replay;
+};
 
 std::vector<std::uint8_t> render_ordered_packed_indices(
     const SourceWorld& world,
@@ -57,10 +64,8 @@ std::vector<std::uint8_t> render_ordered_packed_indices(
     bool authentic_sky = false,
     double surface_time = 0.0,
     Json* surface_inspection = nullptr,
-    const ExternalBspScene* external_scene = nullptr,
-    const ExternalBspReplay* external_replay = nullptr,
-    bool external_models_enabled = false,
-    ExternalBspCoverage* external_coverage = nullptr
+    const ParticleReplay* particles = nullptr,
+    const PackedExternalVisibilityInspection* external_visibility = nullptr
 );
 
 inline constexpr std::size_t kAliasVisibilityHeaderBytes = 56;
@@ -102,7 +107,7 @@ int run_realtime_demo(
     RenderMode initial_mode,
     bool initial_legacy_material,
     PlaybackSpeed initial_playback_speed,
-    bool ordered_2hz,
+    bool ordered_3hz,
     bool ordered_fast,
     int presentation_rate_hz,
     ReferenceInstrumentationConfig instrumentation,
@@ -113,7 +118,10 @@ int run_realtime_demo(
     bool external_bsp_models_enabled,
     const QuakeSoundAssets* sound_assets,
     bool sound_enabled,
-    float sound_volume
+    float sound_volume,
+    const ParticleReplay* particles = nullptr,
+    bool particles_enabled = false,
+    bool inspect_external_visibility = false
 );
 
 } // namespace quake_bsp_reference

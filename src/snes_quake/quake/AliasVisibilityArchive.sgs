@@ -1,0 +1,210 @@
+; Stage a shared QAV3 row once, before painter traversal. Pixel kernels keep
+; their existing visible/hidden sentinels and sequential partial-mask reads.
+.segment "GSU_TEXTURE_TAIL_CODE"
+AliasBuildVisibilityRow:
+        move    R9, #$02
+        iwt     R8, #.loword(AliasBuildVisibilityRowROM)
+        from    R8
+        ljmp    R9
+        nop
+
+.segment "GSU_SKY_ROM_CODE"
+AliasBuildVisibilityRowROM:
+        lm      R4, (GSU_ALIAS_ARCHIVE_ADDRESS_OFFSET)
+        iwt     R0, #$FFFF
+        with    R4
+        cmp     R0
+        bne     AliasVisibilityArchivePresent
+        nop
+        GSU_ABSOLUTE_GOTO .loword(AliasVisibilityMarkFlyPointers)
+AliasVisibilityArchivePresent:
+        lm      R12, (ALIAS_TOKEN_COUNT)
+        moves   R12, R12
+        beq     AliasVisibilityPointersReady
+        nop
+        iwt     R10, #GSU_ALIAS_VISIBILITY_POINTERS_OFFSET
+        iwt     R13, #AliasVisibilityClearPointers
+AliasVisibilityClearPointers:
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        loop
+        nop
+AliasVisibilityPointersReady:
+        move    R0, #$6F
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R7
+        move    R0, R7
+        and     #15
+        sm      (ALIAS_VISIBILITY_RECORD_COUNT), R0
+        moves   R0, R0
+        bne     AliasVisibilityRecordsPresent
+        nop
+        GSU_ABSOLUTE_GOTO .loword(AliasBuildVisibilityDone)
+AliasVisibilityRecordsPresent:
+        with    R7
+        sex
+        bpl     AliasVisibilityRaw
+        nop
+        GSU_ABSOLUTE_GOTO .loword(AliasVisibilityDecode)
+AliasVisibilityRaw:
+        iwt     R9, #GSU_ALIAS_VISIBILITY_MASKS_OFFSET
+AliasVisibilityRawRecord:
+        BSP_ROM_LOAD_BYTE R6
+        move    R0, R6
+        iwt     R1, #$7F
+        and     R1
+        add     R0
+        iwt     R10, #GSU_ALIAS_VISIBILITY_POINTERS_OFFSET
+        with    R10
+        add     R0
+        with    R6
+        sex
+        bpl     AliasVisibilityRawPartial
+        nop
+        iwt     R0, #$FFFE
+        movew   (R10), R0
+        bra     AliasVisibilityRawAdvance
+        nop
+AliasVisibilityRawPartial:
+        movew   (R10), R9
+        BSP_ROM_LOAD_WORD R0
+        add     #7
+  .repeat 3
+        lsr
+  .endrepeat
+        move    R12, R0
+        iwt     R13, #AliasVisibilityMaskCopy
+AliasVisibilityMaskCopy:
+        BSP_ROM_LOAD_BYTE R0
+        move    R10, R9
+        moveb   (R10), R0
+        inc     R9
+        loop
+        nop
+AliasVisibilityRawAdvance:
+        lm      R0, (ALIAS_VISIBILITY_RECORD_COUNT)
+        dec     R0
+        sm      (ALIAS_VISIBILITY_RECORD_COUNT), R0
+        bne     AliasVisibilityRawRecord
+        nop
+        GSU_ABSOLUTE_GOTO .loword(AliasBuildVisibilityDone)
+
+; Each RLE packet consumes at least one byte and has a bounded output count.
+; Decode directly into the persistent mask arena; its record headers remain
+; between partial masks, so the second pass only publishes RAM pointers.
+AliasVisibilityDecode:
+        BSP_ROM_LOAD_WORD R2
+        iwt     R0, #BSP_ALIAS_ARCHIVE_MAX_DECODED_BYTES+1
+        with    R2
+        cmp     R0
+        bcc     AliasVisibilityDecodeLengthReady
+        nop
+        GSU_ABSOLUTE_GOTO .loword(AliasVisibilityMarkFlyPointers)
+AliasVisibilityDecodeLengthReady:
+        iwt     R10, #GSU_ALIAS_VISIBILITY_MASKS_OFFSET
+AliasVisibilityDecodePacket:
+        moves   R2, R2
+        bne     AliasVisibilityDecodeControl
+        nop
+        GSU_ABSOLUTE_GOTO .loword(AliasVisibilityDecodedReady)
+AliasVisibilityDecodeControl:
+        BSP_ROM_LOAD_BYTE R6
+        move    R0, R6
+        iwt     R1, #$7F
+        and     R1
+        inc     R0
+        move    R12, R0
+        with    R2
+        sub     R0
+        bcs     AliasVisibilityDecodeRunReady
+        nop
+        GSU_ABSOLUTE_GOTO .loword(AliasVisibilityMarkFlyPointers)
+AliasVisibilityDecodeRunReady:
+        with    R6
+        sex
+        bmi     AliasVisibilityDecodeRepeat
+        nop
+        iwt     R13, #AliasVisibilityDecodeLiteralLoop
+AliasVisibilityDecodeLiteralLoop:
+        BSP_ROM_LOAD_BYTE R0
+        moveb   (R10), R0
+        inc     R10
+        loop
+        nop
+        bra     AliasVisibilityDecodePacket
+        nop
+AliasVisibilityDecodeRepeat:
+        BSP_ROM_LOAD_BYTE R0
+        iwt     R13, #AliasVisibilityDecodeRepeatLoop
+AliasVisibilityDecodeRepeatLoop:
+        moveb   (R10), R0
+        inc     R10
+        loop
+        nop
+        bra     AliasVisibilityDecodePacket
+        nop
+AliasVisibilityDecodedReady:
+        iwt     R4, #GSU_ALIAS_VISIBILITY_MASKS_OFFSET
+AliasVisibilityDecodedRecord:
+        moveb   R6, (R4)
+        inc     R4
+        move    R0, R6
+        iwt     R1, #$7F
+        and     R1
+        add     R0
+        iwt     R10, #GSU_ALIAS_VISIBILITY_POINTERS_OFFSET
+        with    R10
+        add     R0
+        with    R6
+        sex
+        bpl     AliasVisibilityDecodedPartial
+        nop
+        iwt     R0, #$FFFE
+        movew   (R10), R0
+        bra     AliasVisibilityDecodedAdvance
+        nop
+AliasVisibilityDecodedPartial:
+        ; Candidate words are byte packed and may have odd addresses.
+        moveb   R8, (R4)
+        inc     R4
+        moveb   R0, (R4)
+        inc     R4
+        swap
+        or      R8
+        add     #7
+  .repeat 3
+        lsr
+  .endrepeat
+        movew   (R10), R4
+        with    R4
+        add     R0
+AliasVisibilityDecodedAdvance:
+        lm      R0, (ALIAS_VISIBILITY_RECORD_COUNT)
+        dec     R0
+        sm      (ALIAS_VISIBILITY_RECORD_COUNT), R0
+        bne     AliasVisibilityDecodedRecord
+        nop
+AliasBuildVisibilityDone:
+        lm      R8, (ALIAS_BUILD_RETURN)
+        move    R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+
+AliasVisibilityMarkFlyPointers:
+        lm      R12, (ALIAS_TOKEN_COUNT)
+        moves   R12, R12
+        beq     AliasBuildVisibilityDone
+        nop
+        iwt     R10, #GSU_ALIAS_VISIBILITY_POINTERS_OFFSET
+        iwt     R0, #$8000
+        iwt     R13, #AliasVisibilityMarkFlyPointerLoop
+AliasVisibilityMarkFlyPointerLoop:
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        loop
+        nop
+        GSU_ABSOLUTE_GOTO .loword(FlyBrushResetMaskROM)
