@@ -101,9 +101,18 @@ updates when rendering cannot keep up.
 
 [Build from source](docs/BUILDING.md) to produce `out/snes_quake/quake.sfc`.
 
-Requires the current **MesenCE development build**. Download it for
-[Windows, Linux or macOS](https://github.com/nesdev-org/MesenCE#development-builds),
-then open `quake.sfc` in the emulator.
+On **Windows x64**, [download the tested MesenCE player](https://github.com/pisiiki/snes_quake/releases/download/v0.0.3/MesenCE-4b8a196e-Windows-x64-AOT.zip).
+Extract the ZIP, run `Mesen.exe`, and open `quake.sfc`; no emulator build is needed.
+This is the unchanged official upstream AOT build at
+[`4b8a196e`](https://github.com/nesdev-org/MesenCE/commit/4b8a196e299b3de297b204fd1208d2981562c89b),
+without this project's development instrumentation.
+
+ZIP SHA-256: `6296e76cb086c54da97083f17adee2bb33a29695db4ee1135c8ea9c451c753b8`.
+[Exact upstream source and license](https://github.com/pisiiki/snes_quake/releases/download/v0.0.3/MesenCE-4b8a196e-source.zip) ·
+[Download provenance and qualification hashes](https://github.com/pisiiki/snes_quake/releases/download/v0.0.3/MesenCE-4b8a196e-PROVENANCE.json).
+
+For Linux or macOS, see the upstream
+[MesenCE development builds](https://github.com/nesdev-org/MesenCE#development-builds).
 
 ## Controls
 

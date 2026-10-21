@@ -42,6 +42,15 @@ cc65 is used as build tooling through libSFX's pinned submodule and remains
 under its upstream zlib License, available in `third_party/libSFX/tools/cc65/LICENSE` after
 the recursive dependency is initialized.
 
+## MesenCE player download
+
+The separate Windows emulator download is the unmodified official MesenCE build
+at `4b8a196e299b3de297b204fd1208d2981562c89b`. It is not part of this project's MIT-licensed source or
+the Quake ROM. [Corresponding upstream source](https://github.com/pisiiki/snes_quake/releases/download/v0.0.3/MesenCE-4b8a196e-source.zip)
+includes the exact upstream `LICENSE` and pinned dependency references;
+[provenance](https://github.com/pisiiki/snes_quake/releases/download/v0.0.3/MesenCE-4b8a196e-PROVENANCE.json) records its binary,
+source and qualification hashes. MesenCE retains its upstream GPL-3.0 terms.
+
 ## Modern BSP inputs
 
 `third_party/quake-map-source` contains the official map-source archive used by
