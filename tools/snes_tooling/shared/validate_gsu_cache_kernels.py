@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -280,18 +281,24 @@ def validate_cache_manifest(
             details.append(f"added={','.join(added)}")
         raise ValueError(f"GSU cache kernel set changed ({'; '.join(details)})")
 
-    for name, expected_range in expected.items():
-        if actual[name] == expected_range:
-            continue
-        expected_segment, expected_start, expected_end = expected_range
-        actual_segment, actual_start, actual_end = actual[name]
-        raise ValueError(
-            f"cache kernel {name!r} moved: "
-            f"expected {expected_segment} "
-            f"0x{expected_start:06x}..0x{expected_end:06x}, "
-            f"linked {actual_segment} "
-            f"0x{actual_start:06x}..0x{actual_end:06x}"
-        )
+    moved = [name for name in expected if actual[name] != expected[name]]
+    if moved:
+        details = []
+        # One section shift can move many windows. Show several independent
+        # mismatches from the same link without dumping the whole manifest.
+        for name in moved[:12]:
+            expected_segment, expected_start, expected_end = expected[name]
+            actual_segment, actual_start, actual_end = actual[name]
+            details.append(
+                f"cache kernel {name!r} moved: "
+                f"expected {expected_segment} "
+                f"0x{expected_start:06x}..0x{expected_end:06x}, "
+                f"linked {actual_segment} "
+                f"0x{actual_start:06x}..0x{actual_end:06x}"
+            )
+        if len(moved) > len(details):
+            details.append(f"{len(moved) - len(details)} more moved cache kernels")
+        raise ValueError("\n".join(details))
 
 
 def write_cache_manifest(
@@ -374,6 +381,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    started = time.monotonic()
     args = parse_args()
     try:
         kernels = validate_cache_kernels(
@@ -395,15 +403,21 @@ def main() -> int:
             )
     except (OSError, ValueError) as error:
         print(f"GSU cache validation failed: {error}", file=sys.stderr)
+        print(f"Elapsed {time.monotonic() - started:.3f}s", file=sys.stderr)
         return 1
 
+    elapsed = round(time.monotonic() - started, 3)
     if args.json:
         print(
-            json.dumps({"kernels": [kernel.to_dict() for kernel in kernels]}, indent=2)
+            json.dumps({
+                "kernels": [kernel.to_dict() for kernel in kernels],
+                "elapsedSeconds": elapsed,
+            }, indent=2)
         )
     else:
         for kernel in kernels:
             print(format_kernel(kernel))
+        print(f"Validated {len(kernels)} cache kernels in {elapsed:.3f}s")
     return 0
 
 

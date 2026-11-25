@@ -19,6 +19,15 @@ ROOT_ENTRIES = frozenset({
     ".gitattributes", ".gitignore", ".gitmodules", "LICENSE", "README.md",
     "build.ps1", "build.sh", "config", "docs", "src", "third_party", "tools",
 })
+# Current metadata profiles are distinct from the retained historical weights.
+COMPOSED_CACHE_PROFILE_ROOT = Path("validation/snes_quake/profiles")
+COMPOSED_CACHE_OWNER_PROFILE = COMPOSED_CACHE_PROFILE_ROOT / "QuakeBSPComposedCacheOwnerProfileNotranswaterArea512PlayerFlyT792.bin"
+COMPOSED_CACHE_PRIORITY_PROFILE = COMPOSED_CACHE_PROFILE_ROOT / "QuakeBSPComposedCachePriorityProfileE1M3FlyT803.json"
+COMPOSED_CACHE_PROVENANCE = COMPOSED_CACHE_PROFILE_ROOT / "QuakeBSPComposedCacheE1M3FlyT803Provenance.json"
+COMPOSED_CACHE_PROFILE_INPUTS = (
+    COMPOSED_CACHE_OWNER_PROFILE, COMPOSED_CACHE_PRIORITY_PROFILE, COMPOSED_CACHE_PROVENANCE,
+)
+
 INPUT_RELOCATIONS = (
     (Path("config/snes_quake"), CONFIG),
     (Path("validation/snes_quake/profiles"), PROFILES),

@@ -1,0 +1,73 @@
+; The projector has finished every 10-byte screen record. Keep the entire
+; cyclic Y classifier resident and register-only; no per-vertex call/state.
+TEXTURE_Y_LAST = CONVEX_PREV_RIGHT
+TEXTURE_Y_STATE = CONVEX_PREV_UP
+.assert BSP_VIEW_CENTER_Y_Q7 + 6*2048 < 24576, error, "Y range became unsafe for signed deltas"
+
+TextureFinalizeProjectedY:
+        ; Three cyclic edge directions cannot alternate more than twice.
+        lm      R12, (CONVEX_SCREEN_COUNT)
+        move    R0, #4
+        to      R6
+        from    R12
+        sub     R0
+        bmi     TextureYClassifyMonotone
+        nop
+        ; Visit closing last->first, then every consecutive edge. A closed
+        ; nonflat direction sequence has even cyclic changes; linear>=3 is
+        ; equivalent to cyclic>2 regardless of its starting edge.
+        iwt     R10, #TEXTURE_SCREEN+2
+        lm      R0, (CONVEX_SCREEN_END_PTR)
+        to      R9
+        sub     #8
+        movew   R3, (R9)
+        move    R4, #0                  ; Previous nonzero edge delta.
+        move    R5, #3                  ; Third sign change proves nonmonotonicity.
+TextureYClassifyLoop:
+        movew   R1, (R10)
+        to      R2
+        from    R1
+        sub     R3
+        move    R3, R1
+        beq     TextureYClassifyFlatEdge
+        nop
+        from    R4
+        xor     R2
+        bpl     TextureYRememberDirection
+        nop
+        moves   R4, R4
+        beq     TextureYRememberDirection
+        nop
+        dec     R5
+        beq     TextureYClassifyNonmonotone
+        nop
+TextureYRememberDirection:
+        move    R4, R2
+TextureYClassifyNext:
+        with    R10
+        add     #10
+        dec     R12
+        bne     TextureYClassifyLoop
+        nop
+TextureYClassifyMonotone:
+        move    R0, #0
+        sm      (CONVEX_PLANE), R0
+        ret
+        nop
+TextureYClassifyFlatEdge:
+        ; A quad with a horizontal edge has at most three nonzero directions.
+        moves   R6, R6
+        beq     TextureYClassifyMonotone
+        nop
+        bra     TextureYClassifyNext
+        nop
+TextureYClassifyNonmonotone:
+        ; Preserve the existing ROM3 owner predicate and cold walker dispatch.
+        move    R4, #4
+        sm      (TEXTURE_Y_STATE), R4
+        sm      (CONVEX_CLIP_RETURN), R11
+        move    R12, #BSP_GSU_ROM3_BANK
+        iwt     R0, #.loword(TextureFinalizeProjectedYROM)
+        from    R0
+        ljmp    R12
+        nop

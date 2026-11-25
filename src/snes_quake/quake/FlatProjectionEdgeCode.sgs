@@ -1,0 +1,4 @@
+.ifdef PLAYABLE_FLAT_BRUSH_DEPTH
+        .include "FlatBrushSpanPatch.sgs"
+.endif
+        .include "FlatWorldEdgeProjection.sgs"

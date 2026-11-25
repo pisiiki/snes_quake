@@ -1,9 +1,13 @@
 ; Technique-4 sampling keeps every square power-of-two miptex on one direct
-; hot path. The cold per-face selector publishes code pointers only; it never
-; mutates live GSU program RAM.
+; hot path. The cold selector may install the material-owned mixed sampler
+; while executing from ROM, then publishes its private routes.
+;
+; Wrap backedges retain their entry checks: ADD supplies the negative-loop
+; sign, and a successful SUB leaves R0 equal to the stored coordinate. Reuse
+; those results without repeating MOVES or MOVE on later corrections.
 
 .macro T4_PUBLISH_LIGHTMAP_ROUTES
-        iwt     R1, #TextureLightmapBilinearSpanLoop
+        iwt     R1, #T4TextureLightmapBilinearSpanLoop
         sm      (TEXTURE_STEP_T), R1
         iwt     R1, #TextureLightmapConstantSpanLoop
         sm      (TEXTURE_REM_S), R1
@@ -26,13 +30,14 @@ T4TextureLightmapSelectBlockRoutine:
         nop
         ; Four out of five prepared blocks are proven interior. Publish their
         ; direct route without indexing the six-entry general dispatch table.
-        move    R0, #5
         ; Mixed-axis and square power-of-two faces publish their respective
         ; interior continuations in this slot. Load the face-specific route
         ; without rebuilding its table address per block.
         lm      R13, (TEXTURE_ERR_T)
         bra     T4TextureLightmapBlockRoutineReady
         nop
+        ; The direct route never consumes the old table index in R0.
+        .res 2, $01                    ; Keep all following overlay entries.
 T4TextureLightmapRouteIndexReady:
         GSU_ABSOLUTE_GOTO T4TextureLightmapRouteIndexReadyCold
   .repeat $1C - (* - T4TextureLightmapSelectBlockRoutine)
@@ -105,24 +110,31 @@ T4TextureSamplePowerOfTwoS:
         nop
   .endrepeat
 T4TextureSampleAbsoluteSDone:
+        ; The extent is invariant throughout the signed correction loops.
+        lm      R1, (TEXTURE_HEIGHT_Q4)
+T4TextureSampleAbsoluteTNegative:
         moves   R6, R6
         bpl     T4TextureSampleAbsoluteTHigh
         nop
-        lm      R1, (TEXTURE_HEIGHT_Q4)
+T4TextureSampleAbsoluteTAdd:
         with    R6
         add     R1
-        bra     T4TextureSampleAbsoluteSDone
+        bmi     T4TextureSampleAbsoluteTAdd
         nop
 T4TextureSampleAbsoluteTHigh:
-        lm      R1, (TEXTURE_HEIGHT_Q4)
         move    R0, R6
+T4TextureSampleAbsoluteTSubtract:
         with    R0
         sub     R1
         bmi     T4TextureSampleAbsoluteTDone
         nop
         move    R6, R0
-        bra     T4TextureSampleAbsoluteTHigh
+        bra     T4TextureSampleAbsoluteTSubtract
         nop
+        ; Neither branch falls through; retain the established done entry.
+  .repeat 3
+        nop
+  .endrepeat
 T4TextureSampleAbsoluteTDone:
         bra     TextureSampleAbsoluteCoordinatesReady
         nop
@@ -139,22 +151,53 @@ T4TextureSample:
 
 .segment "GSU_T4_SAMPLE_CODE"
 
+; The textured mode does not enter the retired state-loading T2 sampler or
+; the T7 interior continuation. Keep its unchanged bilinear pixel loop here
+; in the already resident lightmap window. Restoring the full overlay returns
+; both legacy entries before either other mode can run.
+T4TextureLightmapBilinearSpanLoop:
+        move    R8, R5
+        move    R9, R6
+        jal     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        move    R12, R0
+        move    R3, R8
+        iwt     R1, #$00F0
+        GSU_ABSOLUTE_GOTO LightmapSampleBlockBilinearCached
+.assert * - T4TextureLightmapBilinearSpanLoop <= $15, error, "Cached T4 bilinear loop exceeds retired sampler entries"
+        .res $15 - (* - T4TextureLightmapBilinearSpanLoop), $01
+
 T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters:
         ; Keep the established general row router byte-for-byte: moving the
         ; uncommon-width continuation out of this cache window costs more on
         ; those faces than fixing the dominant width saves.
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+.else
         lm      R1, (TEXTURE_SPAN_SHADE_Q8)
-        with    R5
+.endif
+        from    R5
         and     R1
-  .repeat 4
-        with    R5
+        ; Match the ordinary sampler's implicit scratch shifts and anchors.
+  .repeat 3
         lsr
   .endrepeat
+        to      R5
+        lsr
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+.endif
         with    R6
         and     R1
         lm      R12, (TEXTURE_STEP_SHADE_Q8)
         jmp     R12
         with    R6
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        ; The second mask load occupies the old three-byte padding.
+.else
+  .repeat 3
+        nop
+  .endrepeat
+.endif
 T4TextureSamplePowerOfTwoRowShift3:
         add     R6
         with    R6
@@ -170,10 +213,9 @@ T4TextureSamplePowerOfTwoRowReady:
         with    R4
         add     R6
         GSU_SET_ROM_BUFFER_ADDRESS R4
-        to      R0
+        jmp     R11
         getb
-        ret
-        nop
+        .res 3, $01
         nop
 
 .assert T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters = TextureSampleAbsolutePowerOfTwoSingleBankRegisters, error, "Technique-4 sampler moved away from the general sampler entry"
@@ -183,6 +225,17 @@ T4TextureSamplePowerOfTwoRowReady:
 .assert T4TextureSamplePowerOfTwoRowReady = TextureSamplePowerOfTwoRowReady, error, "Technique-4 width-16 row route moved away from the general route"
 .assert * - T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters <= GSU_T4_SAMPLE_CODE_CAPACITY, error, "Technique-4 sampler exceeds the general power-of-two sampler window"
 .assert * <= TextureLightmapInteriorSpanLoop, error, "Technique-4 sampler overlaps the lightmap interior loop"
+
+T4TextureLightmapInteriorSpanLoop:
+        move    R8, R5
+        move    R9, R6
+        jal     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        move    R12, R0
+        GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect, shared_delay
+        with    R8
+.assert T4TextureLightmapInteriorSpanLoop = TextureLightmapInteriorSpanLoop, error, "T4 interior continuation moved"
+.assert * - T4TextureLightmapBilinearSpanLoop = GSU_T4_SAMPLE_CODE_CAPACITY, error, "T4 material payload changed"
+.assert * = TextureBuildCoordinateLoop - 1, error, "T4 material payload overlaps DDA prefix"
 
 .segment "GSU_T4_SAMPLE_SELECT_PATCH"
 
@@ -196,65 +249,74 @@ T4TextureSelectPowerOfTwoStatePatch:
 .segment "GSU_T4_SAMPLE_AUX_CODE"
 
 T4TextureSelectPowerOfTwoStateReady:
-        iwt     R1, #T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters
-        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        GSU_ABSOLUTE_GOTO T4RestorePower2SamplerThunk
+        .res 2, $01
+T4PublishPowerOfTwoStateReady:
         T4_PUBLISH_LIGHTMAP_ROUTES
         ret
         nop
 
 T4TextureSampleWrapSGeneric:
+        lm      R1, (TEXTURE_WIDTH_Q4)
+        ; Unsigned S below the positive extent is already wrapped. This
+        ; subtraction also produces the ordinary failed trial in R0.
+        from    R5
+        sub     R1
+        bcc     T4TextureSampleWrapSDone
+        nop
+        ; Eight periods fit in a signed trial for extents below 4096.
+        ; Leave other widths to the original one-period correction.
+        iwt     R4, #4096
+        from    R1
+        cmp     R4
+        bcs     T4TextureSampleWrapSFine
+        nop
+        from    R1
+        add     R1
+        add     R0
+        to      R4
+        add     R0
+        moves   R5, R5
+        bpl     T4TextureSampleWrapSCoarseSubtract
+        nop
+T4TextureSampleWrapSCoarseAdd:
+        with    R5
+        add     R4
+        bmi     T4TextureSampleWrapSCoarseAdd
+        nop
+        with    R5
+        sub     R4
+T4TextureSampleWrapSFine:
         moves   R5, R5
         bpl     T4TextureSampleWrapSHigh
         nop
-        lm      R1, (TEXTURE_WIDTH_Q4)
+T4TextureSampleWrapSAdd:
         with    R5
         add     R1
-        bra     T4TextureSampleWrapSGeneric
+        bmi     T4TextureSampleWrapSAdd
         nop
 T4TextureSampleWrapSHigh:
-        lm      R1, (TEXTURE_WIDTH_Q4)
         move    R0, R5
-        with    R0
+T4TextureSampleWrapSSubtract:
         sub     R1
         bmi     T4TextureSampleWrapSDone
         nop
         move    R5, R0
-        bra     T4TextureSampleWrapSHigh
+        bra     T4TextureSampleWrapSSubtract
         nop
 T4TextureSampleWrapSDone:
         GSU_ABSOLUTE_GOTO T4TextureSampleAbsoluteSDone
-
-T4TextureLightmapRouteIndexReadyCold:
-        with    R0
-        add     R0
-        iwt     R10, #TEXTURE_STEP_S
-        with    R10
-        add     R0
-        movew   R13, (R10)
-        GSU_ABSOLUTE_GOTO T4TextureLightmapBlockRoutineReady
-
-; Only rows whose polygon walkers cross enter this cold direct-fetch path.
-; Swap the four adjacent {left,right} words in place, then rejoin the still-
-; resident stage helper to publish the next record address.
-T4TextureStageLightmapReverseCold:
-        dec     R10
-        dec     R10
-        move    R12, #4
-T4TextureStageLightmapSwapLoop:
-        movew   R0, (R10)
-        inc     R10
-        inc     R10
-        movew   R1, (R10)
-        movew   (R10), R0
-        dec     R10
-        dec     R10
-        movew   (R10), R1
-        with    R10
-        add     #4
-        dec     R12
-        bne     T4TextureStageLightmapSwapLoop
+T4TextureSampleWrapSCoarseSubtract:
+        with    R5
+        sub     R4
+        bpl     T4TextureSampleWrapSCoarseSubtract
         nop
-        GSU_ABSOLUTE_GOTO T4TextureStageLightmapAdvance
+        with    R5
+        add     R4
+        bra     T4TextureSampleWrapSHigh
+        nop
+        .res $46 - (* - T4TextureSampleWrapSGeneric), $01
+T4TextureSampleWrapSEnd:
 
 ; Face admission proves S is power-of-two and the ordinary texture fits
 ; one ROM bank. Keep exact signed T correction while retaining the caller's
@@ -270,18 +332,20 @@ T4TextureSampleMixedTNegative:
         moves   R6, R6
         bpl     T4TextureSampleMixedTHigh
         nop
+T4TextureSampleMixedTAdd:
         with    R6
         add     R1
-        bra     T4TextureSampleMixedTNegative
+        bmi     T4TextureSampleMixedTAdd
         nop
 T4TextureSampleMixedTHigh:
         move    R0, R6
+T4TextureSampleMixedTSubtract:
         with    R0
         sub     R1
         bmi     T4TextureSampleMixedTDone
         nop
         move    R6, R0
-        bra     T4TextureSampleMixedTHigh
+        bra     T4TextureSampleMixedTSubtract
         nop
 T4TextureSampleMixedTDone:
         ; Only the final shift writes the caller's coordinate register.
@@ -305,9 +369,9 @@ T4TextureSampleMixedTDone:
         lm      R4, (TEXTURE_ROM_ADDRESS)
         add     R4
         GSU_SET_ROM_BUFFER_ADDRESS R0
-        BSP_ROM_LOAD_BYTE R0
-        ret
-        nop
+        jmp     R11
+        getb
+        .res 4, $01
   .repeat 3
         nop
   .endrepeat
@@ -391,3 +455,7 @@ T4LightmapChunkAbortReturn:
 .assert .loword(T4TextureSelectPowerOfTwoStateReady) = GSU_T4_SAMPLE_AUX_OFFSET, error, "Technique-4 sampler auxiliaries moved away from their overlay window"
 .assert * - T4TextureSelectPowerOfTwoStateReady <= GSU_T4_SAMPLE_AUX_CAPACITY, error, "Technique-4 sampler auxiliaries exceed the projective-albedo span window"
 .assert * <= TextureDivideQ12EdgeCached, error, "Technique-4 sampler auxiliaries overlap shared divide code"
+
+; This code pointer names the currently owned 76-byte sampler and interior slot.
+T4TextureSampleMixedResident = T4TextureLightmapBilinearSpanLoop
+T4MixedResidentInteriorSpanLoop = TextureLightmapInteriorSpanLoop

@@ -14,7 +14,9 @@ from pathlib import Path
 from snes_tooling.shared.generated_outputs import GeneratedOutputError, OwnedFileFamily, sync_generated_outputs
 
 
-COMMON = {"libSFX.i", "MemoryMap.i", "GSU_Cache.i", "GSU_Primitives.i", "quake/WarpFocalPatch.sgs"}
+COMMON = {"libSFX.i", "MemoryMap.i", "GSU_Cache.i", "GSU_Primitives.i",
+          "Data/Fly3x/UniformBrushMaterials.i", "quake/PlayableSpriteStreamCommon.sgs",
+          "Data/PlayableSpriteBudget.i"}
 ROOTS = ("quake.sgs", "quake/FramePipeline.s")
 INCLUDE = re.compile(r'^\s*\.include\s+"([^"]+)"', re.MULTILINE)
 SEGMENT = re.compile(r'^(\s*\.segment\s+)"([^"]+)"', re.MULTILINE)
@@ -87,6 +89,8 @@ def generate(example: Path, *, check: bool = False) -> dict[str, object]:
     # These override libSFX's instruction spellings in each root. Their
     # replacement macro bodies have distinct names in the generated copy.
     names.difference_update({"lm", "sm"})
+    # Both RAM images use the same ROM packet filter with their own restart PC.
+    names.discard("PacketCapacityFilterROM")
     reserved = names & {"nop", "bra", "beq", "bne", "bcc", "bcs", "bpl", "bmi", "ret", "jmp", "jal"}
     if reserved:
         raise ValueError("instruction parsed as a declaration: " + ", ".join(sorted(reserved)))
@@ -112,8 +116,8 @@ def generate(example: Path, *, check: bool = False) -> dict[str, object]:
         expected.add(target)
         # The original root owns the final include of its generated copy.
         source = re.sub(
-            r'^\s*\.include\s+"Data/Fly3x/[^"\n]+"[^\n]*\n?',
-            "",
+            r'^\s*\.include\s+"(Data/Fly3x/[^"\n]+)"[^\n]*\n?',
+            lambda match: match[0] if match[1] in COMMON else '',
             source,
             flags=re.MULTILINE,
         )

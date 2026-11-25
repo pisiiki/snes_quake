@@ -1,0 +1,6 @@
+.include "quake/ViewDotArithmetic.i"
+PacketProjectDepthRight:
+        BSP_VIEW_DOT_RIGHT CLIP_RIGHT
+        sm      (PACKET_VIEW_RIGHT), R0
+        GSU_ABSOLUTE_GOTO PacketProjectDepthUp
+.assert * - PacketProjectDepthRight <= $2C, error, "Selector right dot exceeds retired transform padding"

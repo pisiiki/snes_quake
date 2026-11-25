@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 
 TOOLS = Workspace.discover().path('tools', 'snes_tooling', 'quake')
-EXAMPLE = Workspace.discover().root / "src/snes_quake"
+EXAMPLE = Workspace.discover().quake_example
 SHARED = Workspace.discover().shared_tools
 
 
@@ -31,8 +31,10 @@ from snes_tooling.quake.quake_rom_config import DEFAULT_CONFIG, configured_sky  
 
 
 DEFAULT_DATA = EXAMPLE / "Data"
-DEFAULT_CORPUS = Workspace.discover().root / "config/profiles/QuakeBSPSkyEndpointCorpus.json"
+DEFAULT_CORPUS = Workspace.discover().root / "validation/snes_quake/profiles/QuakeBSPSkyEndpointCorpus.json"
 PHASE_PATH = Path("QuakeBSPSkyPhases.bin")
+FLOAT_PHASE_PATH = Path("QuakeBSPSkyFloatPhases.bin")
+FLOAT_ASSEMBLY_PATH = Path("QuakeBSPSkyFloatPhases.s")
 CONSTANTS_PATH = Path("QuakeBSPSkyAssets.i")
 ASSEMBLY_PATH = Path("QuakeBSPSkyAssets.s")
 METADATA_PATH = Path("QuakeBSPSkyAssets.json")
@@ -132,11 +134,9 @@ def _hex(value: int, width: int) -> str:
 def constants_text(
     report: Mapping[str, Any],
     phases: bytes,
-    lut: bytes,
     phase_address: int,
     *,
     enabled: bool = True,
-    marker_hash_shift: int = MARKER_HASH_SHIFT,
 ) -> bytes:
     assignments = report["faceMarkers"]["assignments"]
     gate = report["arithmeticGate"]
@@ -152,31 +152,13 @@ def constants_text(
         f"BSP_WORLD_SKY_TEXTURE_ID = {report['skyTexture']['packedTextureId'] if enabled else 0xFF}",
         f"BSP_WORLD_SKY_FACE_COUNT = {len(assignments)}",
     ]
-    _require(
-        len({int(record["marker"]) for record in assignments}) <= MAX_SKY_FACE_MARKERS,
-        "sky marker palette exceeds the runtime marker capacity",
-    )
-    for ordinal in range(MAX_SKY_FACE_MARKERS):
-        if ordinal < len(assignments):
-            record = assignments[ordinal]
-            face = int(record["face"])
-            marker = int(record["marker"])
-            slot = (face ^ (face >> marker_hash_shift)) & (len(lut) - 1)
-        else:
-            face = -1
-            marker = 0x100
-            slot = -1
-        lines.extend(
-            (
-                f"BSP_WORLD_SKY_FACE_{ordinal} = {face}",
-                f"BSP_WORLD_SKY_MARKER_{ordinal} = {marker}",
-                f"BSP_WORLD_SKY_MARKER_SLOT_{ordinal} = {slot}",
-            )
-        )
+    tokens = report["rowTokens"]
+    sky.row_token_values(tokens)
+    lines.extend(f"BSP_SKY_TOKEN_{role} = {tokens['roles'][role]}" for role in sky.SKY_ROW_TOKEN_ROLES)
     lines.extend(
         (
-            f"BSP_SKY_MARKER_HASH_SHIFT = {marker_hash_shift}",
-            f"BSP_SKY_MARKER_LUT_BYTES = {len(lut)}",
+            "BSP_SKY_ROW_TOKEN_PROTOCOL = 1",
+            f"BSP_SKY_TOKEN_COUNT = {tokens['runtimeTokenCount']}",
             f"BSP_SKY_SAFE_MARKER_COUNT = {report['faceMarkers']['safeIndexCount']}",
             "",
             f"BSP_SKY_SOURCE_WIDTH = {sky.SKY_SOURCE_WIDTH}",
@@ -190,6 +172,8 @@ def constants_text(
             f"BSP_SKY_PHASE_RECORD_BYTES = {sky.SKY_PHASE_RECORD_BYTES}",
             f"BSP_SKY_PHASE_POSE_COUNT = {len(phases) // sky.SKY_PHASE_RECORD_BYTES}",
             f"BSP_SKY_PHASE_BYTES = {len(phases)}",
+            "BSP_SKY_FLOAT_PHASE_RECORD_BYTES = 4",
+            f"BSP_SKY_FLOAT_PHASE_BYTES = {len(phases) // sky.SKY_PHASE_RECORD_BYTES * 4}",
             f"BSP_SKY_PHASE_GSU_ROM_BANK = {_hex(PHASE_GSU_ROM_BANK, 2)}",
             f"BSP_SKY_PHASE_GSU_ROM_ADDRESS = {_hex(phase_address, 4)}",
             f"BSP_SKY_PHASE_GSU_ROM_END_ADDRESS = {_hex(phase_end, 4)}",
@@ -231,14 +215,6 @@ def constants_text(
             "BSP_SKY_RECIPROCAL_MIN = 175835",
             "BSP_SKY_RECIPROCAL_MAX = 226039",
             "",
-            ".macro BSP_SKY_EMIT_FACE_MARKER_LUT",
-            *(
-                "        .byte "
-                + ", ".join(_hex(value, 2) for value in lut[offset : offset + 8])
-                for offset in range(0, len(lut), 8)
-            ),
-            ".endmacro",
-            "",
             ".endif",
             "",
         )
@@ -262,6 +238,21 @@ def assembly_text(phases: bytes, phase_address: int) -> bytes:
     ).encode("ascii")
 
 
+def float_phase_assembly_text() -> bytes:
+    return (
+        "; Generated exact binary32 companion; legacy timing prefixes stay fixed.\n"
+        '.segment "BSP_SKY_FLOAT_PHASES"\n'
+        'QuakeBSPSkyFloatPhases:\n'
+        '        .incbin "Data/QuakeBSPSkyFloatPhases.bin"\n'
+        'QuakeBSPSkyFloatPhasesEnd:\n'
+        '.assert QuakeBSPSkyFloatPhasesEnd-QuakeBSPSkyFloatPhases = BSP_SKY_FLOAT_PHASE_BYTES, lderror, "Float phase size differs"\n'
+        '.assert ^QuakeBSPSkyFloatPhases = $F8, lderror, "Float phase table left CPU timing mirror"\n'
+        '.if BSP_SKY_FLOAT_PHASE_BYTES\n'
+        '.assert ^(QuakeBSPSkyFloatPhasesEnd-1) = $F8, lderror, "Float phases overflow CPU timing mirror"\n'
+        '.endif\n'
+    ).encode("ascii")
+
+
 def outputs_for(
     data_dir: Path,
     endpoint_corpus: Path,
@@ -274,7 +265,7 @@ def outputs_for(
         )
     except asset_audit.AuditError as error:
         raise GenerationError(
-            "configured map cannot satisfy the sky marker contract"
+            f"configured map cannot satisfy the sky marker contract: {error}"
         ) from error
     _require(
         audit["arithmeticGate"]["status"] == "passed",
@@ -285,8 +276,11 @@ def outputs_for(
         float(phase["firstServerTime"]),
         int(phase["sourcePoseCount"]),
         int(phase["sourceRateHz"]),
-    )
+    ) if phase["sourcePoseCount"] else b""
     _require(_sha256(phases) == phase["candidateSha256"], "audited sky phases changed")
+    float_phases = sky.build_demo_float_phase_asset(float(phase["firstServerTime"]),
+        int(phase["sourcePoseCount"]), int(phase["sourceRateHz"])) if phase["sourcePoseCount"] else b""
+    float_assembly = float_phase_assembly_text()
     timing = (data_dir / TIMING_PATH).read_bytes()
     phase_address = PHASE_BANK_ADDRESS
     _require(
@@ -298,33 +292,20 @@ def outputs_for(
         "sky phase asset crosses GSU ROM bank $03",
     )
     assignments = audit["faceMarkers"]["assignments"] if enabled else []
-    if enabled:
-        hash_shift, lut_bytes = marker_hash_layout(assignments)
-        lut = marker_lut(assignments, hash_shift=hash_shift, lut_bytes=lut_bytes)
-    else:
-        hash_shift = MARKER_HASH_SHIFT
-        lut = bytes(MARKER_LUT_BYTES)
-    constants = constants_text(
-        audit,
-        phases,
-        lut,
-        phase_address,
-        enabled=enabled,
-        marker_hash_shift=hash_shift,
-    )
+    constants = constants_text(audit, phases, phase_address, enabled=enabled)
     assembly = assembly_text(phases, phase_address)
     metadata = {
         "schema": "quake-bsp-snes-sky-assets-v1",
         "status": "generated",
         "enabled": enabled,
         "texture": audit["skyTexture"],
+        "rowTokens": audit["rowTokens"],
         "faceMarkers": {
             **audit["faceMarkers"],
             "assignments": assignments,
-            "runtimeMarkerCount": len({item["marker"] for item in assignments}),
-            "hashShift": hash_shift,
-            "lutBytes": len(lut),
-            "lutHex": lut.hex(),
+            "legacyAllocationCount": len({item["marker"] for item in assignments}),
+            "runtimeMarkerCount": audit["rowTokens"]["runtimeTokenCount"],
+            "runtimeFaceLutRequired": False,
         },
         "phase": {
             "encoding": phase["encoding"],
@@ -335,6 +316,8 @@ def outputs_for(
             "gsuRomBank": PHASE_GSU_ROM_BANK,
             "gsuRomAddress": phase_address,
             "gsuRomEndAddress": phase_address + len(phases),
+            "binary32": {"recordBytes": 4, "bytes": len(float_phases),
+                         "sha256": _sha256(float_phases), "encoding": "little-endian complete binary32 projected phase"},
             "flySurfaceTime": 0.0,
             "flyPhaseQ16": 0,
             "flyClock": {
@@ -363,12 +346,15 @@ def outputs_for(
         "demoVariant": audit.get("demoVariant", {"enabled": False}),
         "resourceImpact": {
             "phaseBytes": len(phases),
+            "additionalFloatPhaseBytes": len(float_phases),
             "duplicateTextureBytes": 0,
             "textureDirectoryByteDelta": 0,
-            "markerLutBytes": len(lut),
+            "markerLutBytes": 0,
         },
         "outputs": {
             PHASE_PATH.name: {"bytes": len(phases), "sha256": _sha256(phases)},
+            FLOAT_PHASE_PATH.name: {"bytes": len(float_phases), "sha256": _sha256(float_phases)},
+            FLOAT_ASSEMBLY_PATH.name: {"bytes": len(float_assembly), "sha256": _sha256(float_assembly)},
             CONSTANTS_PATH.name: {
                 "bytes": len(constants),
                 "sha256": _sha256(constants),
@@ -382,6 +368,8 @@ def outputs_for(
     )
     return {
         PHASE_PATH: phases,
+        FLOAT_PHASE_PATH: float_phases,
+        FLOAT_ASSEMBLY_PATH: float_assembly,
         CONSTANTS_PATH: constants,
         ASSEMBLY_PATH: assembly,
         METADATA_PATH: metadata_bytes,

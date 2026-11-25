@@ -130,14 +130,15 @@ LightmapSampleAdjustedHorizontalReady:
         .assert ((TexturePrimeLightmapCache + 1) & $FFFFF0) = ((LightmapSampleHorizontalReady + 1) & $FFFFF0), lderror, "Lightmap prime must share the sampler cache anchor"
         lm      R4, (LIGHTMAP_ADJUSTED_ADDRESS)
 LightmapSampleBaseReady:
+        ; LDB replaces the full register with an unsigned byte (Nintendo Book II,
+        ; 9.45/page2-9-64); it never needs a prior high-byte clear.
+
         with    R4
         add     R6
-        move    R8, #0
         moveb   R8, (R4)
         moves   R3, R3
         beq     LightmapSampleUpperRightSame
         inc     R4
-        move    R9, #0
         moveb   R9, (R4)
         bra     LightmapSampleUpperReady
         dec     R4
@@ -151,12 +152,10 @@ LightmapSampleUpperReady:
         beq     LightmapSampleLowerSame
         with    R4
         add     R1
-        move    R6, #0
         moveb   R6, (R4)
         moves   R3, R3
         beq     LightmapSampleLowerRightSame
         inc     R4
-        move    R11, #0
         moveb   R11, (R4)
         bra     LightmapSampleLowerReady
         nop
@@ -164,41 +163,61 @@ LightmapSampleLowerRightSame:
         move    R11, R6
         bra     LightmapSampleLowerReady
         nop
+.if .defined(PLAYABLE_LIGHTMAP_ZERO_T) && (BSP_RENDER_SCALE = 2)
+LightmapSampleLowerSame = *
+        GSU_ABSOLUTE_GOTO LightmapSampleHorizontalOnly
+.else
 LightmapSampleLowerSame:
         move    R6, R8
         move    R11, R9
+.endif
 LightmapSampleLowerReady:
-        ; Keep the Q4 fractions as Q8 weights: F=f*16.  For F!=0, -F's
-        ; unsigned low byte is exactly 256-F.  HIB then performs the same
-        ; rounded /256 as the former weighted /16 interpolation.
+.if (.defined(QUAKE_MSU_WORLD_KEEP) || .defined(PLAYABLE_SIGNED_LIGHTMAP_INTERPOLATION)) && (BSP_RENDER_SCALE = 2)
+.include "quake/MsuLightmapSixBit.sgs"
+.else
+        ; Exact rounded difference interpolation. SUB supplies the signed
+        ; difference; ALT1 survives BPL and makes its one-byte MULT delay
+        ; unsigned. HIB's negative quotient wraps by 256, removed by LOB.
+        ; The old S=0 shortcut is unnecessary: the difference form is exact
+        ; at zero and keeps both horizontal kernels in their pinned slot.
         iwt     R2, #128
-        moves   R3, R3
-        beq     LightmapSampleHorizontalZero
-        nop
-        move    R1, #0
-        with    R1
+LightmapDifferenceUpperEntry:
+        from    R9
+        sub     R8
+        alt1
+        bpl     LightmapDifferenceUpperPositive
+        mult    R3
+        add     R2
+        hib
         sub     R3
-        move    R4, R8
-        with    R4
-        umult   R1
-        move    R0, R9
-        umult   R3
-        with    R4
-        add     R0
-        with    R4
+        bra     LightmapDifferenceUpperReady
+        add     R8
+LightmapDifferenceUpperPositive:
         add     R2
-        with    R4
         hib
-        with    R6
-        umult   R1
-        move    R0, R11
-        umult   R3
-        with    R6
-        add     R0
-        with    R6
+        add     R8
+LightmapDifferenceUpperReady:
+        to      R4
+        lob
+LightmapDifferenceLowerEntry:
+        from    R11
+        sub     R6
+        alt1
+        bpl     LightmapDifferenceLowerPositive
+        mult    R3
         add     R2
-        with    R6
         hib
+        sub     R3
+        bra     LightmapDifferenceLowerReady
+        add     R6
+LightmapDifferenceLowerPositive:
+        add     R2
+        hib
+        add     R6
+LightmapDifferenceLowerReady:
+        to      R6
+        lob
+LightmapDifferenceHorizontalDone:
         bra     LightmapSampleHorizontalInterpolated
         with    R5
 LightmapSampleHorizontalZero:
@@ -208,20 +227,25 @@ LightmapSampleHorizontalInterpolated:
         from    R5
         beq     LightmapSampleMap
         nop
-        move    R1, #0
-        with    R1
-        sub     R5
-        move    R0, R4
-        umult   R1
-        move    R4, R6
-        with    R4
-        umult   R5
-        with    R4
-        add     R0
-        with    R4
+LightmapDifferenceVerticalEntry:
+        from    R6
+        sub     R4
+        alt1
+        bpl     LightmapDifferenceVerticalPositive
+        mult    R5
         add     R2
-        with    R4
         hib
+        sub     R5
+        bra     LightmapDifferenceVerticalReady
+        add     R4
+LightmapDifferenceVerticalPositive:
+        add     R2
+        hib
+        add     R4
+LightmapDifferenceVerticalReady:
+        to      R4
+        lob
+.endif
 LightmapSampleMap:
         bra     LightmapSampleDone
         with    R7
@@ -233,3 +257,35 @@ LightmapSampleDone:
         ret
         nop
         nop
+
+.if .defined(PLAYABLE_LIGHTMAP_ZERO_T) && (BSP_RENDER_SCALE = 2)
+.assert .defined(PLAYABLE_SIGNED_LIGHTMAP_INTERPOLATION), error, "Horizontal-only interpolation needs the signed sampler window"
+; A zero T fraction consumes only the upper row. The shared one-axis
+; entry installs UL and halves the still-unscaled S fraction in R5.
+LightmapSampleHorizontalOnly:
+        move    R6, R9
+        move    R5, R3
+        iwt     R2, #128
+        bra     LightmapSampleHorizontalZero
+        nop
+.endif
+
+; Keep the independently reachable technique-7 mapper at its established PC.
+        .res $81 - (* - LightmapSampleBaseReady), $01
+
+TextureUntexturedLightmapSampleReady:
+.ifdef PLAYABLE_TEXTURELESS_WHITE
+        ; The general mapper is patched for the same protected ramp.
+        bra     TextureLightmapSampleReady
+        nop
+.else
+        ; Encoded page $C0..$FF maps to standalone neutral index $3F..$00.
+        from    R4
+        not
+        bra     TextureLightmapSkyPlotReady
+        nop
+.endif
+
+; Keep the following shader/cache entries pinned. All sampler exits return.
+.assert * - LightmapSampleBaseReady <= $89, error, "Lightmap sample tail exceeds its pinned slot"
+        .res $89 - (* - LightmapSampleBaseReady), $01

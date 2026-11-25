@@ -1,0 +1,590 @@
+; Unlit albedo geometry retains the lightmap address slot for its constant color.
+.pushseg
+.segment "GSU_FACE_COLOR_CODE"
+.assert BSP_FRAME_STAGE_BYTES <= $3400, error, "Baked face code overlaps staged frame tiles"
+TEXTURE_BAKED_COLOR = LIGHTMAP_ROM_ADDRESS
+
+; X2 presents each full eight-pixel block as a permutation of itself.
+.if .defined(PLAYABLE_WEAPON_OBJ) && (BSP_RENDER_SCALE = 2)
+BAKED_TILE_SPANS = 1
+.elseif (PLAYABLE_MAP_ID <> PLAYABLE_E1M1_MAP_ID) && ((PLAYABLE_MAP_ID <> PLAYABLE_E1M2_MAP_ID) || (BSP_RENDER_SCALE = 2))
+BAKED_TILE_SPANS = 1
+.endif
+
+.macro BakedTestTechnique
+        iwt     R10, #COMMAND+5
+        move    R0, #0
+        moveb   R0, (R10)
+        sub     #3
+.endmacro
+
+.macro BakedResolveColor
+  .ifdef PLAYABLE_SWITCHED_LIGHTS
+        ; In Flat the Full renderer's 512-byte grid scratch is idle.
+        with    R1
+        add     R0
+        moveb   R0, (R1)
+  .endif
+.endmacro
+
+BakedRenderWorldFace:
+        BakedTestTechnique
+        bne     BakedRenderTexturedWorldFace
+        nop
+BakedRenderFlatWorldFace:
+        lm      R0, (PACKET_SOURCE_INDEX)
+        add     R0
+        move    R1, R0
+        add     R0
+        add     R1
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS+4
+        with    R4
+        add     R0
+        move    R0, #WORLD_FACES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+  .ifdef PLAYABLE_SWITCHED_LIGHTS
+        lm      R1, (PACKET_SOURCE_INDEX)
+        iwt     R4, #2048
+        from    R1
+        cmp     R4
+        iwt     R1, #GSU_LIGHTMAP_CACHE_OFFSET
+        bcc     @WorldPage
+        nop
+        iwt     R1, #GSU_LIGHTMAP_CACHE_OFFSET+256
+@WorldPage:
+        iwt     R4, #BakedTransformWorldFace
+BakedSetSwitchedColor:
+  .endif
+        BakedResolveColor
+        sm      (TEXTURE_BAKED_COLOR), R0
+        iwt     R1, #BakedFaceSampler
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+  .ifdef PLAYABLE_SWITCHED_LIGHTS
+        move    R15, R4
+        nop
+  .else
+        GSU_ABSOLUTE_GOTO BakedTransformWorldFace
+  .endif
+BakedRenderTexturedWorldFace:
+        GSU_ABSOLUTE_GOTO TextureRenderConvexFace
+
+; Coverage uses the same view records and clipper. Baked spans need no UVs.
+BakedTransformWorldFace:
+.ifdef BAKED_FACE_CLIP_OUTCODES
+        sm      (TEXTURE_FACE_RETURN), R11
+  .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        GSU_ABSOLUTE_GOTO BakedLoadE1M1FlatContour
+  .elseif .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID <> PLAYABLE_E1M1_MAP_ID)
+        GSU_ABSOLUTE_GOTO BakedLoadFlatContour
+; The compact clipper and texture projector use the same Q6 geometry.
+BakedClipFlatContour:
+        iwt     R10, #TEXTURE_VIEW_A
+        iwt     R8, #TEXTURE_VIEW_B
+        sm      (CONVEX_INPUT_PTR), R10
+        sm      (CONVEX_OUTPUT_PTR), R8
+        lm      R12, (CONVEX_COUNT)
+        moves   R7, R7
+        bne     @Touched
+        nop
+        GSU_ABSOLUTE_GOTO BakedExpandFlatContour
+@Touched:
+        ibt     R0, #$FF
+@Find:
+        with    R7
+        lsr
+        bcc     @Find
+        inc     R0
+        sm      (CONVEX_PLANE), R0
+        GSU_ABSOLUTE_GOTO BakedClipFlatPlane
+  .else
+        iwt     R0, #TEXTURE_VIEW_A
+        sm      (CONVEX_OUTPUT_CURSOR), R0
+        move    R7, #0
+        sm      (CONVEX_OUTPUT_COUNT), R7
+        sm      (TEXTURE_CUR_S), R7
+        sm      (TEXTURE_CUR_T), R7
+        lm      R6, (CONVEX_INDEX_PTR)
+        lm      R8, (CONVEX_FACE_VERTICES)
+@Vertex:
+        movew   R0, (R6)
+        inc     R6
+        sm      (CLIP_VERTEX_INDEX), R0
+        jal     LoadPacketViewVertex
+        inc     R6
+        with    R7
+        or      R2
+        dec     R8
+        bne     @Vertex
+        nop
+        GSU_ABSOLUTE_GOTO BakedClipFaceBegin
+  .endif
+.elseif .defined(PLAYABLE_E1M1_X3_WORLD_CLIP) && (BSP_RENDER_SCALE = 3)
+        .assert PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID, error, "Flat X3 clip scope is E1M1"
+        ; The packet view cache already holds the clipper's exact Q6 outcodes.
+        ; Keep the world entry and following brush code at their linked offsets.
+        sm      (TEXTURE_FACE_RETURN), R11
+        iwt     R0, #TEXTURE_VIEW_A
+        sm      (CONVEX_OUTPUT_CURSOR), R0
+        sm      (CONVEX_INPUT_PTR), R0
+        move    R7, #0
+        sm      (CONVEX_OUTPUT_COUNT), R7
+        sm      (TEXTURE_CUR_S), R7
+        sm      (TEXTURE_CUR_T), R7
+        lm      R6, (CONVEX_INDEX_PTR)
+        lm      R8, (CONVEX_FACE_VERTICES)
+        sm      (CONVEX_COUNT), R8
+@Vertex:
+        movew   R0, (R6)
+        inc     R6
+        sm      (CLIP_VERTEX_INDEX), R0
+        jal     LoadPacketViewVertex
+        inc     R6
+        with    R7
+        or      R2
+        dec     R8
+        bne     @Vertex
+        nop
+        sm      (CONVEX_INDEX_PTR), R6
+        GSU_ABSOLUTE_GOTO BakedClipX3StaticWorld
+        .res $39-(*-BakedTransformWorldFace), $01
+.else
+        TextureTransformWorldFace 0
+        GSU_ABSOLUTE_GOTO TextureClipFaceReady
+.endif
+.ifdef BAKED_FACE_CLIP_OUTCODES
+        .res $39-(*-BakedTransformWorldFace), $01
+.endif
+
+BakedRenderBrushFace:
+        BakedTestTechnique
+        bne     @Render
+        nop
+        lm      R0, (BRUSH_CURRENT_PACKED_FACE)
+        move    R8, R11
+        jal     BakedLoadBrushColor
+        nop
+        move    R11, R8
+@Render:
+        GSU_ABSOLUTE_GOTO TextureRasterPolygon
+
+BakedPrepareArbiterFace:
+        BakedTestTechnique
+        bne     @Draw
+        nop
+        lm      R10, (BRUSH_ARB_CANDIDATE_CURSOR)
+        with    R10
+        add     #BRUSH_ARB_META_ENTITY_MODEL
+        movew   R0, (R10)
+        iwt     R1, #$03FF
+        and     R1
+        jal     BakedLoadBrushColor
+        nop
+@Draw:
+        GSU_ABSOLUTE_GOTO BrushArbiterMaterialReady
+
+BakedLoadBrushColor:
+  .repeat 4
+        add     R0
+  .endrepeat
+        iwt     R4, #BSP_BRUSH_FRAGMENT_FACES_ADDRESS+15
+        with    R4
+        add     R0
+        move    R0, #BSP_BRUSH_FRAGMENT_FACES_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+  .ifdef PLAYABLE_SWITCHED_LIGHTS
+        iwt     R1, #GSU_LIGHTMAP_CACHE_OFFSET+256
+        move    R4, R11
+        GSU_ABSOLUTE_GOTO BakedSetSwitchedColor
+  .else
+        sm      (TEXTURE_BAKED_COLOR), R0
+        iwt     R1, #BakedFaceSampler
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        ret
+        nop
+  .endif
+
+BakedFaceSampler:
+        lm      R0, (TEXTURE_BAKED_COLOR)
+.if .defined(PLAYABLE_FLAT_BRUSH_MATERIAL) && (BSP_RENDER_SCALE = 2)
+        .export BakedReturn
+.endif
+BakedReturn:
+        ret
+        nop
+
+; Both albedo rasterizers pass inclusive logical X bounds and a logical Y.
+; Preserve their presentation map, including the within-tile X2/X3 order.
+BakedOrTexturedSpan:
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R10, #BakedFaceSampler
+        cmp     R10
+        beq     BakedDrawSpan
+        nop
+        sm      (TEXTURE_SPAN_RETURN), R11
+        sm      (TEXTURE_SPAN_X), R1
+        sm      (TEXTURE_SPAN_END_X), R3
+        GSU_ABSOLUTE_GOTO TextureDrawSpanTextured
+
+.macro BakedCheckWeaponCoverage visible, covered
+        ibt     R0, #(WEAPON_OBJ_CORE_Y_MIN-1)
+        cmp     R2
+        bcs     visible
+        nop
+        ibt     R0, #(WEAPON_OBJ_CORE_X_MIN-1)
+        cmp     R1
+        bcs     visible
+        nop
+        ibt     R0, #(WEAPON_OBJ_CORE_X_END-1)
+        cmp     R3
+        bcc     visible
+        nop
+        lm      R0, (WEAPON_OBJ_CORE_FLAG)
+        lob
+        bne     covered
+        nop
+.endmacro
+
+BakedDrawSpan:
+.if .defined(PLAYABLE_WEAPON_OBJ) && (BSP_RENDER_SCALE = 2)
+        BakedCheckWeaponCoverage BakedDrawVisibleSpan, BakedReturn
+BakedDrawVisibleSpan:
+.endif
+.ifdef BAKED_TILE_SPANS
+        GSU_ABSOLUTE_GOTO BakedDrawTileSpan
+  .if .defined(PLAYABLE_WEAPON_OBJ) && (BSP_RENDER_SCALE = 2)
+    ; The weapon guard occupies the baseline dispatch padding.
+  .elseif !.defined(BAKED_X_ONLY_ROWS)
+        .res    $20-(*-BakedDrawSpan), $01
+  .endif
+.else
+        to      R12
+        from    R3
+        sub     R1
+        inc     R12
+        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
+        move    R8, R10
+        with    R8
+        add     R2
+        moveb   R2, (R8)
+        with    R10
+        add     R1
+        lm      R0, (TEXTURE_BAKED_COLOR)
+        color
+        iwt     R13, #BakedPlotPixel
+BakedPlotPixel:
+        moveb   R1, (R10)
+        plot
+        loop
+        inc     R10
+        ret
+        nop
+.endif
+
+; The monotone albedo painter's baked spans consume only the screen bounds.
+; General polygons and the brush arbiter still use the full edge attributes.
+.ifdef BAKED_MONOTONE_EDGES
+.ifdef BAKED_X_ONLY_ROWS
+; Only the baked monotone rows can bypass S, T, and depth. The textured
+; and general-polygon paths still compute and consume their attributes.
+.macro BakedRasterEdge entry, baked_return
+entry:
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #BakedFaceSampler
+        cmp     R1
+        beq     :+
+        nop
+        GSU_ABSOLUTE_GOTO TextureIntersectActiveEdgeProjective
+:
+        iwt     R11, #baked_return
+        bra     BakedIntersectEdge
+        nop
+.endmacro
+BakedForwardEdgeDone:
+        sm      (CONVEX_MIN_X), R0
+        GSU_ABSOLUTE_GOTO TextureRasterReverseBegin
+BakedReverseEdgeDone:
+        lm      R1, (CONVEX_MIN_X)
+        with    R0
+        cmp     R1
+        bpl     BakedRightEdgeOrdered
+        nop
+        sm      (CONVEX_MIN_X), R0
+        move    R0, R1
+BakedRightEdgeOrdered:
+        sm      (CONVEX_MAX_X), R0
+        GSU_ABSOLUTE_GOTO TextureRasterXOrderReady
+
+BakedRasterEdge BakedForwardEdge, BakedForwardEdgeDone
+BakedReverseEdge:
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #BakedFaceSampler
+        cmp     R1
+        beq     :+
+        nop
+        GSU_ABSOLUTE_GOTO TextureIntersectActiveEdgeProjective
+:
+        iwt     R11, #BakedReverseEdgeDone
+.else
+BakedOrProjectiveEdge:
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #BakedFaceSampler
+        cmp     R1
+        beq     BakedIntersectEdge
+        nop
+        GSU_ABSOLUTE_GOTO TextureIntersectActiveEdgeProjective
+.endif
+.if BSP_RENDER_SCALE = 2
+.macro BakedEdgeFractionX2
+        ; The projected Y clamp bounds the signed denominator to 24576.
+        ; Monotone edge selection ensures 0 <= sample-upper < lower-upper.
+        ; The two low bits of the exact Q12 quotient are below Q10 precision.
+        sm      (TEXTURE_EDGE_RETURN), R11
+        lm      R0, (CONVEX_SAMPLE_Y)
+        sub     R5
+        move    R5, R4
+        to      R7
+        from    R6
+        sub     R4
+        with    R2
+        add     R0
+        jal     TextureDivideQ12
+        nop
+        iwt     R1, #$FFFC
+        with    R3
+        and     R1
+        lm      R11, (TEXTURE_EDGE_RETURN)
+.endmacro
+.endif
+.if .defined(BAKED_X_ONLY_ROWS) || (PLAYABLE_MAP_ID = PLAYABLE_E1M2_MAP_ID)
+  .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID = PLAYABLE_E1M2_MAP_ID)
+        ; Start the shared cache at $3530 so it also covers the row walker.
+        .res $130-(*-BakedRenderWorldFace), $01
+  .endif
+BakedIntersectEdge:
+  .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2)
+        cache
+  .endif
+        movew   R4, (R10)
+        movew   R6, (R9)
+        with    R4
+        cmp     R6
+        bne     BakedSlopedEdge
+        nop
+        move    R0, R4
+        ret
+        nop
+BakedSlopedEdge:
+        inc     R10
+        inc     R10
+        movew   R5, (R10)
+  .if (BSP_RENDER_SCALE = 2) && ((PLAYABLE_MAP_ID = PLAYABLE_START_MAP_ID) || (PLAYABLE_MAP_ID = PLAYABLE_E1M2_MAP_ID) || (PLAYABLE_MAP_ID = PLAYABLE_E1M3_MAP_ID) || (PLAYABLE_MAP_ID = PLAYABLE_E1M4_MAP_ID))
+        BakedEdgeFractionX2
+  .else
+        inc     R9
+        inc     R9
+        movew   R7, (R9)
+    .if PLAYABLE_MAP_ID = PLAYABLE_E1M2_MAP_ID
+        TextureAlbedoEdgeFraction
+        lm      R5, (CONVEX_BASE_RIGHT)
+        lm      R7, (CONVEX_DELTA_RIGHT)
+    .else
+        TextureAlbedoEdgeFraction baked_x_only
+    .endif
+  .endif
+        ; The ten quotient bits scaled by four are at most 4092.
+        ; Scale by eight for signed FMULT, then recover the Q12 floor.
+        move    R6, R3
+  .repeat 3
+        with    R6
+        add     R6
+  .endrepeat
+        BSP_SIGNED_MUL_SCALED8_SHIFT12 R7
+        add     R5
+        ret
+        nop
+  .if PLAYABLE_MAP_ID = PLAYABLE_E1M2_MAP_ID
+        ; Preserve the tile entry and the E1M2 overlay copy size.
+    .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2)
+        .res    $4B-(*-BakedIntersectEdge), $01
+    .else
+        .res    $65-(*-BakedIntersectEdge), $01
+    .endif
+  .elseif (BSP_RENDER_SCALE = 2) && ((PLAYABLE_MAP_ID = PLAYABLE_START_MAP_ID) || (PLAYABLE_MAP_ID = PLAYABLE_E1M3_MAP_ID) || (PLAYABLE_MAP_ID = PLAYABLE_E1M4_MAP_ID))
+        ; Preserve the baked tile-span entry within the resident overlay.
+        .res    $55-(*-BakedIntersectEdge), $01
+  .endif
+.else
+  .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        ; Align the edge entry with the end of the shared row cache.
+        .res    $130-(*-BakedRenderWorldFace), $01
+  .endif
+BakedIntersectEdge:
+  .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        .assert BakedIntersectEdge-BakedRenderWorldFace = $130, error, "E1M1 Flat edge cache moved"
+        cache
+  .endif
+        movew   R4, (R10)
+.ifdef PLAYABLE_FX3_PLANE_DISTANCE
+        movew   R6, (R9)
+        with    R4
+        cmp     R6
+        bne     BakedSlopedEdge
+        nop
+        move    R0, R4
+        ret
+        nop
+BakedSlopedEdge:
+.endif
+        inc     R10
+        inc     R10
+        movew   R5, (R10)
+.ifndef PLAYABLE_FX3_PLANE_DISTANCE
+        movew   R6, (R9)
+.endif
+  .if (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        BakedEdgeFractionX2
+  .else
+        inc     R9
+        inc     R9
+        movew   R7, (R9)
+        TextureAlbedoEdgeFraction
+        lm      R5, (CONVEX_BASE_RIGHT)
+        lm      R7, (CONVEX_DELTA_RIGHT)
+  .endif
+        TextureAlbedoEdgeX
+        ret
+        nop
+  .if (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        ; Keep the Flat span templates at their existing addresses.
+    .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && .defined(PLAYABLE_WEAPON_OBJ)
+        ; Reuse the alignment padding so Flat rows stay in their CACHE window.
+        .res    $53-(*-BakedIntersectEdge), $01
+BakedDrawSpanCached:
+        BakedCheckWeaponCoverage BakedDrawTileSpan, BakedTileSpanDone
+        .assert *-BakedIntersectEdge = $70, error, "E1M1 cached guard moved the tile span"
+    .else
+        .res    $70-(*-BakedIntersectEdge), $01
+    .endif
+  .endif
+.endif
+.endif
+.ifdef BAKED_TILE_SPANS
+; Both presentation maps permute pixels within each eight-pixel block.
+; Draw complete constant-color blocks in physical order. Partial ends still
+; map each logical X so they touch exactly the original pixels.
+BakedDrawTileSpan:
+  .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID = PLAYABLE_E1M2_MAP_ID)
+        .assert BakedDrawTileSpan - BakedRenderWorldFace = $17B, error, "E1M2 baked tile entry moved"
+  .endif
+        iwt     R8, #GSU_TEXTURE_COORD_MAP_OFFSET
+        to      R10
+        from    R8
+        add     R2
+        moveb   R2, (R10)
+        lm      R0, (TEXTURE_BAKED_COLOR)
+        color
+        inc     R3                      ; exclusive end
+  .if .defined(PLAYABLE_WEAPON_OBJ) && (BSP_RENDER_SCALE = 2)
+        ibt     R4, #$F8                ; sign-extended block alignment mask
+  .else
+        iwt     R4, #$FFF8
+  .endif
+        to      R6
+        from    R1
+        add     #7
+        with    R6
+        and     R4                      ; first complete block
+        to      R7
+        from    R3
+        and     R4                      ; end of complete blocks
+        from    R7
+        sub     R6
+        bmi     BakedOnlyPartial
+        nop
+        beq     BakedOnlyPartial
+        nop
+        lsr
+        lsr
+        to      R5
+        lsr                             ; complete block count
+
+        to      R12
+        from    R6
+        sub     R1
+        beq     BakedPlotFullBlocks
+        nop
+        to      R10
+        from    R8
+        add     R1
+        iwt     R13, #BakedPlotLeading
+BakedPlotLeading:
+        moveb   R1, (R10)
+        plot
+        loop
+        inc     R10
+
+BakedPlotFullBlocks:
+        move    R1, R6
+        move    R12, R5
+        iwt     R13, #BakedPlotBlock
+BakedPlotBlock:
+  .repeat 8
+        plot
+  .endrepeat
+        loop
+        nop
+  .if .defined(PLAYABLE_WEAPON_OBJ) && (BSP_RENDER_SCALE = 2)
+        ; The physical block stream advances R1 to R7 exactly.
+BakedOnlyPartial:
+        move    R7, R1
+  .else
+        bra     BakedPlotTrailing
+        nop
+BakedOnlyPartial:
+        move    R7, R1
+  .endif
+BakedPlotTrailing:
+        to      R12
+        from    R3
+        sub     R7
+        beq     BakedTileSpanDone
+        nop
+        to      R10
+        from    R8
+        add     R7
+        iwt     R13, #BakedPlotPartial
+BakedPlotPartial:
+        moveb   R1, (R10)
+        plot
+        loop
+        inc     R10
+BakedTileSpanDone:
+        ret
+        nop
+.endif
+.if .defined(PLAYABLE_FLAT_BRUSH_DEPTH) && (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+  .ifdef PLAYABLE_SWITCHED_LIGHTS
+        ; The S-CPU copies these replacement instructions into brush code. The
+        ; source bytes never execute here and need no space in the Flat RAM overlay.
+        .pushseg
+        .segment "GSU_PAIRED_WORLD_ROM_CODE"
+  .endif
+        .include "FlatBrushSpanPatch.sgs"
+  .ifdef PLAYABLE_SWITCHED_LIGHTS
+        .popseg
+  .endif
+.endif
+.ifdef BAKED_BRUSH_X3_EDGE
+        DEFINE_FLAT_BRUSH_PROJECTIVE_EDGE baked_x3
+.assert .loword(*) <= $3600, lderror, "X3 baked brush edge overlaps adjacent GSU code"
+.endif
+.if .defined(PLAYABLE_WEAPON_OBJ) && (BSP_RENDER_SCALE = 2)
+.assert .loword(*) <= $3600, lderror, "Baked raster overlaps paired world code"
+.endif
+.popseg

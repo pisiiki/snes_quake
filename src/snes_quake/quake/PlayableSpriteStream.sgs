@@ -1,0 +1,63 @@
+; Mandatory selected-sprite cache. The CPU stages exact palette bytes
+; only while the GSU is stopped; aliases run after the complete opaque pass.
+.export SpriteStreamRequestBank, SpriteStreamRequestAddress, SpriteStreamRequestBytes
+.export SpriteStreamRequestReady, SpriteStreamCacheBank, SpriteStreamCacheAddress
+.export SpriteStreamCacheBytes, SpriteStreamRequestResume, AliasSpriteStreamResume
+SpriteStreamRequestBank    = $710000 + ALIAS_STATE + $90
+SpriteStreamRequestAddress = $710000 + ALIAS_STATE + $92
+SpriteStreamRequestBytes   = $710000 + ALIAS_STATE + $94
+SpriteStreamRequestReady   = $710000 + ALIAS_STATE + $96
+SpriteStreamCacheBank      = $710000 + ALIAS_STATE + $98
+SpriteStreamCacheAddress   = $710000 + ALIAS_STATE + $9A
+SpriteStreamCacheBytes     = $710000 + ALIAS_STATE + $9C
+AliasSpriteStreamPixelRam  = ALIAS_STATE + $9E
+AliasSpriteStreamSampleReturn = ALIAS_STATE + $A2
+AliasSpriteStreamRegisters = ALIAS_STATE + $A4
+SpriteStreamRequestResume  = $710000 + ALIAS_STATE + $C4
+.assert .loword(SpriteStreamRequestResume)+2 <= GSU_FACE_PLANES_OFFSET+$03F8, error, "Sprite stream state overlaps live brush material/screen storage"
+.assert SPRITE_STREAM_CACHE_OFFSET = GSU_TEXTURE_COLORMAP_OFFSET, error, "Sprite pixels must use retired opaque colormap storage"
+.assert SPRITE_STREAM_CACHE_BYTES = $0600, error, "Selected-sprite cache capacity changed"
+
+.pushseg
+.segment "GSU_ALIAS_FLY_CODE"
+AliasResolveStreamedSprite:
+        move    R9, #BSP_GSU_ROM3_BANK
+        iwt     R8, #.loword(SpriteStreamResolveCommon)
+        from    R8
+        ljmp    R9
+        nop
+; Both STOP and CPU-selected resume are in RAM70. The CPU need only write
+; R15, leaving PBR/CBR/RAMBR, all other registers and PLOT state untouched.
+AliasSpriteStreamPause:
+        stop
+        nop
+AliasSpriteStreamResume:
+        move    R9, #BSP_GSU_ROM3_BANK
+        iwt     R8, #.loword(SpriteStreamResumeCommon)
+        from    R8
+        ljmp    R9
+        nop
+
+.popseg
+
+.pushseg
+.segment "GSU_ALIAS_FLY_CODE"
+AliasSpriteStreamFinish:
+        lm      R8, (AliasSpriteStreamRegisters+16)
+        lm      R9, (AliasSpriteStreamRegisters+18)
+        lm      R11, (AliasSpriteStreamRegisters+22)
+        ret
+        nop
+.ifdef PLAYABLE_E1M1_CULL_STREAMED_ALIAS
+AliasSpriteStreamVisibilityReturn:
+        move    R9, #BSP_GSU_ROM3_BANK
+        iwt     R8, #.loword(SpriteStreamVisibilityComplete)
+        from    R8
+        ljmp    R9
+        nop
+AliasSpriteStreamOccluded:
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+.endif
+.popseg
+
+.include "quake/PlayableSpriteStreamCommon.sgs"

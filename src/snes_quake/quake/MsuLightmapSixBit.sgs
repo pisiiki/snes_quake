@@ -1,0 +1,48 @@
+; Packed world and brush grids share the C0+six-bit decoder. Q4 fractions
+; are multiples of16; halving them makes both MULT operands signed bytes.
+; Doubling the signed product before rounding preserves every output byte.
+.assert BSP_WORLD_LIGHTMAP_SAMPLE_BITS = 6, error, "Signed interpolation requires six-bit light grids"
+        iwt     R2, #128
+        with    R3
+        lsr
+LightmapDifferenceUpperEntry:
+        from    R9
+        sub     R8
+        mult    R3
+        add     R0
+        add     R2
+        hib
+        add     R8
+        to      R4
+        lob
+LightmapDifferenceLowerEntry:
+        from    R11
+        sub     R6
+        mult    R3
+        add     R0
+        add     R2
+        hib
+        add     R6
+        to      R6
+        lob
+LightmapDifferenceHorizontalDone:
+        bra     LightmapSampleHorizontalInterpolated
+        with    R5
+        .res $28 - (* - LightmapSampleLowerReady), $01
+LightmapSampleHorizontalZero:
+        move    R4, R8
+        with    R5
+LightmapSampleHorizontalInterpolated:
+        lsr
+        beq     LightmapSampleMap
+        nop
+LightmapDifferenceVerticalEntry:
+        from    R6
+        sub     R4
+        mult    R5
+        add     R0
+        add     R2
+        hib
+        add     R4
+        to      R4
+        lob

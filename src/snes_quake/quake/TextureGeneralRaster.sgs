@@ -1,0 +1,557 @@
+; X2 world-only correction for polygons bent by integer transform/projection.
+.if BSP_RENDER_SCALE = 2
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+
+TEXTURE_GENERAL_BANK = $03
+TEXTURE_GENERAL_RECORD_BYTES = 8
+TEXTURE_GENERAL_INTERSECTIONS = GSU_TEXTURE_ENDPOINT_STAGE_OFFSET
+.assert TEXTURE_GENERAL_INTERSECTIONS >= TEXTURE_SHADE_SCREEN_END, error, "General intersections overlap live projected vertices"
+.assert TEXTURE_GENERAL_INTERSECTIONS + CONVEX_VERTEX_CAPACITY*TEXTURE_GENERAL_RECORD_BYTES <= GSU_TEXTURE_ENDPOINT_STAGE_END, error, "General intersections exceed idle endpoint arena"
+GENERAL_EDGE_CURSOR = CONVEX_PREV_RIGHT
+GENERAL_EDGES_LEFT = CONVEX_PREV_UP
+GENERAL_COUNT = CONVEX_PREV_DEPTH
+GENERAL_PAIR_CURSOR = CONVEX_PREV_MAG
+GENERAL_PAIRS_LEFT = CONVEX_PREV_INSIDE
+GENERAL_PENDING_FIRST = CONVEX_CUR_RIGHT
+GENERAL_PENDING_LAST = CONVEX_CUR_UP
+GENERAL_EDGE_FN = CONVEX_CUR_DEPTH
+GENERAL_SKY = CONVEX_CUR_MAG
+GENERAL_SPAN_FN = CONVEX_CUR_INSIDE
+GENERAL_NEW_FIRST = CONVEX_IN_RIGHT
+GENERAL_NEW_LAST = CONVEX_IN_UP
+GENERAL_NEW_T = CONVEX_IN_DEPTH
+GENERAL_NEW_DEPTH = CONVEX_OUT_RIGHT
+GENERAL_BRIDGE = CONVEX_OUT_UP
+
+.macro TEXTURE_GENERAL_RAM_CALL pointer, continuation
+        iwt     R0, #.loword(continuation)
+        sm      (CONVEX_INTERPOLATE_RETURN), R0
+        lm      R11, (GENERAL_BRIDGE)
+        lm      R0, (pointer)
+        move    R12, #$70
+        from    R0
+        ljmp    R12
+        nop
+.endmacro
+
+TextureFinalizeProjectedYROM:
+        lm      R0, (TEXTURE_Y_STATE)
+        lob                             ; Count is bounded by28; ignore signbit.
+        move    R1, #4                   ; State has a one-biased change count.
+        with    R0
+        cmp     R1
+        move    R0, #0
+        bcc     TextureGeneralFinalizeReturn
+        nop
+        ; These are the only two non-world direct projector call sites.
+        ; Their flags are explicitly cleared even after a nonmonotone world.
+        lm      R1, (TEXTURE_PROJECT_RETURN)
+        iwt     R2, #BrushRasterPreparedProjected
+        with    R1
+        cmp     R2
+        beq     TextureGeneralFinalizeReturn
+        nop
+        iwt     R2, #BrushArbiterCurrentProjected
+        with    R1
+        cmp     R2
+        beq     TextureGeneralFinalizeArbiter
+        nop
+        iwt     R0, #.loword(TextureGeneralRasterROM)
+        bra     TextureGeneralFinalizeReturn
+        nop
+TextureGeneralFinalizeArbiter:
+        ; Only the world-mask caller needs the world's general coverage.
+        ; The tracker's monotone fast path does not publish Y_STATE, so use
+        ; this explicit continuation instead of re-reading clipping scratch.
+        lm      R1, (BRUSH_ARB_PROJECT_RETURN)
+        iwt     R2, #FlyWorldMaskCurrentProjected
+        with    R1
+        cmp     R2
+        bne     TextureGeneralFinalizeReturn
+        nop
+        iwt     R0, #.loword(TextureGeneralMaskRasterROM)
+TextureGeneralFinalizeReturn:
+        sm      (CONVEX_PLANE), R0
+        lm      R11, (CONVEX_CLIP_RETURN)
+        move    R12, #$70
+        from    R11
+        ljmp    R12
+        nop
+
+; World alias masks consume the painter's exact all-edge pairs, including
+; disconnected intervals created by integer projection. No texture writes or
+; polygon copies are needed. The normal span mask owns depth and first claims.
+TextureGeneralMaskRasterROM:
+        sm      (TEXTURE_RASTER_RETURN), R11
+        iwt     R0, #TextureGeneralReturnToROM
+        sm      (GENERAL_BRIDGE), R0
+        move    R0, #0
+        sm      (GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET), R0
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+        sm      (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET), R0
+        sm      (T4_LIGHTMAP_CHUNK_ACTIVE), R0
+        ; This resident geometric helper always publishes Q6 depth in RAM.
+        ; Technique 4 replaces the shaded helper with a register-output ABI.
+        iwt     R1, #TextureIntersectActiveEdgeProjective
+        sm      (GENERAL_EDGE_FN), R1
+        iwt     R0, #FlyBrushMaskSpanPresent
+        sm      (GENERAL_SPAN_FN), R0
+TextureGeneralMaskCallbacksReady:
+        move    R0, #2
+        sm      (GENERAL_SKY), R0
+        lm      R0, (CONVEX_RASTER_Y)
+        lm      R1, (FLY_MASK_FIRST_Y)
+        with    R0
+        cmp     R1
+        bcs     TextureGeneralMaskFirstReady
+        nop
+        move    R0, R1
+TextureGeneralMaskFirstReady:
+        sm      (CONVEX_RASTER_Y), R0
+        lm      R0, (CONVEX_TOP_PTR)
+        lm      R1, (FLY_MASK_RECT_LAST_Y)
+        with    R0
+        cmp     R1
+        bcc     TextureGeneralMaskLastReady
+        nop
+        move    R0, R1
+TextureGeneralMaskLastReady:
+        sm      (CONVEX_TOP_PTR), R0
+        lm      R1, (CONVEX_RASTER_Y)
+        with    R0
+        sub     R1
+        bpl     TextureGeneralMaskRowsPresent
+        nop
+        GSU_ABSOLUTE_GOTO TextureGeneralDone
+TextureGeneralMaskRowsPresent:
+        GSU_ABSOLUTE_GOTO TextureGeneralRowBegin
+
+TextureGeneralRasterT4ROM:
+        iwt     R0, #TextureGeneralT4ReturnToROM
+        bra     TextureGeneralRasterEnter
+        nop
+TextureGeneralRasterROM:
+        iwt     R0, #TextureGeneralReturnToROM
+TextureGeneralRasterEnter:
+        sm      (GENERAL_BRIDGE), R0
+        cache
+        move    R0, #1
+        ramb
+        move    R0, #0
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+        sm      (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET), R0
+        sm      (T4_LIGHTMAP_CHUNK_ACTIVE), R0
+        sm      (GENERAL_SKY), R0
+        ; One private denominator-keyed record serves every cold edge.
+        ; Invalidate its key at each face entry before either mode uses it.
+        sm      (GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET), R0
+        iwt     R1, #TextureIntersectActiveEdgeShaded
+        iwt     R2, #TextureDrawSpanLightmapped
+        lm      R0, (TEXTURE_RENDER_MODE)
+        move    R3, #2
+        with    R0
+        cmp     R3
+        bne     TextureGeneralCallbacksReady
+        nop
+        iwt     R1, #TextureIntersectActiveEdgeProjective
+        iwt     R2, #TextureDrawSpan
+TextureGeneralCallbacksReady:
+        sm      (GENERAL_EDGE_FN), R1
+        sm      (GENERAL_SPAN_FN), R2
+        ; Same fail-closed sampler/flag check as existing Sky row replay.
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #SkyMarkerSampler
+        with    R0
+        cmp     R1
+        bne     TextureGeneralRowBegin
+        nop
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        moves   R0, R0
+        bmi     TextureGeneralRowBegin
+        nop
+        move    R0, #1
+        sm      (GENERAL_SKY), R0
+        iwt     R0, #SkyDrawMarkerSpan
+        sm      (GENERAL_SPAN_FN), R0
+
+TextureGeneralRowBegin:
+        cache
+        move    R0, #0
+        sm      (GENERAL_COUNT), R0
+        iwt     R0, #TEXTURE_SCREEN
+        sm      (GENERAL_EDGE_CURSOR), R0
+        lm      R0, (CONVEX_SCREEN_COUNT)
+        sm      (GENERAL_EDGES_LEFT), R0
+        lm      R0, (CONVEX_RASTER_Y)
+        swap
+        lsr
+        iwt     R1, #64
+        with    R0
+        add     R1
+        sm      (CONVEX_SAMPLE_Y), R0
+
+TextureGeneralEdgeLoop:
+        lm      R10, (GENERAL_EDGE_CURSOR)
+        to      R9
+        from    R10
+        add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
+        lm      R0, (CONVEX_SCREEN_END_PTR)
+        with    R9
+        cmp     R0
+        bne     TextureGeneralNextReady
+        nop
+        iwt     R9, #TEXTURE_SCREEN
+TextureGeneralNextReady:
+        move    R4, R10
+        inc     R4
+        inc     R4
+        movew   R1, (R4)
+        move    R4, R9
+        inc     R4
+        inc     R4
+        movew   R2, (R4)
+        to      R3
+        from    R2
+        sub     R1
+        beq     TextureGeneralEdgeAdvance
+        nop
+        bpl     TextureGeneralEdgeOrdered
+        nop
+        move    R4, R10
+        move    R10, R9
+        move    R9, R4
+        move    R4, R1
+        move    R1, R2
+        move    R2, R4
+TextureGeneralEdgeOrdered:
+        lm      R0, (CONVEX_SAMPLE_Y)
+        to      R3
+        sub     R1
+        bmi     TextureGeneralEdgeAdvance
+        nop
+        ; Shaded helper reuses sampleY-upperY in R2, exactly like its walker.
+        with    R0
+        sub     R2
+        move    R2, R0
+        bpl     TextureGeneralEdgeAdvance
+        nop
+        ; The shaded helper reads/writes its reciprocal record through R13.
+        ; Every edge/span may destroy R13, so restore it for every call.
+        iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET
+        TEXTURE_GENERAL_RAM_CALL GENERAL_EDGE_FN, TextureGeneralEdgeReturned
+TextureGeneralEdgeReturned:
+        cache
+        lm      R0, (CONVEX_INTER_RIGHT)
+        sm      (GENERAL_NEW_FIRST), R0
+        lm      R0, (TEXTURE_EDGE_S)
+        sm      (GENERAL_NEW_LAST), R0
+        lm      R0, (TEXTURE_EDGE_T)
+        sm      (GENERAL_NEW_T), R0
+        lm      R0, (TEXTURE_EDGE_SHADE)
+        sm      (GENERAL_NEW_DEPTH), R0
+        jal     TextureGeneralInsert
+        nop
+TextureGeneralEdgeAdvance:
+        lm      R0, (GENERAL_EDGE_CURSOR)
+        with    R0
+        add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
+        sm      (GENERAL_EDGE_CURSOR), R0
+        lm      R0, (GENERAL_EDGES_LEFT)
+        dec     R0
+        sm      (GENERAL_EDGES_LEFT), R0
+        beq     TextureGeneralEdgesDone
+        nop
+        GSU_ABSOLUTE_GOTO TextureGeneralEdgeLoop
+TextureGeneralEdgesDone:
+        lm      R0, (GENERAL_COUNT)
+        lsr
+        sm      (GENERAL_PAIRS_LEFT), R0
+        iwt     R0, #TEXTURE_GENERAL_INTERSECTIONS
+        lm      R1, (GENERAL_SKY)
+        move    R2, #2
+        with    R1
+        cmp     R2
+        bne     TextureGeneralPairStartReady
+        nop
+        ; Reverse painter ownership also applies to pairs within a bent
+        ; polygon: their rounded inclusive intervals can share one pixel.
+        lm      R1, (GENERAL_COUNT)
+  .repeat 3
+        with    R1
+        add     R1
+  .endrepeat
+        with    R0
+        add     R1
+        move    R2, #16
+        with    R0
+        sub     R2
+TextureGeneralPairStartReady:
+        sm      (GENERAL_PAIR_CURSOR), R0
+        iwt     R0, #$FFFF
+        sm      (GENERAL_PENDING_FIRST), R0
+
+TextureGeneralPairLoop:
+        lm      R0, (GENERAL_PAIRS_LEFT)
+        moves   R0, R0
+        bne     TextureGeneralPairPresent
+        nop
+        GSU_ABSOLUTE_GOTO TextureGeneralPairsDone
+TextureGeneralPairPresent:
+        jal     TextureGeneralLoadPair
+        nop
+        moves   R0, R0
+        beq     TextureGeneralPairLoop
+        nop
+        lm      R0, (GENERAL_SKY)
+        dec     R0
+        beq     TextureGeneralSkyPair
+        nop
+        moves   R0, R0
+        bmi     TextureGeneralDrawPair
+        nop
+        ; Each pair is one row for the existing mask loop. Its inclusive
+        ; last-Y exit returns to our bridge rather than advancing metadata.
+        lm      R0, (GENERAL_NEW_FIRST)
+        sm      (TEXTURE_SPAN_X), R0
+        lm      R0, (GENERAL_NEW_LAST)
+        sm      (TEXTURE_SPAN_END_X), R0
+        lm      R0, (CONVEX_RASTER_Y)
+        sm      (FLY_MASK_Y), R0
+        sm      (FLY_MASK_LAST_Y), R0
+        lm      R0, (GENERAL_BRIDGE)
+        sm      (FLY_VIS_RASTER_RETURN), R0
+TextureGeneralDrawPair:
+        lm      R1, (GENERAL_NEW_FIRST)
+        lm      R3, (GENERAL_NEW_LAST)
+        lm      R2, (CONVEX_RASTER_Y)
+        TEXTURE_GENERAL_RAM_CALL GENERAL_SPAN_FN, TextureGeneralSpanReturned
+TextureGeneralSpanReturned:
+        cache
+        lm      R0, (GENERAL_SKY)
+        dec     R0
+        bmi     TextureGeneralContinuePairs
+        nop
+        lm      R0, (CONVEX_INTER_RIGHT)
+        moves   R0, R0
+        beq     TextureGeneralContinuePairs
+        nop
+        move    R1, #0
+        sm      (CONVEX_PLANE), R1
+        GSU_ABSOLUTE_GOTO TextureGeneralReturn
+TextureGeneralContinuePairs:
+        GSU_ABSOLUTE_GOTO TextureGeneralPairLoop
+
+TextureGeneralSkyPair:
+        lm      R0, (GENERAL_PENDING_FIRST)
+        moves   R0, R0
+        bmi     TextureGeneralSkyBegin
+        nop
+        lm      R1, (GENERAL_PENDING_LAST)
+        inc     R1
+        lm      R2, (GENERAL_NEW_FIRST)
+        with    R1
+        sub     R2
+        bmi     TextureGeneralSkyFlush
+        nop
+        lm      R1, (GENERAL_PENDING_LAST)
+        lm      R2, (GENERAL_NEW_LAST)
+        with    R1
+        sub     R2
+        bmi     TextureGeneralSkyExtend
+        nop
+        GSU_ABSOLUTE_GOTO TextureGeneralPairLoop
+TextureGeneralSkyExtend:
+        sm      (GENERAL_PENDING_LAST), R2
+        GSU_ABSOLUTE_GOTO TextureGeneralPairLoop
+TextureGeneralSkyBegin:
+        lm      R0, (GENERAL_NEW_FIRST)
+        sm      (GENERAL_PENDING_FIRST), R0
+        lm      R0, (GENERAL_NEW_LAST)
+        sm      (GENERAL_PENDING_LAST), R0
+        GSU_ABSOLUTE_GOTO TextureGeneralPairLoop
+TextureGeneralSkyFlush:
+        lm      R1, (GENERAL_PENDING_FIRST)
+        lm      R3, (GENERAL_PENDING_LAST)
+        lm      R2, (CONVEX_RASTER_Y)
+        TEXTURE_GENERAL_RAM_CALL GENERAL_SPAN_FN, TextureGeneralSkyFlushed
+TextureGeneralSkyFlushed:
+        cache
+        GSU_ABSOLUTE_GOTO TextureGeneralSkyBegin
+
+TextureGeneralPairsDone:
+        lm      R0, (GENERAL_PENDING_FIRST)
+        moves   R0, R0
+        bmi     TextureGeneralNextRow
+        nop
+        move    R1, R0
+        lm      R3, (GENERAL_PENDING_LAST)
+        lm      R2, (CONVEX_RASTER_Y)
+        TEXTURE_GENERAL_RAM_CALL GENERAL_SPAN_FN, TextureGeneralLastSkyReturned
+TextureGeneralLastSkyReturned:
+        cache
+TextureGeneralNextRow:
+        lm      R0, (CONVEX_RASTER_Y)
+        lm      R1, (CONVEX_TOP_PTR)
+        with    R0
+        cmp     R1
+        beq     TextureGeneralDone
+        nop
+        inc     R0
+        sm      (CONVEX_RASTER_Y), R0
+        GSU_ABSOLUTE_GOTO TextureGeneralRowBegin
+TextureGeneralDone:
+        move    R0, #0
+        sm      (CONVEX_PLANE), R0
+TextureGeneralReturn:
+        lm      R11, (TEXTURE_RASTER_RETURN)
+        move    R12, #$70
+        from    R11
+        ljmp    R12
+        nop
+
+; Stable insertion: equalX stays in original boundary-edge order.
+TextureGeneralInsert:
+        lm      R12, (GENERAL_COUNT)
+        move    R0, R12
+  .repeat 3
+        with    R0
+        add     R0
+  .endrepeat
+        iwt     R10, #TEXTURE_GENERAL_INTERSECTIONS
+        with    R10
+        add     R0
+TextureGeneralInsertLoop:
+        moves   R12, R12
+        beq     TextureGeneralInsertWrite
+        nop
+        to      R9
+        from    R10
+        sub     #TEXTURE_GENERAL_RECORD_BYTES
+        movew   R0, (R9)
+        lm      R1, (GENERAL_NEW_FIRST)
+        with    R0
+        sub     R1
+        bmi     TextureGeneralInsertWrite
+        nop
+        beq     TextureGeneralInsertWrite
+        nop
+        move    R4, R10
+  .repeat 4
+        movew   R0, (R9)
+        movew   (R4), R0
+        inc     R9
+        inc     R9
+        inc     R4
+        inc     R4
+  .endrepeat
+        with    R10
+        sub     #TEXTURE_GENERAL_RECORD_BYTES
+        dec     R12
+        GSU_ABSOLUTE_GOTO TextureGeneralInsertLoop
+TextureGeneralInsertWrite:
+        lm      R0, (GENERAL_NEW_FIRST)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (GENERAL_NEW_LAST)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (GENERAL_NEW_T)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (GENERAL_NEW_DEPTH)
+        movew   (R10), R0
+        lm      R0, (GENERAL_COUNT)
+        inc     R0
+        sm      (GENERAL_COUNT), R0
+        ret
+        nop
+
+TextureGeneralLoadPair:
+        lm      R10, (GENERAL_PAIR_CURSOR)
+        movew   R0, (R10)
+        sm      (CONVEX_MIN_X), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_LEFT_S), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_LEFT_T), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_LEFT_SHADE), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (CONVEX_MAX_X), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_RIGHT_S), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_RIGHT_T), R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sm      (TEXTURE_RIGHT_SHADE), R0
+        inc     R10
+        inc     R10
+        lm      R0, (GENERAL_SKY)
+        move    R1, #2
+        with    R0
+        cmp     R1
+        bne     TextureGeneralPairAdvanceReady
+        nop
+        move    R1, #32
+        with    R10
+        sub     R1
+TextureGeneralPairAdvanceReady:
+        sm      (GENERAL_PAIR_CURSOR), R10
+        lm      R0, (GENERAL_PAIRS_LEFT)
+        dec     R0
+        sm      (GENERAL_PAIRS_LEFT), R0
+        lm      R1, (CONVEX_MIN_X)
+        iwt     R0, #59
+        with    R1
+        add     R0
+        BSP_ARITH_SHIFT7 R1, R2
+        moves   R1, R1
+        bpl     TextureGeneralFirstReady
+        nop
+        move    R1, #0
+TextureGeneralFirstReady:
+        lm      R3, (CONVEX_MAX_X)
+        iwt     R0, #60
+        with    R3
+        sub     R0
+        BSP_ARITH_SHIFT7 R3, R4
+        move    R0, #BSP_VIEW_WIDTH-1
+        to      R4
+        sub     R3
+        bpl     TextureGeneralLastReady
+        nop
+        move    R3, R0
+TextureGeneralLastReady:
+        sm      (GENERAL_NEW_FIRST), R1
+        sm      (GENERAL_NEW_LAST), R3
+        with    R3
+        sub     R1
+        move    R0, #0
+        bmi     TextureGeneralPairEmpty
+        nop
+        inc     R0
+TextureGeneralPairEmpty:
+        ret
+        nop
+
+TextureGeneralRasterROMEnd:
+.assert .bankbyte(TextureGeneralRasterROM) = ($80+BSP_GSU_ROM3_BANK), lderror, "General raster left owned ROM3 segment"
+.assert .bankbyte(TextureGeneralRasterROMEnd-1) = ($80+BSP_GSU_ROM3_BANK), lderror, "General raster crosses its ROM3 bank"
+.endif

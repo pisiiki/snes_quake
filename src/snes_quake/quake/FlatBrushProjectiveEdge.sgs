@@ -1,0 +1,106 @@
+.if .defined(PLAYABLE_MAP_ID) && .defined(BSP_QUAKEC_GAMEPLAY) && .defined(PLAYABLE_E1M1_MAP_ID)
+  .if BSP_QUAKEC_GAMEPLAY && (BSP_RENDER_SCALE = 3) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+BAKED_BRUSH_X3_EDGE = 1
+  .endif
+.endif
+
+.macro FlatBrushEdgeLoad reg, address
+  .ifdef BAKED_BRUSH_X3_EDGE
+        lms     reg, address
+  .else
+        lm      reg, address
+  .endif
+.endmacro
+
+.macro FlatBrushEdgeStore address, reg
+  .ifdef BAKED_BRUSH_X3_EDGE
+        sms     address, reg
+  .else
+        sm      address, reg
+  .endif
+.endmacro
+
+.macro DEFINE_FLAT_BRUSH_PROJECTIVE_EDGE baked_x3
+  .ifnblank baked_x3
+        .local Baked
+        .export BakedBrushProjectiveEdge
+BakedBrushProjectiveEdge:
+        ; BrushArbiterPrepareCandidateSpan precedes material setup. Test the
+        ; same current command byte that BakedPrepareArbiterFace will consume.
+        ; R10 still holds the upper vertex and R2 holds sampleY - lowerY.
+        iwt     R8, #COMMAND+5
+        move    R0, #0
+        moveb   R0, (R8)
+        sub     #3
+        beq     Baked
+        nop
+        GSU_ABSOLUTE_GOTO TextureIntersectActiveEdgeProjective
+Baked:
+  .else
+        .export FlatBrushForwardProjectiveEdge, FlatBrushReverseProjectiveEdge
+FlatBrushReverseProjectiveEdge:
+        iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET+GSU_TEXTURE_EDGE_DIVIDE_CACHE_ENTRY_BYTES
+        bra     FlatBrushProjectiveEdge
+        nop
+FlatBrushForwardProjectiveEdge:
+        iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET
+FlatBrushProjectiveEdge:
+  .endif
+        FlatBrushEdgeStore (TEXTURE_EDGE_RETURN), R11
+        movew   R4, (R10)
+        inc     R10
+        inc     R10
+        movew   R5, (R10)
+        with    R10
+        add     #6                      ; Skip S and T from Y to raw depth.
+        movew   R0, (R10)
+        FlatBrushEdgeStore (TEXTURE_BASE_DEPTH), R0
+
+        movew   R6, (R9)
+        with    R9
+        add     #8
+        movew   R0, (R9)
+        FlatBrushEdgeLoad R1, (TEXTURE_BASE_DEPTH)
+        with    R0
+        sub     R1
+        FlatBrushEdgeStore (TEXTURE_DELTA_DEPTH), R0
+
+        ; The walker leaves R2 = sample Y - lower Y. The selected edge
+        ; has upper Y <= sample Y < lower Y and a denominator <= 24576.
+        FlatBrushEdgeLoad R0, (CONVEX_SAMPLE_Y)
+        to      R1
+        sub     R5
+        from    R1
+        to      R2
+        sub     R2
+        FlatBrushEdgeStore (CONVEX_BASE_RIGHT), R4
+        from    R6
+        sub     R4
+        FlatBrushEdgeStore (CONVEX_DELTA_RIGHT), R0
+        move    R0, R1
+  .ifnblank baked_x3
+        ; At X3, Q7 vertex/sampling Ys share two zero low bits. Reducing
+        ; both operands gives the same quotient and fits the E1M1 RAM mirror.
+        lsr
+        lsr
+        with    R2
+        lsr
+        with    R2
+        lsr
+        jal     TextureDivideQ12
+  .else
+        jal     TextureDivideQ12EdgeCachedWindow
+  .endif
+        nop
+        iwt     R1, #$FFFC              ; Keep the original Q10 quotient scaled to Q12.
+        with    R3
+        and     R1
+        FlatBrushEdgeStore (CONVEX_FACTOR), R3
+        jal     TexturePerspectiveFactorQ12
+        nop
+        ; The staged brush edge record still publishes both coordinates.
+        move    R0, #0
+        FlatBrushEdgeStore (TEXTURE_EDGE_S), R0
+        FlatBrushEdgeStore (TEXTURE_EDGE_T), R0
+        GSU_ABSOLUTE_GOTO TextureIntersectActiveEdgeProjectiveDepth
+.endmacro

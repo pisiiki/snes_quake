@@ -1,0 +1,39 @@
+; The playable selector already owns RAM bank $71 and staged Q2 XYZ.
+; Publish the six signed low products once, before any face reads its tag.
+.assert BSP_QUAKEC_GAMEPLAY, error, "Axial face flags require staged Q2 camera"
+.assert GSU_PACKET_FACE_CAMERA_NEGATIVE + 6 <= WORLD_CAMERA_X, error, "Axial face products overlap world camera"
+PacketPrepareFaceCameraProducts:
+        iwt     R8, #PACKET_CAMERA_Q2_X
+        iwt     R9, #GSU_PACKET_FACE_CAMERA_POSITIVE
+        iwt     R10, #GSU_PACKET_FACE_CAMERA_NEGATIVE
+        ibt     R12, #3
+        iwt     R13, #PacketPrepareFaceCameraAxis
+PacketPrepareFaceCameraAxis:
+        movew   R0, (R8)
+  .repeat 5
+        add     R0
+  .endrepeat
+        movew   (R9), R0
+        not
+        inc     R0
+        movew   (R10), R0
+        inc     R8
+        inc     R8
+        inc     R9
+        inc     R9
+        inc     R10
+        inc     R10
+        loop
+        nop
+.if .defined(PLAYABLE_PACKET_VIEW_REUSE) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO PacketInvalidateViewCache
+.else
+        GSU_ABSOLUTE_GOTO PacketScanLoadByte
+.endif
+
+; Sloped and uncommon axial coefficients retain the general signed dot.
+PacketGeneralFacePlaneDot:
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+.include "quake/PacketFacePlaneDot.i"
+        ret
+        nop

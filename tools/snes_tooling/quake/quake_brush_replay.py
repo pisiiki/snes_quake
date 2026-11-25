@@ -5,6 +5,7 @@ from snes_tooling.quake.quake_scene_sampling import sample_scene_track
 
 import math
 import struct
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from snes_tooling.quake.quake_demo import (
@@ -111,9 +112,12 @@ def fnv1a64(data: bytes) -> int:
 
 
 def encode_precise_camera_track(rows: tuple[CanonicalBrushRow, ...]) -> bytes:
+    return encode_precise_camera_samples(row.camera for row in rows)
+
+
+def encode_precise_camera_samples(cameras: Iterable[CameraSample]) -> bytes:
     records = bytearray()
-    for row in rows:
-        camera = row.camera
+    for camera in cameras:
         if camera.view_angles[2] != 0.0:
             raise ValueError("precise camera track cannot omit nonzero roll")
         position_q3 = tuple(round(value * 8.0) for value in camera.origin)

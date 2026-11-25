@@ -1,0 +1,52 @@
+; Keep the terrain only when the camera and opaque brush inputs still
+; match. The live aliases are already in their freshly sorted suffix.
+.assert QC_ENTRANCE_COUNT = 0, error, "Live resident world requires entrance invalidation"
+.ifndef QC_EXIT_MOVER_COUNT
+.assert QC_HAS_PUSHERS = 0, error, "Live resident world requires mover invalidation"
+.endif
+
+.macro COMPARE_RESIDENT_WORLD_WORD current, stored
+        lm      R0, (current)
+        lm      R1, (stored)
+        sm      (stored), R0
+        to      R1
+        xor     R1
+        with    R2
+        or      R1
+.endmacro
+
+.ifdef PLAYABLE_RESIDENT_WORLD_SNAPSHOT
+.include "BrushLiveResidentWorldSnapshot.sgs"
+.else
+BrushRenderResidentWorld:
+        lm      R0, (GSU_RESIDENT_WORLD_COMMAND)
+        dec     R0
+        bne     @Ordinary
+        nop
+        move    R0, #2
+        sm      (GSU_RESIDENT_WORLD_COMMAND), R0
+        lm      R2, (GSU_RESIDENT_WORLD_STATUS)
+        dec     R2
+        dec     R0
+        sm      (GSU_RESIDENT_WORLD_STATUS), R0
+        COMPARE_RESIDENT_WORLD_WORD WEAPON_OBJ_CORE_FLAG, GSU_RESIDENT_WORLD_MASK
+        COMPARE_RESIDENT_WORLD_WORD BRUSH_OVERLAY_FLAGS, GSU_BRUSH_MERGE_CACHE_FLAGS
+        COMPARE_RESIDENT_WORLD_WORD GSU_TELEMETRY_BRUSH_VISUAL_STATE, GSU_BRUSH_MERGE_CACHE_VISUAL
+        COMPARE_RESIDENT_WORLD_WORD COMMAND+14, GSU_BRUSH_MERGE_CACHE_ACTIVE
+        moves   R2, R2
+        bne     @Ordinary
+        nop
+        lm      R0, (BRUSH_TOKEN_COUNT)
+        lm      R1, (ALIAS_TOKEN_COUNT)
+        sub     R1
+        GSU_ABSOLUTE_GOTO BrushRenderMixedTokensAtCursor
+@Ordinary:
+        GSU_ABSOLUTE_GOTO BrushRenderMixedTokens
+
+; This path is reached only after clipping admits pixels and before PLOT.
+AliasInvalidateResidentWorldAndPrepareSteps:
+        move    R0, #0
+        sm      (GSU_RESIDENT_WORLD_STATUS), R0
+        GSU_ABSOLUTE_GOTO AliasPrepareRasterSteps
+.endif
+.delmacro COMPARE_RESIDENT_WORLD_WORD

@@ -8,6 +8,17 @@ namespace quake_bsp_reference {
 
 inline constexpr std::size_t kBrushRomBankBytes = 0x8000;
 
+bool run_packed_brush_coordinate_self_test();
+
+// Precombined grids use every six-bit level. Zero addresses Quake's
+// brightest, non-identity colormap row; it is not a missing-sample sentinel.
+inline std::uint8_t checked_packed_brush_lightmap_level(std::uint8_t level)
+{
+    if (level > 63)
+        fail("QBSA brush lightmap level escapes 0..63");
+    return level;
+}
+
 struct PackedBrushSection
 {
     std::string name;
@@ -28,6 +39,7 @@ struct PackedBrushVariant
     std::uint16_t bucket_count{};
     std::array<std::int16_t, 3> bounds_center_q2{};
     std::array<std::uint16_t, 3> bounds_extent_q2{};
+    std::int16_t rise_from_bottom_q2{};
 };
 
 struct PackedBrushBucket
@@ -120,6 +132,13 @@ struct PackedBrushVisualState
     std::vector<std::array<std::uint8_t, 3>> textures;
 };
 
+// A translation-only inline entity may select a local QBSE variant independently.
+struct PackedBrushInlineVariant
+{
+    std::uint16_t entity{};
+    std::uint16_t local_variant{};
+};
+
 struct PackedBrushAssets
 {
     std::uint16_t leaf_count{};
@@ -130,8 +149,10 @@ struct PackedBrushAssets
     std::vector<PackedBrushBucket> buckets;
     std::vector<PackedBrushFragment> fragments;
     std::vector<PackedBrushFace> faces;
+    std::map<std::uint16_t, SourceFace> switched_light_sources;
     std::vector<PackedPlane> face_planes;
     std::vector<PackedVertex> vertices;
+    std::vector<std::uint8_t> relative_vertex_model;
     std::vector<PackedBrushEntity> entities;
     std::vector<PackedBrushStaticVariant> static_variants;
     std::vector<PackedBrushExternalStaticVariant> external_static_variants;
@@ -143,6 +164,8 @@ struct PackedBrushAssets
 PackedBrushAssets load_packed_brush_assets(const fs::path& data_dir);
 
 std::uint16_t packed_brush_visual_state_at_pose(const PackedBrushAssets& assets, std::size_t pose);
+PackedBrushInlineVariant
+packed_brush_inline_variant_at_pose(const PackedBrushAssets& assets, std::size_t pose, std::uint16_t entity);
 
 struct PackedBrushGroupRecord
 {
@@ -209,7 +232,11 @@ PackedTextureRaster render_packed_brush_pipeline(
     double surface_time = 0.0,
     bool external_bsp_enabled = true,
     std::optional<std::size_t> fly_source_pose = std::nullopt,
-    bool fly_static_brushes = true
+    bool fly_static_brushes = true,
+    std::optional<std::span<const std::uint16_t>> live_external_entities = std::nullopt,
+    std::span<const PackedBrushInlineVariant> live_inline_variants = {},
+    std::span<const std::uint8_t> authored_visibility = {},
+    std::span<const std::uint8_t> face_colors = {}
 );
 
 PackedTextureRaster render_direct_qbsf_brush_authority(

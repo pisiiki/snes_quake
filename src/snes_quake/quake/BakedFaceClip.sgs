@@ -1,0 +1,17 @@
+; Enter the clipper at the first plane touched by the Flat world contour.
+; Before that plane every record would be copied unchanged in order.
+.if .defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)
+BAKED_FACE_CLIP_OUTCODES = 1
+BakedClipFaceBegin:
+        lm      R0, (CONVEX_OUTPUT_COUNT)
+        move    R1, #3
+        cmp     R1
+        bcs     @Project
+        nop
+        GSU_ABSOLUTE_GOTO TextureFaceDone
+@Project:
+        sm      (CONVEX_COUNT), R0
+        iwt     R0, #TEXTURE_VIEW_A
+        sm      (CONVEX_INPUT_PTR), R0
+        GSU_ABSOLUTE_GOTO BakedClipFaceLeading
+.endif

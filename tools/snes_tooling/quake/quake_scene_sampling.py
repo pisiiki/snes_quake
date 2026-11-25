@@ -4,7 +4,7 @@ The last record at a timestamp owns discrete state. Continuous transforms,
 including U_NOLERP/MOVETYPE_STEP entities, blend toward the next snapshot over
 at most 100 ms; genuine cuts remain at their recorded timestamp. This offline
 presentation policy does not emulate a live client's interpolation delay.
-All consumers receive the same Q3 positions and protocol angles.
+The packed replay consumers use Q3 positions and protocol angles.
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ class SceneSampler:
                 b < a for a,b in zip(self.times, self.times[1:])):
             raise ValueError('scene frames require finite monotonic timestamps')
 
-    def sample(self, time):
+    def sample(self, time, *, quantize=True):
         if not math.isfinite(time):
             raise ValueError('scene sample time must be finite')
         index = max(0, bisect.bisect_right(self.times, time)-1)
@@ -93,7 +93,7 @@ class SceneSampler:
             reason = 'end-of-track' if right is None else interval_reason(left, right, state, following)
             raw = state if reason != 'eligible' else interpolate_entity(
                 state, following, left.server_time, right.server_time, time)
-            sampled = quantize_transform(raw)
+            sampled = quantize_transform(raw) if quantize else raw
             states.append(sampled)
             decisions.append(dict(entity=state.entity_number, reason=reason,
                 interpolated=(raw.origin != state.origin or raw.angles != state.angles),
@@ -102,14 +102,14 @@ class SceneSampler:
         return left, tuple(states), decisions
 
 
-def sample_scene_track(track, rate):
+def sample_scene_track(track, rate, *, quantize=True):
     """Keep the existing camera ABI, with entity provenance and scene time distinct."""
     cameras = sample_camera_track([sample.camera for sample in track.samples], rate)
     sampler = SceneSampler(track.entity_frames)
     camera_times = [sample.camera.server_time for sample in track.samples]
     result = []
     for camera in cameras:
-        left, entities, _ = sampler.sample(camera.server_time)
+        left, entities, _ = sampler.sample(camera.server_time, quantize=quantize)
         source = track.samples[bisect.bisect_right(camera_times, camera.server_time)-1]
         result.append(CameraEntitySample(camera, entities, left.model_precache or source.model_precache,
                                         source.view_entity, left.server_time, left.record))

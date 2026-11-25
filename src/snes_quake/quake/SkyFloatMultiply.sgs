@@ -1,0 +1,108 @@
+; Exact positive normalized24 x normalized24 product, rounded once to binary32.
+; Split at bit15 so every LMULT operand stays nonnegative signed16.
+.macro SF_ADD_SHIFT15
+        move    R1, #0
+        with    R0
+        lsr
+        with    R4
+        ror
+        with    R1
+        ror
+        lm      R2, (SF_W0)
+        with    R2
+        add     R1
+        sm      (SF_W0), R2
+        lm      R2, (SF_W1)
+        with    R2
+        adc     R4
+        sm      (SF_W1), R2
+        lm      R2, (SF_W2)
+        with    R2
+        adc     R0
+        sm      (SF_W2), R2
+.endmacro
+SkyFloatMultiply24:
+        lm      R7, (SF_A0)
+        lm      R8, (SF_A1)
+        move    R0, R7
+        with    R0
+        or      R8
+        bne     @ANonzero
+        nop
+        GSU_ABSOLUTE_GOTO @Zero
+@ANonzero:
+        lm      R9, (SF_B0)
+        lm      R10, (SF_B1)
+        move    R0, R9
+        with    R0
+        or      R10
+        bne     @Nonzero
+        nop
+        GSU_ABSOLUTE_GOTO @Zero
+@Nonzero:
+        with    R7
+        add     R7
+        with    R8
+        adc     R8
+        with    R7
+        lsr
+        with    R9
+        add     R9
+        with    R10
+        adc     R10
+        with    R9
+        lsr
+        move    R6, R9
+        from    R7
+        lmult
+        sm      (SF_W0), R4
+        sm      (SF_W1), R0
+        move    R0, #0
+        sm      (SF_W2), R0
+        move    R6, R10
+        from    R7
+        lmult
+        SF_ADD_SHIFT15
+        move    R6, R9
+        from    R8
+        lmult
+        SF_ADD_SHIFT15
+        move    R6, R10
+        from    R8
+        lmult
+        ; p3 <<30: low2 bits go into bits14..15 of W1.
+        move    R1, #0
+        with    R0
+        lsr
+        with    R4
+        ror
+        with    R1
+        ror
+        with    R0
+        lsr
+        with    R4
+        ror
+        with    R1
+        ror
+        lm      R2, (SF_W1)
+        with    R2
+        add     R1
+        sm      (SF_W1), R2
+        lm      R2, (SF_W2)
+        with    R2
+        adc     R4
+        sm      (SF_W2), R2
+        lm      R0, (SF_AEXP)
+        lm      R1, (SF_BEXP)
+        with    R0
+        add     R1
+        sm      (SF_EXP), R0
+        GSU_ABSOLUTE_GOTO SkyFloatRoundProduct48
+@Zero:
+        move    R0, #0
+        sm      (SF_W0), R0
+        sm      (SF_W1), R0
+        sm      (SF_W2), R0
+        sm      (SF_EXP), R0
+        ret
+        nop

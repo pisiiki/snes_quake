@@ -9,6 +9,7 @@ from snes_tooling.shared.processes import python_command
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -23,20 +24,22 @@ SHARED_TOOLS = Workspace.discover().shared_tools
 
 from snes_tooling.shared.generated_outputs import sync_generated_outputs  # noqa: E402
 import snes_tooling.quake.quake_mesen_mapping as quake_mesen_mapping  # noqa: E402
+from snes_tooling.quake import quake_bsp_edge_refinement  # noqa: E402
 from snes_tooling.quake.quake_rom_config import (  # noqa: E402
     BSP_SOURCE_ERICW_MAP,
     DEFAULT_CONFIG,
     configured_alias_sprites,
     configured_bsp_build,
+    configured_composed_cache,
     configured_demo_source,
     configured_mesen_target,
     configured_playback_sample_rate,
     configured_sky,
     configured_soundtrack,
-    configured_warp_source_focal,
+    configured_target,
 )
 
-EXAMPLE = Workspace.discover().root / "src/snes_quake"
+EXAMPLE = Workspace.discover().quake_example
 WORKSPACE = Workspace.discover().root
 DATA = EXAMPLE / "Data"
 ASSET_CHAIN_RECEIPT = Path("QuakeBSPAssetChain.json")
@@ -45,7 +48,9 @@ ORDERED_REPLAY_GENERATOR = "generate_quake_bsp_ordered_replay.py"
 PACKET_ORACLE_GENERATOR = "quake_bsp_packet_oracle.py"
 SKY_ASSET_GENERATOR = "generate_quake_bsp_sky_assets.py"
 TURBULENCE_ASSET_GENERATOR = "generate_quake_bsp_turbulence_assets.py"
+WEAPON_ASSET_GENERATOR = "generate_quake_snes_weapon_sprites.py"
 CONFIG_GENERATORS = {
+    COMPOSED_CACHE_GENERATOR,
     "generate_quake_alias_visibility.py",
     "generate_quake_bsp.py",
     "generate_quake_brush_replay.py",
@@ -53,6 +58,7 @@ CONFIG_GENERATORS = {
     "generate_quake_reference_external_bsp_replay.py",
     "generate_quake_reference_sound_replay.py",
     "generate_quake_snes_soundtrack.py",
+    WEAPON_ASSET_GENERATOR,
     SKY_ASSET_GENERATOR,
 }
 GENERATORS = (
@@ -64,11 +70,12 @@ GENERATORS = (
     "generate_quake_reference_external_bsp_replay.py",
     "generate_quake_reference_sound_replay.py",
     "generate_quake_snes_soundtrack.py",
-    "generate_quake_alias_visibility.py",
-    "generate_quake_monster_cameras.py",
+    WEAPON_ASSET_GENERATOR,
     COMPOSED_CACHE_GENERATOR,
     SKY_ASSET_GENERATOR,
     TURBULENCE_ASSET_GENERATOR,
+    "generate_quake_alias_visibility.py",
+    "generate_quake_monster_cameras.py",
 )
 
 
@@ -107,7 +114,8 @@ def asset_chain_receipt(config: Path, config_sha256: str) -> bytes:
             config_locator = config.name
             config_external = True
 
-    source = configured_demo_source(config)
+    target = configured_target(config)
+    source = configured_demo_source(config) if target["mode"] == "demo" else None
     alias_sprites = configured_alias_sprites(config)
     soundtrack = configured_soundtrack(config)
     sky = configured_sky(config)
@@ -119,10 +127,12 @@ def asset_chain_receipt(config: Path, config_sha256: str) -> bytes:
     )
     try:
         map_entry = str(world_metadata["demo"]["map_entry"])
-        generated_demo = str(world_metadata["demo"]["locator"])
+        generated_demo = str(world_metadata["demo"].get("locator"))
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError("generated world metadata has no demo identity") from error
-    if generated_demo != source.locator:
+    if (source is not None and generated_demo != source.locator
+            or source is None and (map_entry != target["map"]
+                                   or world_metadata.get("target") != target)):
         raise RuntimeError(
             "generated world metadata belongs to a different configured demo"
         )
@@ -152,8 +162,9 @@ def asset_chain_receipt(config: Path, config_sha256: str) -> bytes:
             "bspBuild": {
                 "source": configured_bsp_build(config).source,
             },
-            "demoSource": source.kind,
-            "demoLocator": source.locator,
+            **({"target": target} if source is None else {}),
+            "demoSource": source.kind if source is not None else None,
+            "demoLocator": source.locator if source is not None else None,
             "mapEntry": map_entry,
             "playbackSampleRateHz": configured_playback_sample_rate(config),
             "mesenTarget": configured_mesen_target(config).name,
@@ -183,14 +194,15 @@ def validated_config_identity(config: Path | None = None) -> tuple[Path, str]:
 
     path = (config or DEFAULT_CONFIG).resolve()
     payload = path.read_bytes()
-    configured_demo_source(path)
+    if configured_target(path)["mode"] == "demo":
+        configured_demo_source(path)
     configured_playback_sample_rate(path)
     configured_soundtrack(path)
-    configured_warp_source_focal(path)
     configured_sky(path)
     configured_mesen_target(path)
     configured_alias_sprites(path)
     configured_bsp_build(path)
+    configured_composed_cache(path)
     digest = hashlib.sha256(payload).hexdigest()
     require_config_identity(path, digest)
     return path, digest
@@ -257,8 +269,11 @@ def command_for(
 ) -> list[str]:
     command = python_command(Workspace.discover().root, "snes_tooling.quake." + Path(generator).stem)
     if generator == PACKET_ORACLE_GENERATOR:
-        command.append("--check" if check else "--write")
+        command.extend(("--data-dir", str(DATA), "--check" if check else "--write",
+                        str(DATA / "QuakeBSPPacketOracle.json")))
         return command
+    if generator == "generate_quake_bsp.py":
+        command.extend(("--packed-edge-scope", quake_bsp_edge_refinement.PRODUCTION_PACKED_EDGE_SCOPE))
     if pak is not None and generator not in {
         COMPOSED_CACHE_GENERATOR,
         ORDERED_REPLAY_GENERATOR,
@@ -269,7 +284,12 @@ def command_for(
     if config is not None and generator in CONFIG_GENERATORS:
         command.extend(("--config", str(config)))
     if generator == ORDERED_REPLAY_GENERATOR:
-        command.append("--include-full-rate")
+        command.extend(("--data-dir", str(DATA), "--output", str(DATA), "--include-full-rate"))
+    if generator == "generate_quake_alias_visibility.py":
+        command.extend(("--output", str(DATA)))
+    if (generator == COMPOSED_CACHE_GENERATOR and config is not None
+            and configured_target(config)["mode"] == "fly"):
+        command.extend(("--first-bank", "66", "--bank-count", "21"))
     if check:
         command.append("--check")
     return command
@@ -280,16 +300,52 @@ def prepare_renderer_sources(*, check: bool) -> None:
     generate(EXAMPLE, check=check)
 
 
+def selected_generators(config: Path) -> tuple[str, ...]:
+    """Use the same content producers in the normal and journaled chains."""
+    if configured_target(config)["mode"] != "fly":
+        return GENERATORS
+    level_generators = {"generate_quake_bsp.py", "generate_quake_monster_cameras.py",
+                        COMPOSED_CACHE_GENERATOR, SKY_ASSET_GENERATOR,
+                        TURBULENCE_ASSET_GENERATOR}
+    return tuple(name for name in GENERATORS if name in level_generators)
+
+
+def complete_generator(generator: str, *, config: Path, pak: Path | None,
+                       check: bool) -> None:
+    if (generator == "generate_quake_bsp.py"
+            and configured_target(config)["mode"] == "fly"):
+        from snes_tooling.quake.generate_quake_alias_billboards import OWNED_OUTPUTS as alias_families
+        from snes_tooling.quake.generate_quake_brush_replay import OWNED_OUTPUTS as brush_families
+        from snes_tooling.quake.quake_level_assets import build_outputs
+        from snes_tooling.quake.quake_bsp_assets import locate_quake_pak
+        sync_generated_outputs(build_outputs(pak or locate_quake_pak(None), config),
+                               DATA, check=check, owned_families=(*alias_families, *brush_families))
+
+
+def complete_content(*, check: bool, had_renderer_inputs: bool) -> None:
+    from snes_tooling.quake.quake_runtime_codegen import generate_display_inputs, generate_world_lightmap_proof
+    generate_display_inputs(EXAMPLE, check=check)
+    generate_world_lightmap_proof(EXAMPLE, check=check)
+    if not had_renderer_inputs:
+        prepare_renderer_sources(check=check)
+
+
 def run(
     *,
     check: bool,
     pak: Path | None = None,
+    source_pak: Path | None = None,
     config: Path,
     config_sha256: str,
 ) -> int:
+    from snes_tooling.quake.quake_asset_preflight import require_reference_profile_sources
+    require_reference_profile_sources(config)
     # Renderer replication depends only on owned source, and is preflighted
     # before expensive content stages or their receipt publication.
-    prepare_renderer_sources(check=check)
+    # A fresh staged target has no content-dependent renderer includes yet.
+    had_renderer_inputs = (DATA / "QuakeBSPWeaponSpritesMask.i").is_file()
+    if had_renderer_inputs:
+        prepare_renderer_sources(check=check)
     if pak is None and configured_bsp_build(config).source == BSP_SOURCE_ERICW_MAP:
         # Every generator must consume the same configured map, including the
         # visibility-profile consumers that reject the original shipping BSP.
@@ -297,25 +353,21 @@ def run(
         from snes_tooling.quake.quake_bsp_assets import locate_quake_pak
 
         arguments = build_quake_modern_bsp.parse_args(
-            ["--pak", str(locate_quake_pak(None)), "--config", str(config)]
+            ["--pak", str(locate_quake_pak(source_pak)), "--config", str(config)]
         )
         print("Preparing configured modern BSP", flush=True)
         build_quake_modern_bsp.build(arguments)
         pak = arguments.output_pak.resolve()
+    elif pak is None and source_pak is not None:
+        pak = source_pak.resolve()
     completed = 0
-    for index, generator in enumerate(GENERATORS, start=1):
+    selected = selected_generators(config)
+    for index, generator in enumerate(selected, start=1):
         require_config_identity(config, config_sha256)
         command = command_for(generator, check=check, pak=pak, config=config)
-        print(f"[{index}/{len(GENERATORS)}] {generator}", flush=True)
+        print(f"[{index}/{len(selected)}] {generator}", flush=True)
         try:
-            result = subprocess.run(
-                command,
-                cwd=Workspace.discover().root / "src/snes_quake",
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
+            result = run_generator(command, generator)
         except KeyboardInterrupt:
             raise AssetGenerationInterrupted(generator, completed) from None
         if result.returncode:
@@ -323,9 +375,13 @@ def run(
                 f"{generator} failed with exit {result.returncode}:\n{result.stdout}"
             )
         completed += 1
+        complete_generator(generator, config=config, pak=pak, check=check)
         if result.stdout:
             print(result.stdout.rstrip(), flush=True)
         require_config_identity(config, config_sha256)
+    # Source preflight above intentionally runs before fresh content exists.
+    # Qualify only after every content producer has published its final bytes.
+    complete_content(check=check, had_renderer_inputs=had_renderer_inputs)
     sync_generated_outputs(
         {ASSET_CHAIN_RECEIPT: asset_chain_receipt(config, config_sha256)},
         DATA,
@@ -334,11 +390,21 @@ def run(
     return completed
 
 
+def run_generator(command, generator):
+    options = dict(cwd=EXAMPLE, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return subprocess.run(command, **options)
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pak", type=Path)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--check", action="store_true")
+    checks = parser.add_mutually_exclusive_group()
+    checks.add_argument("--check", action="store_true")
+    checks.add_argument(
+        "--check-receipt-only", action="store_true",
+        help="read-only staged-input check against the existing asset-chain receipt; runs no generators",
+    )
     return parser.parse_args(argv)
 
 
@@ -347,15 +413,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         requested_config = args.config
-        if args.check and requested_config is None:
+        if (args.check or args.check_receipt_only) and requested_config is None:
             requested_config = receipt_bound_config()
         config, config_sha256 = validated_config_identity(requested_config)
-        completed = run(
-            check=args.check,
-            pak=args.pak.resolve() if args.pak is not None else None,
-            config=config,
-            config_sha256=config_sha256,
-        )
+        if args.check_receipt_only:
+            from snes_tooling.quake.quake_asset_preflight import require_asset_chain_receipt
+            require_asset_chain_receipt(config)
+            completed = 0
+        else:
+            completed = run(
+                check=args.check,
+                pak=args.pak.resolve() if args.pak is not None else None,
+                config=config,
+                config_sha256=config_sha256,
+            )
     except KeyboardInterrupt as error:
         completed = getattr(error, "completed", 0)
         active = getattr(error, "generator", "preflight")
@@ -372,7 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    action = "verified" if args.check else "generated"
+    action = "receipt verified" if args.check_receipt_only else "verified" if args.check else "generated"
     print(
         f"Quake SNES asset chain {action}: generators={completed} "
         f"config={config} configSha256={config_sha256} "

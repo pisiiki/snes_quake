@@ -79,6 +79,7 @@ MODEL_CLASS_IDS = {
     "func_plat": 4,
     "func_train": 5,
     "func_wall": 6,
+    "func_bossgate": 6,  # Solid static wall until all four episode bits are set.
     "external_bsp": 7,
 }
 SECTION_ORDER = (
@@ -106,6 +107,7 @@ SECTION_ORDER = (
     "SOLID",
 )
 SECTION_RECORD_BYTES = {
+    "PLATPOSE": 1,
     "REPLAY": 0,
     "ROWSTATE": ROW_STATE_RECORD.size,
     "FLYSTATE": ROW_STATE_RECORD.size,
@@ -1088,11 +1090,16 @@ def _model_and_geometry_assets(
                 )
             )
         model_face_textures[inline_model] = tuple(model_texture_ids)
-        bounds = tuple(round(float(model[index])) for index in range(6))
-        if any(float(model[index]) != bounds[index] for index in range(6)) or any(
-            not -0x8000 <= value <= 0x7FFF for value in bounds
-        ):
-            raise ValueError(f"brush model *{inline_model} bounds exceed exact int16")
+        source_bounds = tuple(map(float, model[:6]))
+        if not all(math.isfinite(value) for value in source_bounds):
+            raise ValueError(f"brush model *{inline_model} has nonfinite bounds")
+        # The signed-word metadata box must enclose the authored float AABB.
+        # Vertex, face plane, collision and texture inputs retain their own precision.
+        bounds = tuple(math.floor(value) for value in source_bounds[:3]) + tuple(
+            math.ceil(value) for value in source_bounds[3:]
+        )
+        if any(not -0x8000 <= value <= 0x7FFF for value in bounds):
+            raise ValueError(f"brush model *{inline_model} bounds exceed int16")
         origin_q3 = tuple(
             quantize_q3(value, label=f"brush model *{inline_model} baseline origin")
             for value in baseline.origin
@@ -1134,7 +1141,7 @@ def _model_and_geometry_assets(
                 "packedFirstFace": first_packed_face,
                 "packedFirstIndex": first_packed_index,
                 "packedIndexCount": model_index_count,
-                "sourceBounds": [*bounds[:3], *bounds[3:]],
+                "sourceBounds": [source if source != packed else packed for source, packed in zip(source_bounds, bounds)],
                 "baselineOriginQ3": list(origin_q3),
             }
         )
@@ -1428,13 +1435,14 @@ def _place_runtime_sections(
     first_bank: int,
     leaf_count: int,
 ) -> tuple[tuple[bytes, ...], dict[str, Any]]:
-    if tuple(sections) != SECTION_ORDER:
+    ordering = (*SECTION_ORDER, "PLATPOSE") if "PLATPOSE" in sections else SECTION_ORDER
+    if tuple(sections) != ordering:
         raise AssertionError("brush runtime sections are not in canonical order")
     if first_bank + RUNTIME_BANK_COUNT > MAX_GSU_ROM_BANKS:
         raise ValueError(
             f"brush runtime bank bound overflows bank {MAX_GSU_ROM_BANKS - 1}"
         )
-    reserve = ASSET_HEADER.size + len(SECTION_ORDER) * ASSET_SECTION.size
+    reserve = ASSET_HEADER.size + len(ordering) * ASSET_SECTION.size
     used = [reserve, *(0 for _ in range(RUNTIME_BANK_COUNT - 1))]
     placements: dict[str, tuple[int, int]] = {}
     lights = sections["LIGHTS"]
@@ -1446,8 +1454,8 @@ def _place_runtime_sections(
     placements["LIGHTS"] = (1, 0)
     used[1] = len(lights)
     candidates = sorted(
-        (name for name in SECTION_ORDER if name != "LIGHTS"),
-        key=lambda name: (-len(sections[name]), SECTION_ORDER.index(name)),
+        (name for name in ordering if name != "LIGHTS"),
+        key=lambda name: (-len(sections[name]), ordering.index(name)),
     )
     for name in candidates:
         payload = sections[name]
@@ -1475,7 +1483,7 @@ def _place_runtime_sections(
     storage = [bytearray([0xFF]) * ROM_BANK_BYTES for _ in range(RUNTIME_BANK_COUNT)]
     directory = bytearray()
     section_metadata: list[dict[str, Any]] = []
-    for name in SECTION_ORDER:
+    for name in ordering:
         bank_index, offset = placements[name]
         payload = sections[name]
         bank = first_bank + bank_index
@@ -1516,7 +1524,7 @@ def _place_runtime_sections(
         record_counts["INDICES"],
         record_counts["TEXDIR"],
         leaf_count,
-        len(SECTION_ORDER),
+        len(ordering),
         int.from_bytes(hashlib.sha256(sections["REPLAY"]).digest()[:8], "little"),
     )
     storage[0][: ASSET_HEADER.size] = header
@@ -1526,7 +1534,7 @@ def _place_runtime_sections(
         "version": ASSET_VERSION,
         "headerBytes": ASSET_HEADER.size,
         "sectionRecordBytes": ASSET_SECTION.size,
-        "sectionCount": len(SECTION_ORDER),
+        "sectionCount": len(ordering),
         "firstBank": first_bank,
         "bankCount": RUNTIME_BANK_COUNT,
         "logicalSectionBytes": logical_bytes,
@@ -1604,6 +1612,9 @@ def build_brush_assets(
     direct_safe_mask: bytes = b"",
     external_active_rows: bytes = b"",
     external_active_entities: tuple[int, ...] = (),
+    independent_inline_entities: tuple[int, ...] = (),
+    platform_bottoms: dict[int, int] | None = None,
+    fragment_gameplay: bool = False,
 ) -> BrushAssetBuild:
     """Build all static, replay, texture, and composition assets as one set."""
     if len(palette) != 768:
@@ -1704,7 +1715,21 @@ def build_brush_assets(
         model_face_textures,
         source_to_packed,
         external_first_slot,
+        {compact.slot_by_entity[s.entity_number]: compact.local_variant_by_state[s]
+         for s in replay.rows[0].brushes if s.inline_model in (platform_bottoms or {})},
     )
+    # Playable CPU/GSU and C++ render the clipped QBSF polygons. The original
+    # polygon index stream, authored texture coordinates and prebaked vertex
+    # shading have no runtime reader. Preserve the UVs for the host Flat bake.
+    omitted_geometry = {}
+    bake_inputs = {}
+    if fragment_gameplay:
+        bake_inputs[Path("QuakeBSPBrushBakeTexcoord.bin")] = geometry_sections["TEXCOORD"]
+        for name in ("INDICES", "SHADING", "TEXCOORD"):
+            source_payload = geometry_sections[name]
+            omitted_geometry[name] = dict(bytes=len(source_payload),
+                                          sha256=hashlib.sha256(source_payload).hexdigest())
+            geometry_sections[name] = b""
     light_directory = _lightmap_directory(lightmaps)
     solid = _solid_leaf_bitset(source)
     sections = {
@@ -1722,8 +1747,10 @@ def build_brush_assets(
         "ANIM": animation,
         "SOLID": solid,
     }
-    sections = {name: sections[name] for name in SECTION_ORDER}
+    ordering = (*SECTION_ORDER, "PLATPOSE") if "PLATPOSE" in sections else SECTION_ORDER
+    sections = {name: sections[name] for name in ordering}
     record_counts = {
+        "PLATPOSE": len(sections.get("PLATPOSE", b"")),
         "REPLAY": 1,
         "ROWSTATE": len(visual_sections["ROWSTATE"]) // ROW_STATE_RECORD.size,
         "FLYSTATE": len(visual_sections["FLYSTATE"]) // ROW_STATE_RECORD.size,
@@ -1765,11 +1792,14 @@ def build_brush_assets(
         source_to_packed,
         source_face_ids,
         first_bank=runtime_first_bank + len(runtime_chunks),
+        platform_bottoms=platform_bottoms,
         maximum_bank_count=min(
             BRUSH_FRAGMENT_BANK_RESERVATION,
             MAX_GSU_ROM_BANKS - runtime_first_bank - len(runtime_chunks),
         ),
     )
+    if omitted_geometry:
+        runtime_metadata["offlineSourceGeometry"] = omitted_geometry
     from snes_tooling.quake.brush_pvs import install_leaf_pvs
     texture_chunks, runtime_chunks, pvs_metadata = install_leaf_pvs(
         source, fragment_assets, bsp_tools.decompress_pvs,
@@ -1786,6 +1816,13 @@ def build_brush_assets(
         fragment_assets.metadata,
         fragment_assets.variant_leaf_groups,
     )
+    if independent_inline_entities:
+        from snes_tooling.quake.quake_brush_independent_bounds import extend_independent_inline_fragment_bounds
+        link_bounds = extend_independent_inline_fragment_bounds(
+            link_bounds, compact, visual_sections, compact_to_fragments, static_fragments,
+            fragment_assets.metadata, fragment_assets.variant_leaf_groups, independent_inline_entities,
+        )
+        visual_metadata["independentInlineEntities"] = list(independent_inline_entities)
     link_bounds = extend_external_fly_fragment_bounds(
         link_bounds,
         external_active_rows,
@@ -1827,6 +1864,7 @@ def build_brush_assets(
     fragment_audit = fragment_assets.metadata["routeAudit"]
     outputs = {
         Path('QuakeBSPBrushCompactReplay.bin'): compact.payload,
+        **bake_inputs,
         **{
             Path(f"QuakeBSPBrushTexturePixels{index}.bin"): chunk
             for index, chunk in enumerate(texture_chunks)

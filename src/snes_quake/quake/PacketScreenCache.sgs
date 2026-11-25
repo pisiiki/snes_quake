@@ -1,0 +1,188 @@
+; Retain exact X/Y from the ordinary projector for the unclipped world
+; contour. Per-face readiness proves every referenced screen record is live.
+.if .defined(PLAYABLE_PACKET_SCREEN_REUSE_CODE) && (BSP_RENDER_SCALE = 2)
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+
+TextureTryPacketScreenPolygon:
+        lm      R0, (GSU_PACKET_SCREEN_READY)
+        moves   R0, R0
+        bne     PacketScreenFindFace
+        nop
+        iwt     R10, #GSU_PACKET_SCREEN_FACE_BITS
+        iwt     R12, #GSU_PACKET_SCREEN_FACE_BITS_BYTES/2
+        iwt     R13, #PacketScreenClearFaceBits
+PacketScreenClearFaceBits:
+        movew   (R10), R0
+        inc     R10
+        loop
+        inc     R10
+        move    R0, #1
+        sm      (GSU_PACKET_SCREEN_READY), R0
+PacketScreenFindFace:
+        lm      R0, (PACKET_SOURCE_INDEX)
+        move    R1, R0
+        with    R1
+        and     #7
+        lsr
+        lsr
+        lsr
+        iwt     R10, #GSU_PACKET_SCREEN_FACE_BITS
+        with    R10
+        add     R0
+        PACKET_LOAD_BIT_MASK
+        move    R0, #0
+        moveb   R0, (R10)
+        with    R0
+        and     R2
+        bne     PacketScreenReplay
+        nop
+
+        sm      (GSU_PACKET_SCREEN_BIT_PTR), R10
+        sm      (GSU_PACKET_SCREEN_BIT_MASK), R2
+        iwt     R8, #.loword(PacketScreenColdProject)
+        ibt     R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+
+PacketScreenCaptureAfterProjectionROM:
+        cache
+        move    R5, R0                   ; Acceptance and Y ABI.
+        move    R6, R1
+        move    R7, R2
+        lm      R12, (CONVEX_COUNT)
+        lm      R10, (CONVEX_INDEX_PTR)   ; Contour left the exclusive end.
+        from    R12
+        add     R12
+        with    R10
+        sub     R0
+        iwt     R8, #TEXTURE_SCREEN
+        iwt     R13, #PacketScreenCapture
+PacketScreenCapture:
+        movew   R4, (R10)
+        with    R4
+        add     R4
+        with    R4
+        add     R4
+        iwt     R9, #GSU_PACKET_SCREEN_COORDS
+        with    R9
+        add     R4
+        movew   R0, (R8)
+        movew   (R9), R0
+        inc     R8
+        inc     R8
+        inc     R9
+        inc     R9
+        movew   R0, (R8)
+        movew   (R9), R0
+        with    R8
+        add     #8
+        inc     R10
+        loop
+        inc     R10
+        lm      R10, (GSU_PACKET_SCREEN_BIT_PTR)
+        lm      R1, (GSU_PACKET_SCREEN_BIT_MASK)
+        move    R0, #0
+        moveb   R0, (R10)
+        or      R1
+        moveb   (R10), R0
+        move    R0, R5
+        move    R1, R6
+        move    R2, R7
+        lm      R8, (GSU_PACKET_SCREEN_RETURN)
+        ibt     R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+
+PacketScreenReplay:
+        cache
+        lm      R12, (CONVEX_COUNT)
+        lm      R8, (CONVEX_INDEX_PTR)
+        from    R12
+        add     R12
+        with    R8
+        sub     R0
+        iwt     R9, #TEXTURE_VIEW_A
+        iwt     R10, #TEXTURE_SCREEN
+        iwt     R5, #24576
+        iwt     R6, #-8192
+        iwt     R13, #PacketScreenReplayVertex
+PacketScreenReplayVertex:
+        movew   R4, (R8)
+        with    R4
+        add     R4
+        with    R4
+        add     R4
+        iwt     R3, #GSU_PACKET_SCREEN_COORDS
+        with    R3
+        add     R4
+        movew   R0, (R3)
+        movew   (R10), R0
+        inc     R3
+        inc     R3
+        inc     R10
+        inc     R10
+        movew   R1, (R3)
+        movew   (R10), R1
+        with    R1
+        cmp     R5
+        bpl     PacketScreenMinReady
+        nop
+        move    R5, R1
+        from    R10
+        to      R7
+        sub     #2
+PacketScreenMinReady:
+        with    R6
+        cmp     R1
+        bpl     PacketScreenMaxReady
+        nop
+        move    R6, R1
+PacketScreenMaxReady:
+        inc     R10
+        inc     R10
+        with    R9
+        add     #4
+        movew   R2, (R9)                 ; Keep per-face S/T from this contour.
+        inc     R9
+        inc     R9
+        movew   R0, (R9)
+        movew   (R10), R0
+        inc     R9
+        inc     R9
+        inc     R10
+        inc     R10
+        movew   R0, (R9)
+        movew   (R10), R0
+        inc     R9
+        inc     R9
+        inc     R10
+        inc     R10
+        movew   (R10), R2
+        inc     R10
+        inc     R10
+        inc     R8
+        loop
+        inc     R8
+
+        sm      (CONVEX_MIN_Y), R5
+        sm      (CONVEX_MAX_Y), R6
+        sm      (CONVEX_TOP_PTR), R7
+        sm      (CONVEX_CURRENT_PTR), R9
+        sm      (CONVEX_SCREEN_PTR), R10
+        lm      R0, (CONVEX_COUNT)
+        sm      (CONVEX_SCREEN_COUNT), R0
+        sm      (CONVEX_EDGE_COUNT), R12 ; LOOP exhausted the full contour.
+        lm      R0, (GSU_PACKET_SCREEN_RETURN)
+        sm      (TEXTURE_PROJECT_RETURN), R0
+        iwt     R8, #.loword(PacketScreenTail)
+        ibt     R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+PacketScreenReplayEnd:
+.assert .loword(PacketScreenReplayEnd) <= (.loword(PacketScreenReplay) & $FFF0) + GSU_CACHE_BYTES, lderror, "Packet screen replay exceeds its ROM cache window"
+.assert .bankbyte(TextureTryPacketScreenPolygon) = ($80+BSP_GSU_ROM3_BANK), lderror, "Packet screen cache left ROM3"
+.assert .bankbyte(*-1) = ($80+BSP_GSU_ROM3_BANK), lderror, "Packet screen cache crossed ROM3"
+.endif

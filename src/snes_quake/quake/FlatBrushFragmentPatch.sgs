@@ -1,0 +1,17 @@
+        .export FlatBrushFragmentPatch, FlatBrushFragmentPatchEnd
+FlatBrushFragmentPatch:
+        ; Keep the shared vertex record shape and all camera-space data.
+        move    R0, #0
+        sm      (TEXTURE_CUR_S), R0
+        sm      (TEXTURE_CUR_T), R0
+        ret
+        nop
+FlatBrushFragmentPatchEnd:
+
+.if .defined(PLAYABLE_MAP_ID) && .defined(PLAYABLE_BRUSH_FRAGMENT_AFFINE) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushSkipAffinePatch, FlatBrushSkipAffinePatchEnd
+FlatBrushSkipAffinePatch:
+        ret
+        nop
+FlatBrushSkipAffinePatchEnd:
+.endif

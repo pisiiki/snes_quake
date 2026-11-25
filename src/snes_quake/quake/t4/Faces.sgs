@@ -4,7 +4,7 @@
 .segment "GSU_T4_FACE_DISPATCH_PATCH"
 
 T4TextureFaceLightmapDispatch:
-        jal     TextureLoadFaceLightmap
+        TexturePrepareWorldLightmap
         jal     TextureRenderConvexFaceShaded
         bra     TextureFaceAdvance
         nop

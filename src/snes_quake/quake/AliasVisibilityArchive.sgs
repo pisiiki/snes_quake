@@ -2,7 +2,7 @@
 ; their existing visible/hidden sentinels and sequential partial-mask reads.
 .segment "GSU_TEXTURE_TAIL_CODE"
 AliasBuildVisibilityRow:
-        move    R9, #$02
+        move    R9, #BSP_GSU_ROM2_BANK
         iwt     R8, #.loword(AliasBuildVisibilityRowROM)
         from    R8
         ljmp    R9
@@ -31,7 +31,7 @@ AliasVisibilityClearPointers:
         loop
         nop
 AliasVisibilityPointersReady:
-        move    R0, #$6F
+        move    R0, #BSP_ALIAS_VISIBILITY_ARCHIVE_ROM_BANK
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_BYTE R7

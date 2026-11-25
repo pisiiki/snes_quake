@@ -1,0 +1,36 @@
+  .if .defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)
+    .if PLAYABLE_MAP_ID = PLAYABLE_E1M2_MAP_ID
+; Keep the baked tile span and main raster at their established addresses.
+.macro BakedRasterEdge entry, baked_return
+entry:
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #BakedFaceSampler
+        cmp     R1
+        bne     BakedEdgeLegacy
+        nop
+        iwt     R11, #baked_return
+        GSU_ABSOLUTE_GOTO BakedIntersectEdge
+.endmacro
+BakedRasterEdge BakedForwardEdge, BakedForwardEdgeDone
+BakedRasterEdge BakedReverseEdge, BakedReverseEdgeDone
+
+BakedEdgeLegacy:
+        GSU_ABSOLUTE_GOTO TextureIntersectActiveEdgeProjective
+
+BakedForwardEdgeDone:
+        sm      (CONVEX_MIN_X), R0
+        GSU_ABSOLUTE_GOTO TextureRasterReverseBegin
+
+BakedReverseEdgeDone:
+        lm      R1, (CONVEX_MIN_X)
+        with    R0
+        cmp     R1
+        bpl     @Ordered
+        nop
+        sm      (CONVEX_MIN_X), R0
+        move    R0, R1
+@Ordered:
+        sm      (CONVEX_MAX_X), R0
+        GSU_ABSOLUTE_GOTO TextureRasterXOrderReady
+    .endif
+  .endif

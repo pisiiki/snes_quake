@@ -10,6 +10,32 @@
 ; destination, and packed source. Once CACHE fills, ROMB may safely select the
 ; sample bank without competing with program fetches.
 GSU_CACHE_KERNEL_BEGIN TextureUnpackLightmapSamplesROM
+  .ifdef PLAYABLE_SWITCHED_LIGHTS
+        move    R0, R7
+        add     #2                   ; Signed $FE marks a switchable grid.
+        bne     SwitchedGridResident
+        nop
+        iwt     R0, #$4000
+        sm      (LIGHTMAP_ROM_BANK), R0
+        stop                         ; R14=source, R10=destination, R12=count.
+        nop
+        .export SwitchedGridResume:far, SwitchedGridRequest:far, SwitchedGridResident:far
+SwitchedGridRequest = $710000 + LIGHTMAP_ROM_BANK
+SwitchedGridResume:
+        move    R0, #0
+        sm      (LIGHTMAP_ROM_BANK), R0
+        move    R12, #0
+        GSU_ABSOLUTE_GOTO TextureUnpackLightmapDone
+SwitchedGridResident:
+  .endif
+.ifdef PLAYABLE_RESIDENT_NIBBLE_LIGHTMAPS
+        from    R7
+        hib
+        beq     @SixBit
+        nop
+        GSU_ABSOLUTE_GOTO TextureUnpackNibbleLightmapROM
+@SixBit:
+.endif
         move    R0, R7
         sm      (LIGHTMAP_ROM_BANK), R0
         romb
@@ -18,11 +44,73 @@ GSU_CACHE_KERNEL_BEGIN TextureUnpackLightmapSamplesROM
         ; cannot consume that stale buffer byte.
         GSU_SET_ROM_BUFFER_ADDRESS R14
         BSP_UNPACK_LIGHTMAP_SAMPLES
+TextureUnpackLightmapDone:
+.if .defined(PLAYABLE_PAIRED_WORLD_CODE) && (BSP_RENDER_SCALE = 2)
+        ; A freshly decoded grid invalidates its paired suffix. R12 is zero.
+        sm      (TEXTURE_SIGN_SHADE), R12
+.endif
         move    R11, #$70
         from    R13
         ljmp    R11
         nop
 GSU_CACHE_KERNEL_END TextureUnpackLightmapSamplesROM
+
+.ifdef PLAYABLE_RESIDENT_NIBBLE_LIGHTMAPS
+GSU_CACHE_KERNEL_BEGIN TextureUnpackNibbleLightmapROM
+        from    R7
+        lob
+        sm      (LIGHTMAP_ROM_BANK), R0
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R14
+        BSP_ROM_LOAD_BYTE R5
+        from    R5
+        swap
+        or      R5
+        move    R5, R0
+        ibt     R1, #$0F
+        iwt     R2, #$FF00
+        ibt     R3, #16
+        from    R12
+        to      R4
+        and     #1
+        with    R12
+        lsr
+        beq     @Tail
+        nop
+@Pair:
+        BSP_ROM_LOAD_BYTE R6
+        from    R6
+        and     R1
+        move    R11, R0
+        from    R6
+        umult   R3
+        and     R2
+        or      R11
+        add     R5
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        dec     R12
+        bne     @Pair
+        nop
+@Tail:
+        moves   R4, R4
+        beq     @Return
+        nop
+        BSP_ROM_LOAD_BYTE R0
+        and     R1
+        add     R5
+        moveb   (R10), R0
+@Return:
+  .if .defined(PLAYABLE_PAIRED_WORLD_CODE) && (BSP_RENDER_SCALE = 2)
+        sm      (TEXTURE_SIGN_SHADE), R12
+  .endif
+        move    R11, #$70
+        from    R13
+        ljmp    R11
+        nop
+GSU_CACHE_KERNEL_END TextureUnpackNibbleLightmapROM
+.endif
 
 .segment "GSU_AUX_CODE"
 
@@ -73,7 +161,7 @@ LightmapPublishAdjustedAddress:
 
 BrushCallExternalROM:
         sm      (BRUSH_LOAD_RETURN), R11
-        move    R9, #$02
+        move    R9, #BSP_GSU_ROM2_BANK
         from    R8
         ljmp    R9
         nop
@@ -156,48 +244,29 @@ BrushArbiterDepthScreenFactorReady:
 BrushArbiterStageCurrentRow:
         sm      (BRUSH_ARB_STAGE_RETURN), R11
 
-        iwt     R0, #GSU_BRUSH_ARBITER_METADATA_OFFSET
-        sm      (BRUSH_ARB_STAGE_CURSOR), R0
-        lm      R0, (BRUSH_ARB_METADATA_COUNT)
-        sm      (BRUSH_ARB_STAGE_REMAINING), R0
         iwt     R0, #GSU_BRUSH_ROW_STAGE_OFFSET
         sm      (BRUSH_ARB_STAGE_WRITE_PTR), R0
         move    R0, #0
         sm      (BRUSH_ARB_STAGE_COUNT), R0
         sm      (BRUSH_ARB_STAGE_CONTESTED), R0
+        ; The ROM filter completes all immutable Y tests before this pass
+        ; performs any edge math. R10/R12 return its list cursor/count.
+        move    R11, #BSP_LIGHTMAP_UNPACK_ROM_BANK
+        iwt     R0, #.loword(BrushArbiterFilterRowROM)
+        from    R0
+        ljmp    R11
+        nop
 
 BrushArbiterStageCandidateLoop:
-        lm      R0, (BRUSH_ARB_STAGE_REMAINING)
-        moves   R0, R0
+        moves   R12, R12
         bne     BrushArbiterStageCandidatePresent
         nop
         GSU_ABSOLUTE_GOTO BrushArbiterStageComplete
 BrushArbiterStageCandidatePresent:
-        lm      R10, (BRUSH_ARB_STAGE_CURSOR)
-        move    R9, R10
-        with    R9
-        add     #BRUSH_ARB_META_Y_RANGE
-        movew   R0, (R9)
-        move    R1, R0
-        with    R1
-        lob
-        with    R0
-        hib
-        lm      R2, (BRUSH_ARB_ROW)
-        with    R2
-        cmp     R1
-        bcs     BrushArbiterStageCandidateAfterFirstY
-        nop
-        GSU_ABSOLUTE_GOTO BrushArbiterStageCandidateAdvance
-BrushArbiterStageCandidateAfterFirstY:
-        with    R0
-        cmp     R2
-        bcs     BrushArbiterStageCandidateWithinY
-        nop
-        GSU_ABSOLUTE_GOTO BrushArbiterStageCandidateAdvance
-BrushArbiterStageCandidateWithinY:
-
-        sm      (BRUSH_ARB_CANDIDATE_CURSOR), R10
+        movew   R0, (R10)
+        sm      (BRUSH_ARB_STAGE_CURSOR), R10
+        sm      (BRUSH_ARB_STAGE_REMAINING), R12
+        sm      (BRUSH_ARB_CANDIDATE_CURSOR), R0
         jal     BrushArbiterPrepareCandidateSpan
         nop
         moves   R0, R0
@@ -309,26 +378,21 @@ BrushArbiterStageOverlapAdvance:
         nop
 
 BrushArbiterStageRecordReady:
-        lm      R0, (BRUSH_ARB_STAGE_WRITE_PTR)
-        with    R0
-        add     #10
-        with    R0
-        add     #10
-        sm      (BRUSH_ARB_STAGE_WRITE_PTR), R0
+        ; The last record word leaves R10 at +18; overlap scans preserve it.
+        inc     R10
+        inc     R10
+        sm      (BRUSH_ARB_STAGE_WRITE_PTR), R10
         lm      R0, (BRUSH_ARB_STAGE_COUNT)
         inc     R0
         sm      (BRUSH_ARB_STAGE_COUNT), R0
 
 BrushArbiterStageCandidateAdvance:
-        lm      R0, (BRUSH_ARB_STAGE_CURSOR)
-        with    R0
-        add     #8
-        with    R0
-        add     #8
-        sm      (BRUSH_ARB_STAGE_CURSOR), R0
-        lm      R0, (BRUSH_ARB_STAGE_REMAINING)
-        dec     R0
-        sm      (BRUSH_ARB_STAGE_REMAINING), R0
+        lm      R10, (BRUSH_ARB_STAGE_CURSOR)
+        lm      R12, (BRUSH_ARB_STAGE_REMAINING)
+BrushArbiterStageMetadataAdvance:
+        inc     R10
+        inc     R10
+        dec     R12
         GSU_ABSOLUTE_GOTO BrushArbiterStageCandidateLoop
 
 BrushArbiterStageComplete:
@@ -351,6 +415,31 @@ BrushArbiterStageReturn:
         lm      R11, (BRUSH_ARB_STAGE_RETURN)
         ret
         nop
+        ; Retain every later auxiliary helper and overlay address. Padding is
+        ; beyond RET's mandatory delay slot and never executes.
+.ifdef PLAYABLE_COMPACT_Q12_RECIPROCALS
+; R1 is the index in the low-word-only tail. Its doubled high bit
+; selects the second tail bank. Continue through the caller's R10.
+TextureDivideQ12PackedTail:
+        inc     R0
+        with    R1
+        add     R1
+        bpl     @BankReady
+        nop
+        inc     R0
+@BankReady:
+        romb
+        iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS
+        with    R4
+        or      R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        move    R12, #0
+        BSP_ROM_LOAD_WORD R13
+        jmp     R10
+        nop
+.endif
+.assert * - BrushArbiterStageCurrentRow <= $166, error, "Brush row staging exceeds its pinned slot"
+        .res $166 - (* - BrushArbiterStageCurrentRow), $01
 
 ; Publish one immutable prepared record into the standard span globals, then
 ; join the retained material and composition path in the selected replay order.
@@ -431,50 +520,15 @@ BrushArbiterAdvanceStagedCandidate:
 ; generator's exact authority order. The complete 20-byte prepared records are
 ; swapped in place, leaving disjoint-row loading and iteration untouched.
 BrushArbiterSortStagedRow:
-        sm      (BRUSH_ARB_SORT_RETURN), R11
-        lm      R0, (BRUSH_ARB_STAGE_COUNT)
-        dec     R0
-        sm      (BRUSH_ARB_SORT_PASS), R0
+        cache
+        lm      R7, (BRUSH_ARB_STAGE_COUNT)
+        dec     R7
+        beq     BrushArbiterSortStagedDone
+        nop
 BrushArbiterSortStagedPass:
-        lm      R0, (BRUSH_ARB_SORT_PASS)
-        moves   R0, R0
-        bne     BrushArbiterSortStagedPassPresent
-        nop
-        GSU_ABSOLUTE_GOTO BrushArbiterSortStagedDone
-BrushArbiterSortStagedPassPresent:
-        move    R0, #0
-        sm      (BRUSH_ARB_SORT_INDEX), R0
-BrushArbiterSortStagedInner:
-        lm      R0, (BRUSH_ARB_SORT_INDEX)
-        lm      R1, (BRUSH_ARB_SORT_PASS)
-        with    R0
-        cmp     R1
-        bne     BrushArbiterSortStagedPairPresent
-        nop
-        GSU_ABSOLUTE_GOTO BrushArbiterSortStagedNextPass
-BrushArbiterSortStagedPairPresent:
-        ; R10 = stage base + index * 20, R9 = following record.
-        move    R1, R0
-        with    R1
-        add     R1
-        with    R1
-        add     R1
-        move    R10, R1
-        with    R10
-        add     R10
-        with    R10
-        add     R10
-        with    R10
-        add     R1
-        iwt     R1, #GSU_BRUSH_ROW_STAGE_OFFSET
-        with    R10
-        add     R1
-        move    R9, R10
-        with    R9
-        add     #10
-        with    R9
-        add     #10
-
+        iwt     R10, #GSU_BRUSH_ROW_STAGE_OFFSET
+        iwt     R9, #GSU_BRUSH_ROW_STAGE_OFFSET+GSU_BRUSH_ROW_STAGE_RECORD_BYTES
+        move    R8, R7
         move    R6, R10
         with    R6
         add     #8
@@ -490,54 +544,69 @@ BrushArbiterSortStagedPairPresent:
         nop
         move    R4, R5
 BrushArbiterSortStagedLeftKeyReady:
-        move    R7, R9
-        with    R7
+BrushArbiterSortStagedInner:
+        move    R6, R9
+        with    R6
         add     #8
-        with    R7
+        with    R6
         add     #8
-        movew   R5, (R7)
-        inc     R7
-        inc     R7
-        movew   R6, (R7)
+        movew   R5, (R6)
+        inc     R6
+        inc     R6
+        movew   R0, (R6)
         with    R5
-        cmp     R6
+        cmp     R0
         bcs     BrushArbiterSortStagedRightKeyReady
         nop
-        move    R5, R6
+        move    R5, R0
 BrushArbiterSortStagedRightKeyReady:
         with    R4
         cmp     R5
-        bcc     BrushArbiterSortStagedPairReady
+        bcc     BrushArbiterSortStagedOrdered
         nop
-        beq     BrushArbiterSortStagedPairReady
+        beq     BrushArbiterSortStagedOrdered
         nop
         move    R12, #10
         iwt     R13, #BrushArbiterSortStagedSwapLoop
 BrushArbiterSortStagedSwapLoop:
-        movew   R4, (R10)
-        movew   R5, (R9)
-        movew   (R10), R5
-        movew   (R9), R4
+        movew   R0, (R10)
+        movew   R1, (R9)
+        movew   (R10), R1
+        movew   (R9), R0
         inc     R10
         inc     R10
         inc     R9
         inc     R9
         loop
         nop
+        bra     BrushArbiterSortStagedPairReady
+        nop
+BrushArbiterSortStagedOrdered:
+        move    R4, R5
+        move    R10, R9
+        with    R9
+        add     #10
+        with    R9
+        add     #10
 BrushArbiterSortStagedPairReady:
-        lm      R0, (BRUSH_ARB_SORT_INDEX)
-        inc     R0
-        sm      (BRUSH_ARB_SORT_INDEX), R0
-        GSU_ABSOLUTE_GOTO BrushArbiterSortStagedInner
-BrushArbiterSortStagedNextPass:
-        lm      R0, (BRUSH_ARB_SORT_PASS)
-        dec     R0
-        sm      (BRUSH_ARB_SORT_PASS), R0
-        GSU_ABSOLUTE_GOTO BrushArbiterSortStagedPass
+        dec     R8
+        bne     BrushArbiterSortStagedInner
+        nop
+        dec     R7
+        bne     BrushArbiterSortStagedPass
+        nop
 BrushArbiterSortStagedDone:
-        lm      R11, (BRUSH_ARB_SORT_RETURN)
         ret
         nop
+BrushArbiterSortStagedEnd:
+.assert .loword(BrushArbiterSortStagedEnd) <= (.loword(BrushArbiterSortStagedRow) & $FFF0) + GSU_CACHE_BYTES, lderror, "Staged brush sort leaves its entry cache window"
+.assert .bankbyte(BrushArbiterSortStagedEnd-1) = .bankbyte(BrushArbiterSortStagedRow), lderror, "Staged brush sort crosses its code bank"
+
+.if .defined(GSU_PLATFORM_HEIGHTS) && !.defined(QC_SECRET_DOOR_COUNT)
+.include "BrushResolveMoverVertex.sgs"
+.endif
+.assert * - BrushArbiterSortStagedRow <= $B7, error, "Brush sort exceeds its pinned slot"
+.res $B7 - (* - BrushArbiterSortStagedRow), $01
 
 .assert * - TexturePrepareFaceEndpointBatch <= GSU_AUX_CODE_CAPACITY, error, "Auxiliary GSU helpers exceed their staged overlay"
 
@@ -609,6 +678,16 @@ BrushLoadDirectSafetyDone:
 
 BrushLoadExternalActiveROM:
         lm      R0, (COMMAND+14)
+.if BSP_QUAKEC_GAMEPLAY
+        sm      (BRUSH_EXTERNAL_ACTIVE_LO), R0
+.ifdef QC_MEGA_COUNT
+        lm      R0, (GSU_PICKUP_MASK_HIGH)
+.else
+        move    R0, #0
+.endif
+        sm      (BRUSH_EXTERNAL_ACTIVE_HI), R0
+        move    R0, #1
+.else
         iwt     R1, #BSP_BRUSH_REPLAY_ROW_COUNT
         with    R0
         cmp     R1
@@ -634,6 +713,7 @@ BrushLoadExternalActiveROM:
         nop
 BrushLoadExternalActiveMissing:
         move    R0, #0
+.endif
 BrushLoadExternalActiveDone:
         lm      R8, (BRUSH_LOAD_RETURN)
         move    R9, #$70

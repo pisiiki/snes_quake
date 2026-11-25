@@ -1,16 +1,6 @@
-# Generated Quake assets and build products.
-/src/snes_quake/Data/*
-/src/snes_quake/asset-generation.json
-/src/snes_quake/.build/
-/src/snes_quake/.build_libsfx/
-/src/snes_quake/quake.sfc
-/src/snes_quake/quake.cpu.sym
-/src/snes_quake/quake.dmap
-/src/snes_quake/quake.dnfo
 /out/
-/third_party/quake106/*
-!/third_party/quake106/quake106.zip
+/tmp/
 /.venv/
-/src/reference_renderer/vcpkg/
+/third_party/libSFX/
 __pycache__/
-*.py[cod]
+*.pyc

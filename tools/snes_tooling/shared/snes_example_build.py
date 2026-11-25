@@ -25,7 +25,7 @@ from snes_tooling.shared.validate_gsu_cache_kernels import (
     validate_cache_manifest,
 )
 from snes_tooling.shared.processes import python_child_environment as python_child_environment
-from snes_tooling.workspace import Workspace, git_common_directory as _git_common_directory
+from snes_tooling.workspace import Workspace, WorkspaceError, git_common_directory as _git_common_directory
 
 
 LIBSFX_SOURCES = [
@@ -274,6 +274,21 @@ def _freshness_path(example_dir: Path, name: str) -> Path:
     return project_layout(example_dir).build_dir / f"{name}.freshness.json"
 
 
+def _validate_linked_brush_pvs(example_dir: Path, rom_path: Path) -> dict | None:
+    metadata_path = example_dir / "Data/QuakeBSPBrushAssets.json"
+    if not metadata_path.is_file():
+        return None
+    if (example_dir / "Data/PlayableLayout.i").is_file():
+        from snes_tooling.quake.quake_playable_validation import validate_linked_segment_brush_pvs
+
+        return validate_linked_segment_brush_pvs(
+            rom_path.with_suffix(".dnfo"), json.loads(metadata_path.read_bytes())
+        )
+    from snes_tooling.quake.brush_pvs import validate_rom_leaf_pvs
+
+    return validate_rom_leaf_pvs(rom_path.read_bytes(), json.loads(metadata_path.read_bytes()))
+
+
 def _normalize_ld65_labels(path: Path) -> None:
     """Freeze ld65's platform-native label newlines to the release contract."""
 
@@ -506,10 +521,42 @@ def run_checked(
 
 
 
+def _require_project_workspace(example_dir: Path) -> None:
+    """Reject a stale checkout override before generators can inspect assets."""
+    try:
+        selected = Workspace.containing(example_dir).root
+    except WorkspaceError:
+        # Standalone libSFX examples may intentionally borrow this package.
+        return
+    discovered = Workspace.discover().root
+    if selected != discovered:
+        configured = os.environ.get("SNES_WORKSPACE", "<unset>")
+        raise ValueError(
+            f"SNES project workspace mismatch: {example_dir.resolve()} belongs to "
+            f"{selected}, but tooling resolves {discovered} "
+            f"(SNES_WORKSPACE={configured}). For this build set SNES_WORKSPACE="
+            f"{selected} and PYTHONPATH={selected / 'tools'}; "
+            "the environment was not changed."
+        )
+
+
 def package_root() -> Path:
     """Resolve the package parent when a child process actually needs it."""
 
     return Workspace.discover().path('tools')
+
+
+def example_generator_environment(example_dir: Path) -> dict[str, str]:
+    """Bind workspace-owned generator defaults to the explicit build target."""
+    environment = python_child_environment(package_root())
+    try:
+        Workspace.containing(example_dir)
+    except WorkspaceError:
+        # Independent libSFX examples may borrow the package without adopting
+        # the Quake workspace's target convention.
+        return environment
+    environment["SNES_QUAKE_EXAMPLE"] = str(example_dir.resolve())
+    return environment
 
 
 def run_example_asset_generator(
@@ -520,6 +567,7 @@ def run_example_asset_generator(
 ) -> dict[str, Any] | None:
     """Run an example's optional deterministic asset-generation hook."""
 
+    _require_project_workspace(example_dir)
     layout = project_layout(example_dir)
     generator = layout.asset_generator
     if not generator.is_file():
@@ -536,23 +584,29 @@ def run_example_asset_generator(
         command,
         example_dir,
         echo_output=True,
-        environment=python_child_environment(package_root()),
+        environment=example_generator_environment(example_dir),
     )
     return {**result, "script": str(generator), "check": check}
 
 
-def run_example_source_generator(example_dir: Path) -> dict[str, Any] | None:
+def run_example_source_generator(
+    example_dir: Path, *, check: bool = False,
+) -> dict[str, Any] | None:
     """Refresh generated source even when expensive content assets are reused."""
+    _require_project_workspace(example_dir)
     generator = project_layout(example_dir).source_generator
     if generator is None:
         return None
     if not generator.is_file():
         raise FileNotFoundError(f"configured SNES source generator does not exist: {generator}")
+    command = [sys.executable, str(generator)]
+    if check:
+        command.append("--check")
     result = run_checked(
-        [sys.executable, str(generator)], example_dir, echo_output=True,
-        environment=python_child_environment(package_root()),
+        command, example_dir, echo_output=True,
+        environment=example_generator_environment(example_dir),
     )
-    return {**result, "script": str(generator)}
+    return {**result, "script": str(generator), "check": check}
 
 
 def prepare_example_assets(
@@ -656,22 +710,38 @@ def assemble_libsfx(
     return commands, objects
 
 
+def link_example_objects(example_dir, libsfx_dir, name, objects, output_dir):
+    """Link the same memory map for normal builds and disposable preflights."""
+    return run_checked(
+        [str(require_cc65_tool(libsfx_dir, "ld65")), "--cfg-path", "./",
+         "--cfg-path", str(libsfx_dir / "include/Configurations"), "-C", "Map.cfg",
+         "-Ln", str(output_dir / f"{name}.cpu.sym"),
+         "-m", str(output_dir / f"{name}.dmap"), "-vm",
+         "--dbgfile", str(output_dir / f"{name}.dnfo"),
+         "-o", str(output_dir / f"{name}.sfc"), *map(str, objects)], example_dir,
+    )
+
+
 def build_snes_example(
     example_dir: Path,
     libsfx_dir: Path,
     name: str,
     *,
     skip_asset_generation: bool = False,
+    check_source_generation: bool = False,
     asset_generator_arguments: Sequence[str] = (),
 ) -> dict[str, Any]:
     started = time.monotonic()
+    _require_project_workspace(example_dir)
+    if name == "quake" and example_dir.resolve() == Workspace.discover().root / "src/snes_quake":
+        raise ValueError("raw Quake assembly requires a staged map; use the playable project build")
     layout = project_layout(example_dir)
     asset_generation = prepare_example_assets(
         example_dir,
         skip_generation=skip_asset_generation,
         arguments=asset_generator_arguments,
     )
-    source_generation = run_example_source_generator(example_dir)
+    source_generation = run_example_source_generator(example_dir, check=check_source_generation)
     build_dir = layout.build_dir
     build_dir.mkdir(parents=True, exist_ok=True)
     layout.output_dir.mkdir(parents=True, exist_ok=True)
@@ -683,7 +753,6 @@ def build_snes_example(
     # Reject CPU/GSU syntax and capacity errors before traversing the large
     # include graph for lint or rebuilding support libraries. Keep link order.
     ca65 = require_cc65_tool(libsfx_dir, "ca65")
-    ld65 = require_cc65_tool(libsfx_dir, "ld65")
     cpu_object = build_dir / f"{name}.o"
     cpu_command = run_checked(
         [str(ca65), *flags, "-o", str(cpu_object), f"{name}.s"], example_dir
@@ -750,30 +819,7 @@ def build_snes_example(
         )
         objects.append(smp_object)
 
-    commands.append(
-        run_checked(
-            [
-                str(ld65),
-                "--cfg-path",
-                "./",
-                "--cfg-path",
-                str(config_include_dir),
-                "-C",
-                "Map.cfg",
-                "-Ln",
-                str(layout.output_dir / f"{name}.cpu.sym"),
-                "-m",
-                str(layout.output_dir / f"{name}.dmap"),
-                "-vm",
-                "--dbgfile",
-                str(layout.output_dir / f"{name}.dnfo"),
-                "-o",
-                str(layout.output_dir / f"{name}.sfc"),
-                *[str(path) for path in objects],
-            ],
-            example_dir,
-        )
-    )
+    commands.append(link_example_objects(example_dir, libsfx_dir, name, objects, layout.output_dir))
     _normalize_ld65_labels(layout.output_dir / f"{name}.cpu.sym")
 
     rom_path = layout.output_dir / f"{name}.sfc"
@@ -789,6 +835,7 @@ def build_snes_example(
     manifest_path = layout.cache_kernel_manifest
     if kernels:
         validate_cache_manifest(kernels, manifest_path, segment_name=None)
+    brush_pvs = _validate_linked_brush_pvs(example_dir, rom_path)
     freshness = _write_snes_example_freshness(example_dir, libsfx_dir, name)
     return {
         "rom": str(rom_path),
@@ -805,6 +852,7 @@ def build_snes_example(
         "fx3OpcodeLint": fx3_opcode_lint.to_dict() if fx3_opcode_lint else None,
         "cacheKernels": [kernel.to_dict() for kernel in kernels],
         "cacheKernelManifest": str(manifest_path) if kernels else None,
+        "brushPvs": brush_pvs,
         "freshnessReceipt": str(freshness),
         "elapsedSeconds": round(time.monotonic() - started, 3),
     }
@@ -843,6 +891,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--check-source-generation", action="store_true",
+        help="check the source generator outputs without rewriting them before assembly",
+    )
+    parser.add_argument(
         "--asset-generator-argument",
         action="append",
         default=[],
@@ -864,11 +916,19 @@ def main(argv: list[str] | None = None) -> int:
             raise FileNotFoundError(
                 f"example CPU source not found: {example_dir / f'{name}.s'}"
             )
+        if (name == "quake" and not args.skip_asset_generation
+                and not args.check_source_generation
+                and example_dir == Workspace.discover().root / "src/snes_quake"
+                and not Workspace.discover().is_release
+                and not args.asset_generator_argument):
+            from snes_tooling.quake.build_quake_project import main as project_main
+            return project_main(["--libsfx", str(libsfx_dir), *(["--json"] if args.json else [])])
         result = build_snes_example(
             example_dir,
             libsfx_dir,
             name,
             skip_asset_generation=args.skip_asset_generation,
+            check_source_generation=args.check_source_generation,
             asset_generator_arguments=tuple(args.asset_generator_argument),
         )
     except KeyboardInterrupt:

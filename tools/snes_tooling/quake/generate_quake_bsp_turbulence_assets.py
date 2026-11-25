@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 
 TOOLS = Workspace.discover().path('tools', 'snes_tooling', 'quake')
-EXAMPLE = Workspace.discover().root / "src/snes_quake"
+EXAMPLE = Workspace.discover().quake_example
 SHARED = Workspace.discover().shared_tools
 
 
@@ -223,11 +223,9 @@ def build_audit(data_dir: Path) -> tuple[dict[str, Any], bytes, bytes, int]:
         or str(texture.get("name", "")).casefold().startswith("sky")
     ]
 
-    phases = turbulence.build_demo_phase_asset(
-        float(demo["first_server_time"]),
-        int(demo["precise_track_pose_count"]),
-        int(demo["precise_track_sample_rate_hz"]),
-    )
+    from snes_tooling.quake.quake_level_assets import recorded_surface_clock
+    clock = recorded_surface_clock(metadata)
+    phases = turbulence.build_demo_phase_asset(*clock) if clock[1] else b""
     table = turbulence.build_turbulence_table()
     phase_address = PHASE_BANK_ADDRESS + len(sky_phases)
     _require(

@@ -177,6 +177,24 @@ bool run_quake_sky_span_partition_self_test()
 } // namespace
 
 namespace {
+bool run_snes_x3_sky_span_self_test()
+{
+    RenderViewportScope viewport(RenderScale::X3, 64, ViewportLayout::Playable);
+    const ViewTransform view{{}, {0, 1, 0}, {-1, 0, 0}, {0, 0, 1}};
+    const auto color = [](int s, int t) { return static_cast<std::uint8_t>((s * 3 + t * 17) % 251 + 1); };
+    QuakeSkyTile tile;
+    for (int t = 0; t < kQuakeSkySize; ++t)
+        for (int s = 0; s < kQuakeSkySize; ++s)
+            tile.indices[row_major_index(s, t, kQuakeSkyRowBytes)] = color(s, t);
+    std::vector<std::uint8_t> indices(kLogicalPixels);
+    constexpr int y = 9;
+    draw_quake_sky_span(indices, tile, view, quake_sky_clock(0.0), y, 7, 19, 444912);
+    // X3 integer oracle for the same span in the START playable viewport.
+    return indices[logical_pixel_index(7, y)] == color(28, 55) &&
+           indices[logical_pixel_index(12, y)] == color(9, 59) &&
+           indices[logical_pixel_index(19, y)] == color(110, 64);
+}
+
 SourceWorld make_quake_sky_presentation_self_test_world()
 {
     SourceWorld world;
@@ -290,7 +308,8 @@ bool run_quake_sky_self_test()
 {
     return run_quake_sky_mask_self_test() && run_quake_sky_motion_self_test() && run_quake_sky_clock_self_test() &&
            run_quake_sky_projection_self_test() && run_quake_sky_span_partition_self_test() &&
-           run_quake_sky_presentation_self_test() && run_quake_sky_malformed_miptex_self_test();
+           run_snes_x3_sky_span_self_test() && run_quake_sky_presentation_self_test() &&
+           run_quake_sky_malformed_miptex_self_test();
 }
 
 } // namespace quake_bsp_reference

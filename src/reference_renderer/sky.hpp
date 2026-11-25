@@ -54,7 +54,8 @@ void draw_quake_sky_span(
     const QuakeSkyClock& clock,
     int y,
     int first_x,
-    int last_x
+    int last_x,
+    std::optional<std::uint32_t> snes_x3_phase_q16 = std::nullopt
 );
 
 QuakeSkyPresentation render_quake_sky_presentation(
@@ -64,7 +65,8 @@ QuakeSkyPresentation render_quake_sky_presentation(
     const SourceWorld& world,
     const ViewTransform& view,
     double surface_time,
-    std::string_view time_source
+    std::string_view time_source,
+    std::optional<std::uint32_t> snes_x3_phase_q16 = std::nullopt
 );
 
 } // namespace quake_bsp_reference

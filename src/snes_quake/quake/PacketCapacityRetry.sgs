@@ -1,0 +1,299 @@
+; Before painter lookup, retry only after a real overflow.
+; The filtered source mask and control words are dead before the painter uses
+; its stack. The immutable decoded PVS, its leaf and its guards are preserved.
+.if BSP_RENDER_SCALE = 2
+PACKET_CAPACITY_READ = PACKET_CAPACITY_STATE + 0
+PACKET_CAPACITY_WRITE = PACKET_CAPACITY_STATE + 2
+PACKET_CAPACITY_BYTE = PACKET_CAPACITY_STATE + 4
+PACKET_CAPACITY_SCAN = PACKET_CAPACITY_STATE + 6
+PACKET_CAPACITY_BIT = PACKET_CAPACITY_STATE + 8
+PACKET_CAPACITY_FACE = PACKET_CAPACITY_STATE + 10
+PACKET_CAPACITY_LEFT = PACKET_CAPACITY_STATE + 12
+PACKET_CAPACITY_PROOF = PACKET_CAPACITY_STATE + 14
+.assert WORLD_VISIBILITY+BSP_WORLD_FACE_BITSET_BYTES < PACKET_CAPACITY_MASK, error, "Retry pointer class overlaps original PVS"
+
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+PacketCapacityROMStart:
+PacketCapacityFilterROM:
+        ; The selector's scale-specific RAM image is still installed.
+        sm      (PACKET_CAPACITY_RETURN), R11
+        iwt     R0, #WORLD_VISIBILITY
+        sm      (PACKET_CAPACITY_READ), R0
+        iwt     R0, #PACKET_CAPACITY_MASK
+        sm      (PACKET_CAPACITY_WRITE), R0
+        move    R0, #0
+        sm      (PACKET_CAPACITY_FACE), R0
+PacketCapacityByte:
+        lm      R10, (PACKET_CAPACITY_READ)
+        iwt     R1, #WORLD_VISIBILITY+BSP_WORLD_FACE_BITSET_BYTES
+        with    R10
+        cmp     R1
+        bcc     PacketCapacityByteExists
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityRestart
+PacketCapacityByteExists:
+        moveb   R0, (R10)
+        inc     R10
+        sm      (PACKET_CAPACITY_READ), R10
+        sm      (PACKET_CAPACITY_BYTE), R0
+        sm      (PACKET_CAPACITY_SCAN), R0
+        move    R0, #1
+        sm      (PACKET_CAPACITY_BIT), R0
+PacketCapacityBit:
+        lm      R0, (PACKET_CAPACITY_SCAN)
+        lsr
+        sm      (PACKET_CAPACITY_SCAN), R0
+        bcs     PacketCapacityVisible
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityAdvance
+PacketCapacityVisible:
+        lm      R0, (PACKET_CAPACITY_FACE)
+        iwt     R1, #BSP_WORLD_FACE_COUNT
+        with    R0
+        cmp     R1
+        bcc     PacketCapacityFaceKnown
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityAdvance
+PacketCapacityFaceKnown:
+        jal     PacketCapacityOrdinary
+        moves   R0, R0
+        bne     PacketCapacityLoadContour
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityAdvance
+PacketCapacityLoadContour:
+        lm      R0, (PACKET_CAPACITY_FACE)
+        add     R0
+        move    R1, R0
+        add     R0
+        add     R1
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS
+        with    R4
+        add     R0
+        move    R0, #WORLD_FACES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R1
+        BSP_ROM_LOAD_BYTE R0
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_DESCRIPTOR_CODE
+        ibt     R2, #$1F
+        and     R2
+  .endif
+        move    R2, #3
+        cmp     R2
+        bcs     PacketCapacityMinimumVertices
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityAdvance
+PacketCapacityMinimumVertices:
+        iwt     R2, #BSP_WORLD_MAX_FACE_VERTICES+1
+        cmp     R2
+        bcc     PacketCapacityMaximumVertices
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityAdvance
+PacketCapacityMaximumVertices:
+        move    R2, R0
+        add     R1
+        bcc     PacketCapacityIndexNoWrap
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityAdvance
+PacketCapacityIndexNoWrap:
+        iwt     R3, #BSP_WORLD_INDEX_COUNT+1
+        cmp     R3
+        bcc     PacketCapacityIndicesKnown
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityAdvance
+PacketCapacityIndicesKnown:
+        ; These original scan scratch fields are dead: always restart.
+        sm      (PACKET_INDEX_CURSOR), R1
+        sm      (PACKET_CAPACITY_LEFT), R2
+        move    R0, #$3F
+        sm      (PACKET_CAPACITY_PROOF), R0
+        GSU_ABSOLUTE_GOTO PacketCapacityVertexCache
+
+; The retry never needs projected vertices, only its exact Q6 plane proof.
+; Keeping the decoder, view dots, and classifier in one ROM-bank cache
+; avoids clearing the instruction cache twice for every tested vertex.
+GSU_CACHE_KERNEL_BEGIN PacketCapacityVertexCache
+        GSU_ABSOLUTE_GOTO PacketCapacityVertex
+
+; Native Q6 common-plane margin and shift-only vertical envelope. For world
+; Q2 bytes + residual and the verified Q6 matrix, any coordinate delta fits
+; signed16 (L1 row bound ≤7680, maximum input width1023, final shift8).
+PacketCapacityClassify:
+        move    R0, #0
+        lm      R1, (CLIP_RIGHT)
+        lm      R2, (CLIP_UP)
+        lm      R3, (CLIP_DEPTH)
+        with    R1
+        asr
+        with    R2
+        asr
+        with    R3
+        asr
+        BSP_CLASSIFY_CLIP_MARGIN_PLANE R1, 0, 1
+        BSP_CLASSIFY_CLIP_MARGIN_PLANE R1, 1, 2
+        BSP_CLASSIFY_CLIP_MARGIN_PLANE R2, 1, 4
+        BSP_CLASSIFY_CLIP_MARGIN_PLANE R2, 0, 8
+
+        ; The narrow vertical proof uses D in 1..16383. Unknown/near-negative
+        ; vertices retain both vertical sides only if every vertex proves it.
+        lm      R5, (CLIP_DEPTH)
+        moves   R5, R5
+        bmi     PacketCapacityClassified
+        nop
+        beq     PacketCapacityClassified
+        nop
+        iwt     R6, #16384
+        with    R5
+        cmp     R6
+        bcs     PacketCapacityClassified
+        nop
+        move    R6, R5
+        with    R5
+        asr
+  .repeat 4
+        with    R6
+        asr
+  .endrepeat
+        with    R5
+        add     R6
+  .repeat 2
+        with    R6
+        asr
+  .endrepeat
+        with    R5
+        add     R6
+        with    R5
+        add     #10
+        lm      R2, (CLIP_UP)
+        move    R6, #16
+        moves   R2, R2
+        bpl     PacketCapacityUpMagnitude
+        nop
+        with    R2
+        not
+        inc     R2
+        move    R6, #32
+PacketCapacityUpMagnitude:
+        with    R2
+        cmp     R5
+        bcc     PacketCapacityClassified
+        nop
+        or      R6
+PacketCapacityClassified:
+        ret
+        nop
+PacketCapacityVertex:
+        BSP_PACKET_DECODE_WORLD_INDEX
+        iwt     R1, #BSP_WORLD_VERTEX_COUNT
+        with    R0
+        cmp     R1
+        bcc     PacketCapacityVertexKnown
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityAdvance
+PacketCapacityVertexKnown:
+        BSP_PACKET_LOAD_WORLD_VIEW_DELTAS
+        BSP_VIEW_DOT_RIGHT CLIP_RIGHT
+        BSP_VIEW_DOT_AXIS3 GSU_VIEW_MATRIX_UX, GSU_VIEW_MATRIX_UY, GSU_VIEW_MATRIX_UZ, CLIP_UP
+        BSP_VIEW_DOT_AXIS3 GSU_VIEW_MATRIX_DX, GSU_VIEW_MATRIX_DY, GSU_VIEW_MATRIX_DZ, CLIP_DEPTH
+PacketCapacityViewReadyROM:
+        jal     PacketCapacityClassify
+        lm      R1, (PACKET_CAPACITY_PROOF)
+        and     R1
+        sm      (PACKET_CAPACITY_PROOF), R0
+        beq     PacketCapacityAdvance
+        nop
+        lm      R0, (PACKET_CAPACITY_LEFT)
+        dec     R0
+        sm      (PACKET_CAPACITY_LEFT), R0
+        beq     PacketCapacityReject
+        nop
+        lm      R0, (PACKET_INDEX_CURSOR)
+        inc     R0
+        sm      (PACKET_INDEX_CURSOR), R0
+        GSU_ABSOLUTE_GOTO PacketCapacityVertex
+GSU_CACHE_KERNEL_END PacketCapacityVertexCache
+PacketCapacityReject:
+        lm      R0, (PACKET_CAPACITY_BIT)
+        not
+        lm      R1, (PACKET_CAPACITY_BYTE)
+        and     R1
+        sm      (PACKET_CAPACITY_BYTE), R0
+PacketCapacityAdvance:
+        lm      R0, (PACKET_CAPACITY_FACE)
+        inc     R0
+        sm      (PACKET_CAPACITY_FACE), R0
+        lm      R0, (PACKET_CAPACITY_BIT)
+        add     R0
+        sm      (PACKET_CAPACITY_BIT), R0
+        hib
+        bne     PacketCapacityWriteByte
+        nop
+        GSU_ABSOLUTE_GOTO PacketCapacityBit
+PacketCapacityWriteByte:
+        lm      R10, (PACKET_CAPACITY_WRITE)
+        lm      R0, (PACKET_CAPACITY_BYTE)
+        moveb   (R10), R0
+        inc     R10
+        sm      (PACKET_CAPACITY_WRITE), R10
+        GSU_ABSOLUTE_GOTO PacketCapacityByte
+PacketCapacityRestart:
+        iwt     R0, #PACKET_CAPACITY_MASK
+        sm      (PACKET_VIS_POINTER), R0
+        lm      R8, (PACKET_CAPACITY_RETURN)
+        move    R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+
+; R0=source face ordinal, return 0 for every special/unknown material.
+PacketCapacityOrdinary:
+        iwt     R4, #BSP_WORLD_FACE_TEXTURE_ID_GSU_ROM_ADDRESS
+        with    R4
+        add     R0
+        move    R0, #WORLD_TEXTURE_AUX_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R1
+        iwt     R0, #BSP_WORLD_TEXTURE_COUNT
+        with    R1
+        cmp     R0
+        bcs     PacketCapacitySpecial
+        nop
+        iwt     R0, #BSP_WORLD_SKY_TEXTURE_ID
+        with    R1
+        cmp     R0
+        beq     PacketCapacitySpecial
+        nop
+        move    R0, R1
+  .repeat 3
+        add     R0
+  .endrepeat
+        iwt     R4, #BSP_WORLD_TEXTURE_DIRECTORY_GSU_ROM_ADDRESS+3
+        with    R4
+        add     R0
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R5
+        BSP_ROM_LOAD_WORD R6
+        BSP_ROM_LOAD_BYTE R0
+        iwt     R1, #$FFFC
+        and     R1
+        bne     PacketCapacitySpecial
+        nop
+        moves   R5, R5
+        beq     PacketCapacitySpecial
+        nop
+        moves   R6, R6
+        beq     PacketCapacitySpecial
+        nop
+        move    R0, #1
+        ret
+        nop
+PacketCapacitySpecial:
+        move    R0, #0
+        ret
+        nop
+
+PacketCapacityROMEnd:
+.assert .bankbyte(PacketCapacityROMStart) = ($80+BSP_GSU_ROM3_BANK), lderror, "Packet retry left ROM3"
+.assert .bankbyte(PacketCapacityROMEnd-1) = ($80+BSP_GSU_ROM3_BANK), lderror, "Packet retry crosses ROM3"
+.endif

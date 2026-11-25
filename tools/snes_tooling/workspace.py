@@ -12,6 +12,7 @@ WORKSPACE_ENVIRONMENT_VARIABLE = "SNES_WORKSPACE"
 SOURCE_WORKSPACE_MARKERS = ("pyproject.toml", "src", "tools")
 RELEASE_WORKSPACE_MARKERS = ("third_party/libSFX", "src/snes_quake")
 WORKSPACE_MARKER_SETS = (SOURCE_WORKSPACE_MARKERS, RELEASE_WORKSPACE_MARKERS)
+TICKETS_ROOT_ENVIRONMENT_VARIABLE = "SNES_TICKETS_ROOT"
 
 
 def git_common_directory(root: Path) -> Path | None:
@@ -36,6 +37,18 @@ def primary_checkout(root: Path) -> Path:
     return common.parent if common is not None and common.name == ".git" else root
 
 
+def resolve_ticket_root(workspace: Path, override: Path | str | None = None) -> Path:
+    """Resolve explicit, environment, legacy, or primary-checkout sibling tickets."""
+    configured = override if override is not None else os.environ.get(
+        TICKETS_ROOT_ENVIRONMENT_VARIABLE
+    )
+    if configured is not None:
+        return Path(configured).expanduser().resolve()
+    root = Path(workspace).expanduser().resolve()
+    legacy = root / "tickets"
+    if legacy.is_dir():
+        return legacy
+    return primary_checkout(root).parent / "snes_quake_tickets"
 
 
 class WorkspaceError(ValueError):
@@ -127,7 +140,12 @@ class Workspace:
 
     @property
     def quake_example(self) -> Path:
-        return self.path("src", "snes_quake")
+        """Application staging is independent of the owning source checkout."""
+        configured = os.environ.get("SNES_QUAKE_EXAMPLE")
+        path = Path(configured).resolve() if configured else self.path("src", "snes_quake")
+        if not path.is_relative_to(self.root):
+            raise WorkspaceError("SNES_QUAKE_EXAMPLE must stay inside its workspace")
+        return path
 
     @property
     def quake_tools(self) -> Path:

@@ -1,13 +1,36 @@
-; Flyable E1M3 BSP and demo1 benchmark for Super FX 3.
+; Super FX 3 map module for the playable cartridge.
 .include "libSFX.i"
 .include "SNES_FX3.i"
 .include "MemoryMap.i"
+.import T4TextureEndpointLoadRow, TextureEndpointLoadRowCall, TextureEndpointLoadRow
+.import T4PrepareEndpointDepth, BrushArbiterDepthMathCall, T4TextureEndpointDepthBatch
+.import WeaponCullCoveredFace, WorldLightmapRasterCall, WorldLightmapRasterTarget
 .export CAMERA_ANGLE_STEPS
-.export BSP_WARP_SOURCE_FOCAL
 .export GSU_CAMERA_SIN_OFFSET, GSU_CAMERA_COS_OFFSET
+.ifdef QUAKE_MSU_WORLD_KEEP
+.export MSU_WORLD_KEEP_MASK, MSU_WORLD_KEEP_READY, MSU_WORLD_KEEP_COUNT, MSU_WORLD_KEEP_ORDINAL
+.endif
 .include "quake/SoundJoin.i"
+.include "quake/CameraCollision.i"
+.include "quake/GameplayInput.i"
+.if .defined(PLAYABLE_WEAPON_OBJ) && .defined(QC_QUEUED_INPUT) && .defined(QC_E1M2_GROUP_COUNT) && (!.defined(QC_E1M3_GOLD_KEY))
+QC_E1M2_DEFER_UPLOAD = 1
+E1M2_DEFER_ACTIVE = 1
+E1M2_DEFER_LATCH = 2
+.endif
 ; Resolve CPU mirrors at link time for either fixed renderer's ROM image.
+.ifdef PLAYABLE_MAP_ID
+; Playable linker addresses already name actual CPU data or virtual MSU images.
+.define BSP_CPU_CODE_ADDRESS(address) ((address) + (((^(address) >= $60) .and (^(address) < $70)) * $800000))
+.else
 .define BSP_CPU_CODE_ADDRESS(address) ((address) + (((^(address) >= $C0) .and (^(address) < $F0)) * BSP_SOUND_CPU_MIRROR_DELTA))
+.endif
+; External BSP pickups remain renderable when a map has no alias roster.
+.ifdef PLAYABLE_MAP_ID
+BSP_RENDER_ENTITIES_SUPPORTED = BSP_ALIAS_ENTITY_SUPPORTED | BSP_EXTERNAL_BSP_SUPPORTED
+.else
+BSP_RENDER_ENTITIES_SUPPORTED = BSP_ALIAS_ENTITY_SUPPORTED
+.endif
 GSU_RENDER_BASE    = $700000
 GSU_DATA_BASE      = $710000
 GSU_OUTPUT         = GSU_RENDER_BASE + GSU_OUTPUT_OFFSET
@@ -32,6 +55,7 @@ GSU_BOOT_PARAMETERS = GSU_DATA_BASE + GSU_BOOT_PARAMETERS_OFFSET
 VRAM_TILES_A        = $0000
 VRAM_TILES_B        = $8000
 VRAM_TILEMAP        = $F800
+VRAM_FLY3_TILEMAP   = VRAM_TILEMAP
 VRAM_TEXTURE_TILES_A = $0000
 VRAM_TEXTURE_TILES_B = $4000
 VRAM_TEXTURE_TILEMAP = $F000
@@ -39,25 +63,35 @@ VRAM_RUNTIME_MENU_TILES = $7800
 VRAM_RUNTIME_MENU_OBJ_BASE = $4000
 RUNTIME_MENU_ASCII_FIRST = 32
 RUNTIME_MENU_ASCII_LAST = 90
+RUNTIME_MENU_TILE_BASE = $1C0
 RUNTIME_MENU_FONT_TILE_COUNT = RUNTIME_MENU_ASCII_LAST - RUNTIME_MENU_ASCII_FIRST + 1
 RUNTIME_MENU_FONT_BYTES = RUNTIME_MENU_FONT_TILE_COUNT * 32
-RUNTIME_MENU_TILE_BASE = $1C0
+VRAM_RUNTIME_MENU_HIGHLIGHT = $7400
+RUNTIME_MENU_HIGHLIGHT_TILE_BASE = $1A0
+.ifdef PLAYABLE_MAP_ID
+.assert VRAM_TEXTURE_TILES_B + BSP_FRAME_STAGE_BYTES <= VRAM_RUNTIME_MENU_HIGHLIGHT, error, "Frame upload overlaps menu highlight font"
+.assert VRAM_RUNTIME_MENU_HIGHLIGHT = VRAM_RUNTIME_MENU_TILES + (RUNTIME_MENU_HIGHLIGHT_TILE_BASE - RUNTIME_MENU_TILE_BASE) * 32, error, "Menu highlight tile address disagrees with VRAM placement"
+.endif
+; Base and flash palettes include the shared menu/HUD colors.
+BSP_TEXTURE_PALETTE_UPLOAD_BYTES = 512
 CAMERA_COMMAND_WORDS = 8
 CAMERA_COMMAND_BYTES = CAMERA_COMMAND_WORDS * 2
 BSP_UPLOAD_FORMAT_FLAT = 0
 BSP_UPLOAD_FORMAT_TEXTURE = 1
-BSP_UPLOAD_FORMAT_MODE7 = 2
+BSP_UPLOAD_FORMAT_TEXTURE_X3 = 2
 BSP_STAGING_FLAT_LIMIT = 49
 BSP_STAGING_TEXTURE_LIMIT = 132
 BSP_WORLD_ROM_BANK_BYTES = $8000
-BSP_VERIFY_NEAR_DEMO_POSE = BSP_DEMO_VERIFY_NEAR_POSE
-BSP_VERIFY_FAR_DEMO_POSE = BSP_DEMO_VERIFY_FAR_POSE
-BSP_VERIFY_NEAR_DEMO_OFFSET = BSP_VERIFY_NEAR_DEMO_POSE * BSP_DEMO_PRECISE_TRACK_RECORD_BYTES
-BSP_VERIFY_FAR_DEMO_OFFSET = BSP_VERIFY_FAR_DEMO_POSE * BSP_DEMO_PRECISE_TRACK_RECORD_BYTES
 BSP_BRUSH_ROWSTATE_CPU_ADDRESS = (BSP_BRUSH_ROWSTATE_BANK + $80) * $10000 + BSP_BRUSH_ROWSTATE_ADDRESS
 BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_BRUSH_FLYSTATE_ADDRESS
 .assert __GSUCODE_SIZE__ <= GSU_CODE_CAPACITY, lderror, "GSU BSP code exceeds bank-$70 partition"
 .assert .loword(__GSUCODE_RUN__) = GSU_CODE_OFFSET, lderror, "GSU BSP code address disagrees with MemoryMap.i"
+.assert __GSU_T4_PROJECTION_CODE_SIZE__ <= GSU_T4_PROJECTION_CODE_CAPACITY, lderror, "Technique-4 projector exceeds its resident cache prefix"
+.assert .loword(__GSU_T4_PROJECTION_CODE_RUN__) = GSU_T4_PROJECTION_CODE_OFFSET, lderror, "Technique-4 projector moved away from its T2 overlay"
+.assert __GSU_T4_REPLAY_BOUNDS_CODE_SIZE__ <= GSU_T4_REPLAY_BOUNDS_CODE_CAPACITY, lderror, "Replay helpers exceed retired T2 raster"
+.assert .loword(__GSU_T4_REPLAY_BOUNDS_CODE_RUN__) = GSU_T4_REPLAY_BOUNDS_CODE_OFFSET, lderror, "Replay helpers moved"
+.assert __GSU_T4_REPLAY_BOUNDS_LOAD_PATCH_SIZE__ = 68, lderror, "Replay producer changed original loader extent"
+.assert __GSU_T4_REPLAY_BOUNDS_MATH_CODE_SIZE__ = 74, lderror, "Replay cached depth changed size"
 .assert __GSU_T4_RASTER_CODE_SIZE__ <= GSU_T4_RASTER_CODE_CAPACITY, lderror, "Technique-4 raster overlay exceeds its general-code window"
 .assert .loword(__GSU_T4_RASTER_CODE_RUN__) = GSU_T4_RASTER_CODE_OFFSET, lderror, "Technique-4 raster overlay moved away from the general raster"
 .assert __GSU_T4_EDGE_PATCH_SIZE__ <= GSU_T4_EDGE_PATCH_CAPACITY, lderror, "Technique-4 edge patch exceeds the general mode-dispatch window"
@@ -96,23 +130,36 @@ BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_
 .assert __GSU_T4_BRUSH_FALLBACK_PATCH_SIZE__ <= GSU_T4_BRUSH_FALLBACK_CAPACITY, lderror, "Technique-4 brush fallback patch exceeds its window"
 .assert __GSU_AUX_CODE_SIZE__ <= GSU_AUX_CODE_CAPACITY, lderror, "Auxiliary GSU code exceeds bank-$70 partition"
 .assert .loword(__GSU_AUX_CODE_RUN__) = GSU_AUX_CODE_OFFSET, lderror, "Auxiliary GSU code address disagrees with MemoryMap.i"
-.assert __GSU_AUX_CODE_LOAD__ = $828000, lderror, "Auxiliary GSU code moved out of ROM2"
+.assert __GSU_AUX_CODE_LOAD__ = BSP_ROM_LOAD_GSU_AUX_CODE, lderror, "Auxiliary GSU code moved out of ROM2"
 .assert __GSU_BRUSH_CODE_SIZE__ <= GSU_BRUSH_CODE_CAPACITY, lderror, "Dynamic-brush GSU overlay exceeds bank-$70 partition"
 .assert .loword(__GSU_BRUSH_CODE_RUN__) = GSU_BRUSH_CODE_OFFSET, lderror, "Dynamic-brush GSU overlay address disagrees with MemoryMap.i"
-.assert __GSU_BRUSH_CODE_LOAD__ = $BF8000, lderror, "Dynamic-brush GSU overlay moved out of ROM63"
+.assert __GSU_BRUSH_CODE_LOAD__ = BSP_ROM_LOAD_GSU_BRUSH_CODE, lderror, "Dynamic-brush GSU overlay moved out of ROM123"
 .assert __GSU_BRUSH_CODE_RUN__ + __GSU_BRUSH_CODE_SIZE__ <= __GSU_ALIAS_FLY_CODE_RUN__, lderror, "Dynamic-brush overlay overlaps deferred fly alias code"
 .assert __GSU_ALIAS_FLY_CODE_SIZE__ <= GSU_ALIAS_FLY_CODE_CAPACITY, lderror, "Fly alias GSU overlay exceeds the brush-code tail"
 .assert .loword(__GSU_ALIAS_FLY_CODE_RUN__) = GSU_ALIAS_FLY_CODE_OFFSET, lderror, "Fly alias GSU overlay moved away from the brush-code tail"
-.assert ^__GSU_ALIAS_FLY_CODE_LOAD__ = $BF, lderror, "Fly alias GSU overlay moved out of ROM63"
+.ifndef BSP_ROM_LOAD_BANK_GSU_ALIAS_FLY_CODE
+BSP_ROM_LOAD_BANK_GSU_ALIAS_FLY_CODE = $FD
+.endif
+.assert ^__GSU_ALIAS_FLY_CODE_LOAD__ = BSP_ROM_LOAD_BANK_GSU_ALIAS_FLY_CODE, lderror, "Fly alias GSU overlay moved out of ROM123"
 .assert __GSU_TEXTURE_TAIL_CODE_SIZE__ <= GSU_TEXTURE_TAIL_CODE_CAPACITY, lderror, "Texture-tail GSU helper exceeds hidden scanlines"
 .assert .loword(__GSU_TEXTURE_TAIL_CODE_RUN__) = GSU_TEXTURE_TAIL_CODE_OFFSET, lderror, "Texture-tail GSU helper address disagrees with MemoryMap.i"
-.assert ^__GSU_TEXTURE_TAIL_CODE_LOAD__ = $BF, lderror, "Texture-tail GSU helper moved out of ROM63"
+.ifndef BSP_ROM_LOAD_BANK_GSU_TEXTURE_TAIL_CODE
+BSP_ROM_LOAD_BANK_GSU_TEXTURE_TAIL_CODE = $FD
+.endif
+.assert ^__GSU_TEXTURE_TAIL_CODE_LOAD__ = BSP_ROM_LOAD_BANK_GSU_TEXTURE_TAIL_CODE, lderror, "Texture-tail GSU helper moved out of ROM123"
+.ifdef PLAYABLE_PAIRED_WORLD_CODE
+.assert __GSU_PAIRED_WORLD_CODE_RUN__ = GSU_RENDER_BASE + GSU_PAIRED_WORLD_OFFSET, lderror, "Paired world run address changed"
+.assert __GSU_PAIRED_WORLD_CODE_SIZE__ <= $0200, lderror, "Paired world code exceeds its run area"
+.endif
 .assert __GSU_TURBULENCE_HOT_CODE_SIZE__ <= GSU_TURBULENCE_HOT_CODE_CAPACITY, lderror, "Turbulence sampler exceeds the reciprocal-mirror tail"
 .assert .loword(__GSU_TURBULENCE_HOT_CODE_RUN__) = GSU_TURBULENCE_HOT_CODE_OFFSET, lderror, "Turbulence sampler address disagrees with MemoryMap.i"
-.assert ^__GSU_TURBULENCE_HOT_CODE_LOAD__ = $82, lderror, "Turbulence sampler moved out of ROM2"
-.assert ^__GSU_LIGHTMAP_UNPACK_ROM_CODE_LOAD__ = $A4, lderror, "Six-bit lightmap unpacker moved out of ROM36"
-.assert __GSU_LIGHTMAP_UNPACK_ROM_CODE_LOAD__ >= __BSP_WORLD_LIGHTMAP_3_LOAD__ + __BSP_WORLD_LIGHTMAP_3_SIZE__, lderror, "Six-bit lightmap unpacker overlaps packed samples"
+.assert ^__GSU_TURBULENCE_HOT_CODE_LOAD__ = BSP_ROM_LOAD_BANK_GSU_TURBULENCE_HOT_CODE, lderror, "Turbulence sampler moved out of ROM2"
+.assert ^__GSU_LIGHTMAP_UNPACK_ROM_CODE_LOAD__ = $80+BSP_LIGHTMAP_UNPACK_ROM_BANK, lderror, "Six-bit lightmap unpacker moved out of ROM36"
+.ifdef PLAYABLE_RESIDENT_NIBBLE_LIGHTMAPS
+.assert __GSU_LIGHTMAP_UNPACK_ROM_CODE_SIZE__ <= 640, lderror, "Packed lightmap code exceeds its ROM allocation"
+.else
 .assert __GSU_LIGHTMAP_UNPACK_ROM_CODE_SIZE__ <= 512, lderror, "Six-bit lightmap unpacker exceeds one GSU cache window"
+.endif
 .assert VRAM_TILES_A + GSU_OUTPUT_BYTES <= VRAM_TILES_B, error, "BSP VRAM page A overlaps page B"
 .assert VRAM_TILES_B + GSU_OUTPUT_BYTES <= VRAM_TILEMAP, error, "BSP VRAM page B overlaps tilemap"
 .assert VRAM_TILEMAP + $0800 <= $10000, error, "BSP tilemap exceeds VRAM"
@@ -129,20 +176,26 @@ BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_
 .assert BSP_WORLD_FACE_COUNT * BSP_WORLD_FACE_RECORD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map faces exceed one ROM bank"
 .assert BSP_WORLD_FACE_COUNT * BSP_WORLD_FACE_PLANE_RECORD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map face planes exceed one ROM bank"
 .assert BSP_WORLD_NODE_COUNT * BSP_WORLD_NODE_RECORD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map nodes exceed one ROM bank"
-.assert BSP_WORLD_FACE_COUNT * BSP_WORLD_FACE_OWNER_RECORD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map face owners exceed one ROM bank"
+.ifdef PLAYABLE_FACE_OWNER_BIAS
+BSP_PHYSICAL_FACE_OWNER_BYTES = BSP_WORLD_FACE_COUNT + PLAYABLE_FACE_OWNER_HEADER
+.else
+BSP_PHYSICAL_FACE_OWNER_BYTES = BSP_WORLD_FACE_COUNT * BSP_WORLD_FACE_OWNER_RECORD_BYTES
+.endif
+.assert BSP_PHYSICAL_FACE_OWNER_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map face owners exceed one ROM bank"
 .assert BSP_WORLD_NODE_COUNT * BSP_WORLD_NODE_PARENT_RECORD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map node parents exceed one ROM bank"
 .assert BSP_WORLD_SHADING_BYTES = BSP_WORLD_FACE_COUNT * BSP_WORLD_SHADING_RECORD_BYTES + BSP_WORLD_SHADING_DISTANCE_LUT_BYTES + BSP_WORLD_SHADING_TABLE_BYTES, error, "Full-map shading counts disagree"
 .assert BSP_WORLD_SHADING_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map shading exceeds one ROM bank"
 .assert BSP_WORLD_TEXTURE_COORD_BYTES = BSP_WORLD_INDEX_COUNT * BSP_WORLD_TEXTURE_COORD_RECORD_BYTES, error, "Exact texture coordinates disagree with world indices"
 .assert BSP_WORLD_TEXTURE_COORD_0_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Texture-coordinate bank 0 exceeds its ROM bank"
 .assert BSP_WORLD_TEXTURE_COORD_1_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Texture-coordinate bank 1 exceeds its ROM bank"
-.assert BSP_WORLD_TEXTURE_COORD_2_BYTES < BSP_WORLD_ROM_BANK_BYTES, error, "Texture-coordinate bank 2 must leave room for auxiliary assets"
+.assert BSP_WORLD_TEXTURE_COORD_2_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Level UV bank 2 overflow"
+.assert BSP_WORLD_TEXTURE_COORD_3_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Level UV bank 3 overflow"
 .assert BSP_WORLD_FACE_TEXTURE_ID_BYTES = BSP_WORLD_FACE_COUNT, error, "Face texture IDs lost world-face identity"
 .assert BSP_WORLD_TEXTURE_DIRECTORY_BYTES = BSP_WORLD_TEXTURE_COUNT * BSP_WORLD_TEXTURE_DIRECTORY_RECORD_BYTES, error, "Exact texture directory count disagrees"
-.assert BSP_WORLD_TEXTURE_PIXEL_CHUNK_COUNT = 6, error, "Exact E1M3 texture bank layout changed"
+.assert BSP_WORLD_TEXTURE_PIXEL_CHUNK_COUNT = 12, error, "Fly texture bank layout changed"
 .assert BSP_WORLD_LIGHTMAP_DIRECTORY_BYTES = BSP_WORLD_FACE_COUNT * BSP_WORLD_LIGHTMAP_DIRECTORY_RECORD_BYTES, error, "Lightmap directory lost world-face identity"
-.assert BSP_WORLD_LIGHTMAP_DIRECTORY_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Lightmap directory exceeds one ROM bank"
-.assert BSP_WORLD_LIGHTMAP_CHUNK_COUNT <= 4, error, "World lightmaps exceed their ROM bank reservation"
+.assert BSP_WORLD_LIGHTMAP_DIRECTORY_BYTES <= 2*BSP_WORLD_ROM_BANK_BYTES, error, "Fly lightmap directory exceeds one GSU bank"
+.assert BSP_WORLD_LIGHTMAP_CHUNK_COUNT <= 5, error, "World lightmaps exceed their ROM bank reservation"
 .assert BSP_WORLD_PLANE_COUNT * BSP_WORLD_PLANE_RECORD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map planes exceed one ROM bank"
 .assert BSP_WORLD_LEAF_COUNT * BSP_WORLD_LEAF_RECORD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map leaves exceed one ROM bank"
 .assert BSP_WORLD_MARKSURFACE_COUNT * BSP_WORLD_MARKSURFACE_RECORD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map marksurfaces exceed one ROM bank"
@@ -153,13 +206,7 @@ BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_
 .assert BSP_WORLD_PVS_GUARD_RECORD_COUNT > 0, error, "Full-map face-PVS guard table must not be empty"
 .assert BSP_WORLD_PVS_GUARD_BYTES = BSP_WORLD_PVS_GUARD_RECORD_COUNT * BSP_WORLD_PVS_GUARD_RECORD_BYTES, error, "Full-map face-PVS guard records disagree"
 .assert BSP_WORLD_PVS_DIRECTORY_BYTES + BSP_WORLD_PVS_GUARD_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "Full-map face-PVS directory and guards exceed one ROM bank"
-.assert BSP_WORLD_PVS_CHUNK_COUNT <= 4, error, "Full-map face-PVS data exceeds its ROM bank reservation"
-.assert BSP_VERIFY_NEAR_DEMO_OFFSET < BSP_DEMO_PRECISE_TRACK_BYTES, error, "Static near verifier pose escapes demo1"
-.assert BSP_VERIFY_FAR_DEMO_OFFSET < BSP_DEMO_PRECISE_TRACK_BYTES, error, "Static far verifier pose escapes demo1"
-.assert BSP_DEMO_PRECISE_TIMING_BYTES = BSP_DEMO_PRECISE_TRACK_POSE_COUNT * BSP_DEMO_PRECISE_TIMING_RECORD_BYTES, error, "demo1 precise timing count disagrees with track"
-.assert BSP_DEMO_PRECISE_SAMPLE_RATE_HZ = BSP_DEMO_STEP_SAMPLE_RATE_HZ * BSP_DEMO_ORDERED_POSE_STRIDE, error, "demo1 step rate does not divide the canonical rate"
-.assert BSP_DEMO_PRECISE_TRACK_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "configured demo track exceeds one ROM bank"
-.assert BSP_DEMO_PRECISE_TIMING_BYTES <= BSP_WORLD_ROM_BANK_BYTES, error, "configured demo timing exceeds one ROM bank"
+.assert BSP_WORLD_PVS_CHUNK_COUNT <= 5, error, "Fly face-PVS data exceeds its ROM reservation"
 .assert BSP_COLLISION_MIN_X = BSP_WORLD_COORD_MIN_X, error, "Fly collision X minimum disagrees with the camera clamp"
 .assert BSP_COLLISION_MIN_Y = BSP_WORLD_COORD_MIN_Y, error, "Fly collision Y minimum disagrees with the camera clamp"
 .assert BSP_COLLISION_MIN_Z = BSP_WORLD_COORD_MIN_Z, error, "Fly collision Z minimum disagrees with the camera clamp"
@@ -177,51 +224,58 @@ BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_
 .assert BSP_COLLISION_PAYLOAD_BYTES <= $10000, error, "Fly collision payload exceeds one WRAM bank"
 ; ROM3 holds configured-demo timing. Full world data starts at ROM4, and every
 ; linker segment is bounded to one 32 KiB LoROM window.
-.assert __BSP_DEMO_TIMING_LOAD__ = $838000, lderror, "configured demo timing moved out of ROM3"
-.assert __BSP_WORLD_VERTICES_LOAD__ = $848000, lderror, "Full-map vertices moved out of ROM4"
-.assert __BSP_WORLD_INDICES_0_LOAD__ = $858000, lderror, "Full-map index head moved out of ROM5"
-.assert __BSP_WORLD_INDICES_1_LOAD__ = $868000, lderror, "Full-map index tail moved out of ROM6"
-.assert __BSP_WORLD_FACES_LOAD__ = $878000, lderror, "Full-map faces moved out of ROM7"
-.assert __BSP_WORLD_FACE_PLANES_LOAD__ = $888000, lderror, "Full-map face planes moved out of ROM8"
-.assert __BSP_WORLD_NODES_LOAD__ = $898000, lderror, "Full-map nodes moved out of ROM9"
-.assert __BSP_WORLD_PLANES_LOAD__ = $8A8000, lderror, "Full-map planes moved out of ROM10"
-.assert __BSP_WORLD_LEAVES_LOAD__ = $8B8000, lderror, "Full-map leaves moved out of ROM11"
-.assert __BSP_WORLD_MARKSURFACES_LOAD__ = $8C8000, lderror, "Full-map marksurfaces moved out of ROM12"
-.assert __BSP_WORLD_VISIBILITY_0_LOAD__ = $8D8000, lderror, "Full-map visibility head moved out of ROM13"
-.assert __BSP_WORLD_VISIBILITY_1_LOAD__ = $8E8000, lderror, "Full-map visibility tail moved out of ROM14"
-.assert __BSP_WORLD_PVS_DIRECTORY_LOAD__ = $800000 + BSP_WORLD_PVS_DIRECTORY_ROM_BANK * $10000 + BSP_WORLD_PVS_DIRECTORY_ROM_ADDRESS, lderror, "Face-PVS directory disagrees with generated address"
+.assert __BSP_DEMO_TIMING_LOAD__ = BSP_ROM_LOAD_BSP_DEMO_TIMING, lderror, "configured demo timing moved out of ROM3"
+.assert __BSP_WORLD_VERTICES_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_VERTICES, lderror, "Full-map vertices moved out of ROM4"
+.assert __BSP_WORLD_INDICES_0_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_INDICES_0, lderror, "Full-map index head moved out of ROM5"
+.assert __BSP_WORLD_INDICES_1_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_INDICES_1, lderror, "Full-map index tail moved out of ROM6"
+.assert __BSP_WORLD_FACES_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_FACES, lderror, "Full-map faces moved out of ROM7"
+.assert __BSP_WORLD_FACE_PLANES_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_FACE_PLANES, lderror, "Full-map face planes moved out of ROM8"
+.assert __BSP_WORLD_NODES_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_NODES, lderror, "Full-map nodes moved out of ROM9"
+.assert __BSP_WORLD_PLANES_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_PLANES, lderror, "Full-map planes moved out of ROM10"
+.assert __BSP_WORLD_LEAVES_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_LEAVES, lderror, "Full-map leaves moved out of ROM11"
+.assert __BSP_WORLD_MARKSURFACES_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_MARKSURFACES, lderror, "Raw marksurfaces moved out of ROM124"
+.assert __BSP_WORLD_VISIBILITY_0_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_VISIBILITY_0, lderror, "Raw visibility head moved out of ROM125"
+.assert __BSP_WORLD_VISIBILITY_1_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_VISIBILITY_1, lderror, "Raw visibility tail moved out of ROM126"
+.assert __BSP_WORLD_PVS_DIRECTORY_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_PVS_DIRECTORY, lderror, "Face-PVS directory disagrees with generated address"
+.ifndef PLAYABLE_MAP_ID
 .assert __BSP_WORLD_PVS_DIRECTORY_LOAD__ = ((__BSP_WORLD_PVS_2_LOAD__ + __BSP_WORLD_PVS_2_SIZE__ + 7) & $FFFFF8), lderror, "Face-PVS directory must follow aligned PVS2"
+.endif
 .assert BSP_WORLD_PVS_GUARD_ROM_ADDRESS + BSP_WORLD_PVS_GUARD_BYTES <= $10000, error, "Face-PVS guards cross bank 18"
-.assert __BSP_WORLD_PVS_0_LOAD__ = $908000, lderror, "Full-map face-PVS chunk 0 moved out of ROM16"
-.assert __BSP_WORLD_PVS_1_LOAD__ = $918000, lderror, "Full-map face-PVS chunk 1 moved out of ROM17"
-.assert __BSP_WORLD_PVS_2_LOAD__ = $928000, lderror, "Full-map face-PVS chunk 2 moved out of ROM18"
-.assert __BSP_WORLD_PVS_3_LOAD__ = $938000, lderror, "Full-map face-PVS chunk 3 moved out of ROM19"
-.assert __BSP_DEMO_TRACK_LOAD__ = __BSP_WORLD_PVS_3_LOAD__ + __BSP_WORLD_PVS_3_SIZE__, lderror, "configured demo track no longer follows face-PVS chunk 3"
-.assert __BSP_WORLD_FACE_OWNERS_LOAD__ = $948000, lderror, "Full-map face owners moved out of ROM20"
-.assert __BSP_WORLD_NODE_PARENTS_LOAD__ = $958000, lderror, "Full-map node parents moved out of ROM21"
-.assert __BSP_WORLD_SHADING_LOAD__ = $968000, lderror, "Full-map shading moved out of ROM22"
-.assert __BSP_WORLD_TEXCOORD_0_LOAD__ = $978000, lderror, "Texture coordinates moved out of ROM23"
-.assert __BSP_WORLD_TEXCOORD_1_LOAD__ = $988000, lderror, "Texture coordinates moved out of ROM24"
-.assert __BSP_WORLD_TEXTURE_AUX_LOAD__ = $998000, lderror, "Texture auxiliary data moved out of ROM25"
+.assert __BSP_WORLD_PVS_0_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_PVS_0, lderror, "Full-map face-PVS chunk 0 moved out of ROM16"
+.assert __BSP_WORLD_PVS_1_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_PVS_1, lderror, "Full-map face-PVS chunk 1 moved out of ROM17"
+.assert __BSP_WORLD_PVS_2_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_PVS_2, lderror, "Full-map face-PVS chunk 2 moved out of ROM18"
+.assert __BSP_WORLD_PVS_3_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_PVS_3, lderror, "Full-map face-PVS chunk 3 moved out of ROM19"
+.assert __BSP_WORLD_FACE_OWNERS_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_FACE_OWNERS, lderror, "World face owners moved"
+.assert __BSP_WORLD_NODE_PARENTS_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_NODE_PARENTS, lderror, "Full-map node parents moved out of ROM21"
+.assert __BSP_WORLD_SHADING_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_SHADING, lderror, "Full-map shading moved out of ROM22"
+.assert __BSP_WORLD_TEXCOORD_0_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXCOORD_0, lderror, "Texture coordinates moved out of ROM23"
+.assert __BSP_WORLD_TEXCOORD_1_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXCOORD_1, lderror, "Texture coordinates moved out of ROM24"
+.assert __BSP_WORLD_TEXTURE_AUX_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXTURE_AUX, lderror, "Texture auxiliary data moved out of ROM25"
 .assert __BSP_WORLD_TEXTURE_AUX_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Texture auxiliary data exceeds ROM25"
-.assert __BSP_WORLD_TEXTURE_0_LOAD__ = $9A8000, lderror, "Exact texture bank 0 moved"
-.assert __BSP_WORLD_TEXTURE_1_LOAD__ = $9B8000, lderror, "Exact texture bank 1 moved"
-.assert __BSP_WORLD_TEXTURE_2_LOAD__ = $9C8000, lderror, "Exact texture bank 2 moved"
-.assert __BSP_WORLD_TEXTURE_3_LOAD__ = $9D8000, lderror, "Exact texture bank 3 moved"
-.assert __BSP_WORLD_TEXTURE_4_LOAD__ = $9E8000, lderror, "Exact texture bank 4 moved"
-.assert __BSP_WORLD_TEXTURE_5_LOAD__ = $9F8000, lderror, "Exact texture bank 5 moved"
-.assert __BSP_WORLD_LIGHTMAP_DIRECTORY_LOAD__ = $A08000, lderror, "Lightmap directory moved out of ROM32"
-.assert __BSP_WORLD_LIGHTMAP_0_LOAD__ = $A18000, lderror, "Lightmap bank 0 moved"
-.assert __BSP_WORLD_LIGHTMAP_1_LOAD__ = $A28000, lderror, "Lightmap bank 1 moved"
-.assert __BSP_WORLD_LIGHTMAP_2_LOAD__ = $A38000, lderror, "Lightmap bank 2 moved"
-.assert __BSP_WORLD_LIGHTMAP_3_LOAD__ = $A48000, lderror, "Lightmap bank 3 moved"
+.assert __BSP_WORLD_TEXTURE_0_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXTURE_0, lderror, "Exact texture bank 0 moved"
+.assert __BSP_WORLD_TEXTURE_1_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXTURE_1, lderror, "Exact texture bank 1 moved"
+.assert __BSP_WORLD_TEXTURE_2_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXTURE_2, lderror, "Exact texture bank 2 moved"
+.assert __BSP_WORLD_TEXTURE_3_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXTURE_3, lderror, "Exact texture bank 3 moved"
+.assert __BSP_WORLD_TEXTURE_4_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXTURE_4, lderror, "Exact texture bank 4 moved"
+.assert __BSP_WORLD_TEXTURE_5_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_TEXTURE_5, lderror, "Exact texture bank 5 moved"
+.assert __BSP_WORLD_LIGHTMAP_DIRECTORY_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_LIGHTMAP_DIRECTORY, lderror, "Fly lightmap directory moved"
+.assert __BSP_WORLD_LIGHTMAP_0_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_LIGHTMAP_0, lderror, "Lightmap bank 0 moved"
+.assert __BSP_WORLD_LIGHTMAP_1_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_LIGHTMAP_1, lderror, "Lightmap bank 1 moved"
+.assert __BSP_WORLD_LIGHTMAP_2_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_LIGHTMAP_2, lderror, "Lightmap bank 2 moved"
+.assert __BSP_WORLD_LIGHTMAP_3_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_LIGHTMAP_3, lderror, "Lightmap bank 3 moved"
+.ifndef PLAYABLE_MAP_ID
 .assert __BSP_LIGHTMAP_COLORMAPS_LOAD__ = __BSP_DEMO_TIMING_LOAD__ + __BSP_DEMO_TIMING_SIZE__, lderror, "Lightmap colormaps no longer follow demo timing"
-.assert __BSP_DIVIDE_Q12_RECIPROCAL_0_LOAD__ = $A68000, lderror, "Q12 reciprocal bank 0 moved"
-.assert __BSP_DIVIDE_Q12_RECIPROCAL_1_LOAD__ = $A78000, lderror, "Q12 reciprocal bank 1 moved"
-.assert __BSP_DIVIDE_Q12_RECIPROCAL_2_LOAD__ = $A88000, lderror, "Q12 reciprocal bank 2 moved"
-.assert __BSP_DIVIDE_Q12_RECIPROCAL_3_LOAD__ = $A98000, lderror, "Q12 reciprocal bank 3 moved"
-.assert __BSP_COLLISION_PACKED_0_LOAD__ = $C00000, lderror, "Fly collision payload chunk 0 moved"
-.assert __BSP_COLLISION_PACKED_1_LOAD__ = $C08000, lderror, "Fly collision payload chunk 1 moved"
+.else
+.assert __BSP_LIGHTMAP_COLORMAPS_LOAD__ = BSP_ROM_LOAD_BSP_LIGHTMAP_COLORMAPS, lderror, "Playable segment disagrees with its derived placement"
+.endif
+.assert __BSP_DIVIDE_Q12_RECIPROCAL_0_LOAD__ = $800000 + (GSU_DIVIDE_Q12_RECIPROCAL_FIRST_ROM_BANK+0)*$10000 + GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS, lderror, "Q12 reciprocal bank 0 moved"
+.assert __BSP_DIVIDE_Q12_RECIPROCAL_1_LOAD__ = $800000 + (GSU_DIVIDE_Q12_RECIPROCAL_FIRST_ROM_BANK+1)*$10000 + GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS, lderror, "Q12 reciprocal bank 1 moved"
+.assert __BSP_DIVIDE_Q12_RECIPROCAL_2_LOAD__ = $800000 + (GSU_DIVIDE_Q12_RECIPROCAL_FIRST_ROM_BANK+2)*$10000 + GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS, lderror, "Q12 reciprocal bank 2 moved"
+.ifndef PLAYABLE_COMPACT_Q12_RECIPROCALS
+.assert __BSP_DIVIDE_Q12_RECIPROCAL_3_LOAD__ = $800000 + (GSU_DIVIDE_Q12_RECIPROCAL_FIRST_ROM_BANK+3)*$10000 + GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS, lderror, "Q12 reciprocal bank 3 moved"
+.endif
+.assert __BSP_COLLISION_PACKED_0_LOAD__ = BSP_ROM_LOAD_BSP_COLLISION_PACKED_0, lderror, "Fly collision payload chunk 0 moved"
+.assert __BSP_COLLISION_PACKED_1_LOAD__ = BSP_ROM_LOAD_BSP_COLLISION_PACKED_1, lderror, "Fly collision payload chunk 1 moved"
 .assert __BSP_WORLD_VERTICES_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Full-map vertex segment exceeds its ROM bank"
 .assert __BSP_WORLD_INDICES_0_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Full-map index head exceeds its ROM bank"
 .assert __BSP_WORLD_INDICES_1_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Full-map index tail exceeds its ROM bank"
@@ -237,22 +291,32 @@ BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_
 .assert __BSP_WORLD_PVS_0_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Full-map face-PVS chunk 0 exceeds its ROM bank"
 .assert __BSP_WORLD_PVS_1_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Full-map face-PVS chunk 1 exceeds its ROM bank"
 .assert __BSP_WORLD_PVS_2_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Full-map face-PVS chunk 2 exceeds its ROM bank"
-.assert __BSP_WORLD_PVS_3_SIZE__ + __BSP_DEMO_TRACK_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Face-PVS chunk 3 and configured demo track exceed ROM19"
-.assert __BSP_DEMO_TRACK_SIZE__ = BSP_DEMO_PRECISE_TRACK_BYTES, lderror, "configured demo track segment has the wrong size"
-.assert __BSP_DEMO_TRACK_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "configured demo track exceeds its ROM bank"
-.assert __BSP_DEMO_CLOCK_LOAD__ = $F80000, lderror, "CPU demo clock moved out of ROM112's CPU mirror"
-.assert __BSP_DEMO_CLOCK_SIZE__ = BSP_DEMO_PRECISE_TIMING_BYTES, lderror, "CPU demo clock size disagrees"
+.assert __BSP_WORLD_PVS_3_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Full-map face-PVS chunk 3 exceeds its ROM bank"
+.ifndef PLAYABLE_MAP_ID
+.assert __BSP_SKY_FLOAT_PHASES_LOAD__ >= __BSP_ALIAS_TEMPORAL_LOAD__ + __BSP_ALIAS_TEMPORAL_SIZE__, lderror, "Float sky phases overlap CPU timing or reuse tables"
+.assert __BSP_SKY_FLOAT_PHASES_LOAD__ + __BSP_SKY_FLOAT_PHASES_SIZE__ <= $F88000, lderror, "Float sky phases exceed ROM112's CPU mirror"
+.else
+.assert __BSP_SKY_FLOAT_PHASES_LOAD__ = BSP_ROM_LOAD_BSP_SKY_FLOAT_PHASES, lderror, "Playable float sky phases disagree with their derived placement"
+.assert __BSP_SKY_FLOAT_PHASES_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Float sky phases exceed their segment capacity"
+.assert .loword(__BSP_SKY_FLOAT_PHASES_LOAD__) + __BSP_SKY_FLOAT_PHASES_SIZE__ <= $10000, lderror, "Float sky phases cross their CPU bank"
+.endif
+.assert __BSP_SKY_FLOAT_PHASES_SIZE__ = BSP_SKY_FLOAT_PHASE_BYTES, lderror, "Float sky phase segment size disagrees"
 .assert __BSP_DEMO_TIMING_SIZE__ = BSP_SKY_PHASE_BYTES+BSP_TURBULENCE_PHASE_BYTES+BSP_TURBULENCE_TABLE_BYTES, lderror, "configured special-phase segment has the wrong size"
 .assert __BSP_DEMO_TIMING_SIZE__ + __BSP_LIGHTMAP_COLORMAPS_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Demo timing and lightmap colormaps exceed ROM3"
 .assert __BSP_DEMO_TIMING_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "configured demo timing exceeds its ROM bank"
 .assert __BSP_COLLISION_PACKED_0_SIZE__ = BSP_COLLISION_PACKED_0_BYTES, lderror, "Fly collision payload chunk 0 has the wrong size"
 .assert __BSP_COLLISION_PACKED_1_SIZE__ = BSP_COLLISION_PACKED_1_BYTES, lderror, "Fly collision payload chunk 1 has the wrong size"
-.assert __BSP_WORLD_FACE_OWNERS_SIZE__ = BSP_WORLD_FACE_COUNT * BSP_WORLD_FACE_OWNER_RECORD_BYTES, lderror, "Full-map face-owner segment has the wrong size"
+.assert __BSP_WORLD_FACE_OWNERS_SIZE__ = BSP_PHYSICAL_FACE_OWNER_BYTES, lderror, "Full-map face-owner segment has the wrong size"
 .assert __BSP_WORLD_NODE_PARENTS_SIZE__ = BSP_WORLD_NODE_COUNT * BSP_WORLD_NODE_PARENT_RECORD_BYTES, lderror, "Full-map node-parent segment has the wrong size"
 .assert __BSP_WORLD_SHADING_SIZE__ = BSP_WORLD_SHADING_BYTES, lderror, "Full-map shading segment has the wrong size"
 .assert __BSP_WORLD_TEXCOORD_0_SIZE__ = BSP_WORLD_TEXTURE_COORD_0_BYTES, lderror, "Texture-coordinate bank 0 has the wrong size"
 .assert __BSP_WORLD_TEXCOORD_1_SIZE__ = BSP_WORLD_TEXTURE_COORD_1_BYTES, lderror, "Texture-coordinate bank 1 has the wrong size"
+.if BSP_WORLD_LIGHTMAP_DIRECTORY_BYTES <= BSP_WORLD_ROM_BANK_BYTES
 .assert __BSP_WORLD_LIGHTMAP_DIRECTORY_SIZE__ = BSP_WORLD_LIGHTMAP_DIRECTORY_BYTES, lderror, "Lightmap directory segment has the wrong size"
+.else
+.assert __BSP_WORLD_LIGHTMAP_DIRECTORY_SIZE__ + __BSP_WORLD_LIGHTMAP_DIRECTORY_TAIL_SIZE__ = BSP_WORLD_LIGHTMAP_DIRECTORY_BYTES, lderror, "Fly lightmap directory size disagrees"
+.assert __BSP_WORLD_LIGHTMAP_DIRECTORY_TAIL_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_LIGHTMAP_DIRECTORY_TAIL, lderror, "Fly lightmap directory tail moved"
+.endif
 .assert __BSP_WORLD_LIGHTMAP_0_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Lightmap bank 0 exceeds its ROM bank"
 .assert __BSP_WORLD_LIGHTMAP_1_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Lightmap bank 1 exceeds its ROM bank"
 .assert __BSP_WORLD_LIGHTMAP_2_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Lightmap bank 2 exceeds its ROM bank"
@@ -260,11 +324,40 @@ BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_
 .assert __BSP_LIGHTMAP_COLORMAPS_SIZE__ <= BSP_WORLD_ROM_BANK_BYTES, lderror, "Lightmap colormaps exceed their ROM bank"
 .assert __BSP_DIVIDE_Q12_RECIPROCAL_0_SIZE__ = BSP_WORLD_ROM_BANK_BYTES, lderror, "Q12 reciprocal bank 0 has the wrong size"
 .assert __BSP_DIVIDE_Q12_RECIPROCAL_1_SIZE__ = BSP_WORLD_ROM_BANK_BYTES, lderror, "Q12 reciprocal bank 1 has the wrong size"
+.ifdef PLAYABLE_COMPACT_Q12_RECIPROCALS
+.assert __BSP_DIVIDE_Q12_RECIPROCAL_2_SIZE__ = $3FFE, lderror, "Packed Q12 tail has the wrong size"
+.else
 .assert __BSP_DIVIDE_Q12_RECIPROCAL_2_SIZE__ = BSP_WORLD_ROM_BANK_BYTES, lderror, "Q12 reciprocal bank 2 has the wrong size"
 .assert __BSP_DIVIDE_Q12_RECIPROCAL_3_SIZE__ = $7FFC, lderror, "Q12 reciprocal bank 3 has the wrong size"
+.endif
 ; These assets always cross distinct banks, so a forward MVN is overlap-safe.
 ; Avoid memcpy's low-word-only overlap heuristic selecting a backward MVP.
+.include "quake/PlayableModule.s"
+.include "quake/WorldLightmapStream.s"
+.ifdef PLAYABLE_SWITCHED_LIGHTS
+.include "quake/SwitchedLights.s"
+.endif
+.include "quake/WorldCoordinateStream.s"
+.include "quake/SpriteStream.s"
+.include "quake/VisibilityStream.s"
+.ifdef PLAYABLE_MAP_ID
+.import __GSU_FACE_COLOR_CODE_RUN__, __GSU_FACE_COLOR_CODE_LOAD__, __GSU_FACE_COLOR_CODE_SIZE__
+.import __F3_GSU_FACE_COLOR_CODE_RUN__, __F3_GSU_FACE_COLOR_CODE_LOAD__, __F3_GSU_FACE_COLOR_CODE_SIZE__
+.endif
+.ifdef PLAYABLE_FLAT_MONOTONE_RASTER
+.import __GSU_FLAT_MONOTONE_CODE_RUN__, __GSU_FLAT_MONOTONE_CODE_LOAD__, __GSU_FLAT_MONOTONE_CODE_SIZE__
+.endif
 .macro BSP_STATIC_COPY dest, source, length
+.ifdef PLAYABLE_MAP_ID
+        .local source_is_ram
+        .define source_is_ram 0
+        .if .const(source)
+          .if (^(source) = $70) .or (^(source) = $71) .or (^(source) = $7E) .or (^(source) = $7F)
+            .undefine source_is_ram
+            .define source_is_ram 1
+          .endif
+        .endif
+        .if source_is_ram
         RW_push set:a16i16
         phb
         lda     #length-1
@@ -273,25 +366,80 @@ BSP_BRUSH_FLYSTATE_CPU_ADDRESS = (BSP_BRUSH_FLYSTATE_BANK + $80) * $10000 + BSP_
         mvn     #^(source), #^(dest)
         plb
         RW_pull
+        .else
+        .local playable_source_address
+        .define playable_source_address + (source)
+        .assert (length) > 0 .and (length) <= $FFFF, lderror, "Playable static-copy length is invalid"
+        .assert (^(source) <> $70) .and (^(source) <> $71) .and (^(source) <> $7E) .and (^(source) <> $7F), lderror, "Relocatable RAM copies require the MVN path"
+        .assert (^(playable_source_address) >= $80) .or ((^(playable_source_address) >= $60) .and (^(playable_source_address) < $70)) .or ((^(playable_source_address) >= $40) .and (^(playable_source_address) < $50)), lderror, "Unsupported playable archive source"
+        RW_push set:a16i16
+        ; The inline descriptor bank becomes DB while the copy helper uses low WRAM.
+        .assert (.bankbyte(*) & $40) = 0, lderror, "Playable inline copy requires a caller bank with the low WRAM mirror"
+        jsl     PlayableCopyInline
+        .faraddr PLAYABLE_MSU_OFFSET(playable_source_address)
+        .faraddr dest
+        .word length
+        .undefine playable_source_address
+        RW_pull
+        .endif
+        .undefine source_is_ram
+.else
+        RW_push set:a16i16
+        phb
+        lda     #length-1
+        ldx     #.loword(source)
+        ldy     #.loword(dest)
+        mvn     #^(source), #^(dest)
+        plb
+        RW_pull
+.endif
 .endmacro
 .include "quake/SkyRenderer.s"
+.include "quake/SkyPhaseExact.s"
 .include "quake/TurbulenceRenderer.s"
 .include "quake/AliasAnimation.s"
 ; FX3 keeps the S-CPU and NMI serviceable while RON/RAN own cartridge buses.
 .segment "RODATA"
 QuakeBSPEdgeDivideCacheInitial:
         .res    GSU_TEXTURE_EDGE_DIVIDE_CACHE_BYTES, 0
+.if BSP_QUAKEC_GAMEPLAY
+        .byte   1, 2, 4, 8, 16, 32, 64, 128
+.endif
 QuakeBSPEdgeDivideCacheInitialEnd:
-.assert QuakeBSPEdgeDivideCacheInitialEnd - QuakeBSPEdgeDivideCacheInitial = GSU_TEXTURE_EDGE_DIVIDE_CACHE_BYTES, error, "Edge reciprocal cache initializer has the wrong size"
+.assert QuakeBSPEdgeDivideCacheInitialEnd - QuakeBSPEdgeDivideCacheInitial = GSU_TEXTURE_EDGE_DIVIDE_CACHE_BYTES + GSU_PACKET_BIT_MASK_BYTES, error, "Edge cache and packet mask initializer has the wrong size"
 .segment "CODE"
 Main:
         CPU_init
         REG_init
-        BSP_STATIC_COPY __GSUCODE_RUN__, __GSUCODE_LOAD__+BSP_SOUND_CPU_MIRROR_DELTA, __GSUCODE_SIZE__
+.ifdef PLAYABLE_MAP_ID
+        rep     #$30
+        RW_assume a16i16
+        jsr     PlayableInitMenuPreferences
+.endif
+        BSP_STATIC_COPY __GSUCODE_RUN__, BSP_CPU_CODE_ADDRESS(__GSUCODE_LOAD__), __GSUCODE_SIZE__
         BSP_STATIC_COPY __GSU_AUX_CODE_RUN__, __GSU_AUX_CODE_LOAD__, __GSU_AUX_CODE_SIZE__
         BSP_STATIC_COPY __GSU_BRUSH_CODE_RUN__, __GSU_BRUSH_CODE_LOAD__, __GSU_BRUSH_CODE_SIZE__
+.ifdef PLAYABLE_MAP_ID
+        BSP_STATIC_COPY __GSU_FACE_COLOR_CODE_RUN__, BSP_CPU_CODE_ADDRESS(__GSU_FACE_COLOR_CODE_LOAD__), __GSU_FACE_COLOR_CODE_SIZE__
+.endif
+.if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && !.defined(PLAYABLE_PAIRED_WORLD_CODE)
+        BSP_STATIC_COPY __GSU_FLAT_MONOTONE_CODE_RUN__, BSP_CPU_CODE_ADDRESS(__GSU_FLAT_MONOTONE_CODE_LOAD__), __GSU_FLAT_MONOTONE_CODE_SIZE__
+.endif
         BSP_STATIC_COPY __GSU_TEXTURE_TAIL_CODE_RUN__, __GSU_TEXTURE_TAIL_CODE_LOAD__, __GSU_TEXTURE_TAIL_CODE_SIZE__
         jsr     StageStaticAssets
+.if BSP_QUAKEC_GAMEPLAY
+        RW_forced a16i16
+.ifndef PLAYABLE_MAP_ID
+        lda     #1                      ; Normal, the original Quake default.
+        sta     quake_skill_selected
+.endif
+        stz     quake_restart_pending
+        jsl     QuakeCInit
+.if .defined(PLAYABLE_MAP_ID) && .defined(QC_CAMPAIGN_ITEMS)
+        jsl     CampaignApply
+.endif
+        jsl     ShotgunSoundInit
+.endif
         RW_forced a16i16
         lda     #$FFFF
         sta     f:GSU_DATA_BASE+GSU_BRUSH_PVS_LEAF_OFFSET
@@ -299,14 +447,20 @@ Main:
         ; sampler's reserved $8B00 tail. Install the sampler only afterward.
         RW_forced a16i16
         BSP_STATIC_COPY __GSU_TURBULENCE_HOT_CODE_RUN__, __GSU_TURBULENCE_HOT_CODE_LOAD__, __GSU_TURBULENCE_HOT_CODE_SIZE__
+.ifdef PLAYABLE_PAIRED_WORLD_CODE
+  .ifdef PLAYABLE_FLAT_MONOTONE_RASTER
+        stz     flat_monotone_resident
+  .endif
+        jsr     InstallPairedWorldOverlay
+.endif
         lda     #BSP_START_YAW_INDEX*CAMERA_ANGLE_LEGACY_STEP
         sta     yaw_index
         stz     pitch_level
-        lda     #BSP_WORLD_START_X_Q8
+        lda     #BSP_FLY_START_X_Q8
         sta     camera_x
-        lda     #BSP_WORLD_START_Y_Q8
+        lda     #BSP_FLY_START_Y_Q8
         sta     camera_y
-        lda     #BSP_WORLD_START_Z_Q8
+        lda     #BSP_FLY_START_Z_Q8
         sta     camera_z
         stz     control_divider
         jsr     InitFlyMouse
@@ -317,33 +471,29 @@ Main:
         stz     scheduled_frame_valid
         stz     scheduled_frame_coverage_mode
         stz     scheduled_frame_brush_visual_state
+.if BSP_QUAKEC_GAMEPLAY
+  .if QC_ENTRANCE_COUNT > 0
+        stz     scheduled_entrance_variants
+        stz     scheduled_entrance_variants+2
+  .endif
+  .ifdef QC_EXIT_MOVER_COUNT
+        stz     scheduled_exit_pose_word
+    .if QC_EXIT_MOVER_COUNT > 8
+        stz     scheduled_exit_pose_word_high
+    .endif
+  .endif
+.endif
         lda     #$0001
         sta     temporal_reuse_enabled
-        sta     demo_mode
-        sta     demo_schedule
-        stz     demo_playback_rate_shift
-        stz     boot_fixed_step_sample
-        stz     boot_ordered_source_pose
-        lda     #BSP_DEMO_ORDERED_POSE_STRIDE
-        sta     demo_ordered_pose_stride
-        stz     demo_offset
-        stz     demo_timing_offset
-        stz     demo_next_pose
+        stz     demo_mode               ; Always zero for probes that also inspect older ROMs.
         stz     demo_track_pose
-        stz     demo_pose_due_tick
-        stz     demo_pose_counter
-        stz     demo_source_due_counter
-        stz     demo_coalesced_counter
-        stz     demo_playhead_tick
-        stz     demo_playhead_origin
         stz     demo_schedule_revision
-        stz     demo_loop_counter
         stz     video_tick
         stz     staging_scanline
-        lda     #$FFFF
-        sta     monster_camera_index
+.ifndef PLAYABLE_MAP_ID
         lda     #$0004
         sta     technique
+.endif
         lda     #$0001
         sta     technique4_specialized_path
         sta     texture_colormap_mode
@@ -357,9 +507,8 @@ Main:
         stz     runtime_menu_selection
         stz     runtime_menu_release_gate
         stz     runtime_menu_restart_action
-        stz     runtime_menu_saved_playhead_tick
-        stz     runtime_menu_apply_flags
         stz     runtime_menu_draft_playback
+.ifndef PLAYABLE_MAP_ID
         lda     #$0004
         sta     runtime_menu_draft_technique
         lda     #$0001
@@ -369,9 +518,10 @@ Main:
         lda     #BSP_BRUSH_DYNAMIC_REPLAY_SUPPORTED
         sta     dynamic_brushes_enabled
         sta     runtime_menu_draft_brushes
-        lda     #BSP_ALIAS_ENTITY_SUPPORTED
+        lda     #BSP_RENDER_ENTITIES_SUPPORTED
         sta     mdl_entities_enabled
         sta     runtime_menu_draft_entities
+.endif
         stz     dynamic_brush_revision
         stz     brush_visual_state
         stz     producer_slot
@@ -391,6 +541,7 @@ Main:
         stz     prefetched_selector_valid
         stz     render_counter
         stz     present_counter
+        stz     presented_weapon_frame
         stz     gsu_job_counter
         stz     staging_dma_counter
         stz     vram_chunk_counter
@@ -429,10 +580,6 @@ Main:
         ; optional frame-zero overrides have been applied and before InitVideo
         ; builds the first OAM image.
         jsr     SyncRuntimeMenuDrafts
-        lda     demo_mode
-        beq     :+
-        jsr     RestartDemoPlayback
-:
         ; Force the first selector pass to decode even if cartridge RAM retained
         ; a prior session's telemetry.
         lda     #$0000
@@ -456,6 +603,9 @@ Main:
         sta     f:GSU_DATA_BASE+GSU_TELEMETRY_BRUSH_CURRENT_TEXTURE
         jsr     InitGSU
         jsr     BootRenderViewport
+.ifdef PLAYABLE_MAP_ID
+        jsr     StatusHudInit
+.endif
         ; InitVideo returns in 8-bit accumulator mode. These queue fields are
         ; words, so restore the runtime width before encoding their stores.
         RW_forced a16i16
@@ -468,34 +618,124 @@ Main:
         jsr     PublishUploadSlotState
         lda     #$0001
         sta     present_counter
-        jsr     AdvanceDemoAfterStage
         RW      a8
         VBL_set BSPVBlank
+.ifndef PLAYABLE_MAP_ID
         lda     RDNMI                   ; Drop any VBlank latched during startup.
         VBL_on
+.endif
         lda     #$01
         sta     video_active
         stz     video_active+1
         lda     #inidisp(ON, DISP_BRIGHTNESS_MAX)
         sta     SFX_inidisp
-.include "quake/SoundInit.s"
+.ifdef PLAYABLE_MAP_ID
+        jsl     ArmPlayableVBlank
+.endif
 .include "quake/SoundMainLoop.s"
         lda     runtime_menu_open
-        beq     :+
+        beq     MainLoopRender
+.ifdef PLAYABLE_E1M1_PREFETCH_GAMEPLAY
+        ; VBlank can open the menu after the prefetch was admitted.
+        lda     deferred_gameplay_tick
+        beq     MainLoopMenuWait
+        jsr     ServiceDeferredGameplay
+MainLoopMenuWait:
+.endif
         stz     prefetched_selector_valid
         BSP_SOUND_WAIT_FRAME
         bra     MainLoop
-:
+MainLoopRender:
         jmp     (frame_pipeline_entry)
+
+.ifdef PLAYABLE_MAP_ID
+.pushseg
+.segment "BSP_QUAKEC"
+; Keep controller time stopped until sound and video are ready. Leave at
+; least one scanline before a new VBlank edge when arming from active display.
+ArmPlayableVBlank:
+        RW_assume a8i16
+@Beam:
+        lda     STAT78
+        lda     SLHV
+        lda     OPVCT
+        cmp     #224
+        beq     @Beam
+        lda     RDNMI
+        VBL_on
+        rtl
+.popseg
+.endif
+
+.ifdef PLAYABLE_E1M1_PREFETCH_GAMEPLAY
+; Serve the deferred input only if the renderer join did not already use it.
+ServiceDeferredGameplay:
+        RW_assume a16i16
+        stz     deferred_gameplay_tick
+        dec
+        cmp     f:quakec_last_tick
+        bne     :+
+        jsl     QuakeCService
+:
+        rts
+
+DeferPrefetchedGameplay:
+        RW_assume a16i16
+        lda     active_render_scale
+        cmp     #2
+        bne     @Rejected
+        lda     render_coverage_mode
+        bne     @Rejected
+        lda     active_packet_guard_status
+        cmp     #GSU_PACKET_GUARD_VALUE
+        bne     @Rejected
+        lda     active_packet_error
+        bne     @Rejected
+        lda     demo_schedule_revision
+        cmp     render_demo_epoch
+        bne     @Rejected
+        ; Both renderers service gameplay while their frozen X2 job runs.
+        .assert RUNTIME_MENU_TECHNIQUE_FACE_COLORS = 3, error, "Flat technique changed"
+        .assert BSP_TECHNIQUE_TEXTURED_LIGHTMAP = 4, error, "Full technique changed"
+        lda     render_camera+10
+        dec
+        and     #$00FE
+        cmp     #(RUNTIME_MENU_TECHNIQUE_FACE_COLORS-1)
+        bne     @Rejected
+        lda     runtime_menu_open
+        bne     @Rejected
+        lda     f:quakec_last_tick
+        cmp     a:QC_INPUT_TICK
+        beq     @Rejected
+        inc
+        beq     @Rejected               ; Zero is the inactive token.
+        ; Capture the due live tap before VBlank can expire it.
+        jsl     GameplayCaptureDeferredLiveInput
+        sta     deferred_gameplay_tick
+        sec
+        rts
+@Rejected:
+        clc
+        rts
+.endif
 ;-------------------------------------------------------------------------------
+.ifdef PLAYABLE_PAIRED_WORLD_CODE
+InstallPairedWorldOverlay:
+        RW_assume a16i16
+        BSP_STATIC_COPY __GSU_PAIRED_WORLD_CODE_RUN__, __GSU_PAIRED_WORLD_CODE_LOAD__, __GSU_PAIRED_WORLD_CODE_SIZE__
+  .ifdef PLAYABLE_FLAT_MONOTONE_RASTER
+        lda     flat_monotone_resident
+        beq     @Ready
+        stz     flat_monotone_resident
+        jmp     InvalidateFlatBrushCodeCache
+@Ready:
+  .endif
+        rts
+.endif
 StageStaticAssets:
         RW_forced a8i16
-        ; ROM96/97 use linear linker labels at $C0. The S-CPU mirror of the
-        ; same physical 3 MiB offset starts at $F0 and is used at boot.
-        BSP_STATIC_COPY QuakeBSPCollisionRAM, BSP_COLLISION_CPU_ROM_BASE, BSP_COLLISION_PACKED_0_BYTES
-  .if BSP_COLLISION_PACKED_1_BYTES > 0
-        BSP_STATIC_COPY QuakeBSPCollisionRAM+BSP_COLLISION_PACKED_0_BYTES, BSP_COLLISION_CPU_ROM_BASE+BSP_WORLD_ROM_BANK_BYTES, BSP_COLLISION_PACKED_1_BYTES
-  .endif
+        ; FX3 permits concurrent CPU ROM reads. Immutable collision occupancy
+        ; is read directly through its linear $F0 mirror, without a WRAM copy.
         BSP_STATIC_COPY GSU_SIN, CameraAngleSin, CAMERA_ANGLE_STEPS
         BSP_STATIC_COPY GSU_COS, CameraAngleCos, CAMERA_ANGLE_STEPS
         BSP_STATIC_COPY GSU_RECIPROCAL, QuakeBSPReciprocal, GSU_RECIPROCAL_RAM_BYTES
@@ -505,13 +745,23 @@ StageStaticAssets:
         BSP_STATIC_COPY GSU_TEXTURE_COORD_MAP, QuakeBSPTextureCoordinateMap, GSU_TEXTURE_COORD_MAP_BYTES
         ; Persistent cartridge RAM may contain an old denominator/reciprocal
         ; pair. Zero both records so the first positive edge denominator misses.
-        BSP_STATIC_COPY GSU_TEXTURE_EDGE_DIVIDE_CACHE, QuakeBSPEdgeDivideCacheInitial, GSU_TEXTURE_EDGE_DIVIDE_CACHE_BYTES
+        BSP_STATIC_COPY GSU_TEXTURE_EDGE_DIVIDE_CACHE, QuakeBSPEdgeDivideCacheInitial, GSU_TEXTURE_EDGE_DIVIDE_CACHE_BYTES + GSU_PACKET_BIT_MASK_BYTES
         BSP_STATIC_COPY GSU_DIVIDE_Q12_HOT_MIRROR, QuakeBSPDivideQ12Reciprocal, GSU_DIVIDE_Q12_HOT_MIRROR_BYTES
+.ifdef QUAKE_MSU_CACHE
+        jsr     MsuCacheResetArena
+.endif
         ; Technique 4 is the default renderer, so stage its natural pages once
         ; at boot instead of paying a transition copy before the first frame.
         BSP_STATIC_COPY GSU_TEXTURE_COLORMAP, QuakeBSPLightmapColormap, GSU_LIGHTMAP_COLORMAP_BYTES
+.ifdef PLAYABLE_SPRITE_STREAM
+        ; Save the verified rows that sprite uploads will overwrite.
+        BSP_STATIC_COPY SpriteStreamColormapShadow, GSU_TEXTURE_COLORMAP, SPRITE_STREAM_CACHE_BYTES
+.endif
         rts
 .include "quake/TemporalReuse.s"
+.ifdef QUAKE_MSU_CACHE
+.include "quake/MsuSurfaceCache.s"
+.endif
 ;-------------------------------------------------------------------------------
 InitGSU:
         RW_forced a8i16
@@ -579,11 +829,17 @@ CaptureSelectorTelemetry:
         sta     active_packet_camera_q8+4
         rts
 
+
 ;-------------------------------------------------------------------------------
 ; Joypad sampling remains at 60 Hz even when rendering or presentation takes
 ; several video frames. Start toggles native demo1 playback/manual flight;
 ; Select cycles the supported albedo, lightmapped, and untextured renderers.
 BSPVBlank:
+.ifdef PLAYABLE_MAP_ID
+        phb
+        phk
+        plb
+.endif
         RW_forced a8i16
         ; VBL_on can service a latched NMI immediately when the long selector
         ; returns during active display. Never let that deferred interrupt
@@ -592,35 +848,69 @@ BSPVBlank:
         bmi     :+
         jmp     BSPVBlankDone
 :
+.if .defined(PLAYABLE_LARGE_DISTANCE_CACHE) || .defined(PLAYABLE_FAST_WALK_PPU_MUL)
+        inc     z:w_ppu_latch_nmi
+.endif
         RW_forced a16i16
         inc     video_tick
-        inc     hdma_nmi_counter
+.ifdef QC_PICKUP_NOTICES
+        jsl     PickupNotifyVideo
+.endif
+.ifdef PLAYABLE_MAP_ID
+        ; Playable maps always fly. Gate all three animation clocks once.
+        lda     runtime_menu_open
+        bne     :+
+.endif
         jsr     UpdateFlySkyClock
         jsr     UpdateFlyAliasClock
         jsr     UpdateFlyTurbulenceClock
-        RW_forced a8i16
+.ifdef PLAYABLE_MAP_ID
+:
+.endif
         jsr     UpdateRuntimeMenu
-        RW_forced a16i16
+.ifdef PLAYABLE_MAP_ID
         lda     runtime_menu_open
-        bne     @FlyInputDone
-        lda     demo_mode
-        bne     @FlyInputDone
+        beq     :+
+        jmp     BSPVBlankInputReady
+:
+  .ifdef PLAYABLE_WEAPON_OBJ
+        lda     weapon_obj_menu_pending
+        bne     @ControlsDone
+  .endif
         jsr     PollFlyMouse
-@FlyInputDone:
-        RW_forced a16i16
+.else
         lda     runtime_menu_open
         bne     @ControlsDone
-        lda     demo_mode
-        beq     @ControlsDone           ; Fly collision work follows the upload.
-        RW_forced a8i16
-        jsr     UpdateCameraControls
-        jsr     UpdateWarpOrderedDemo
-        jsr     UpdateRealtimeDemo
+        jsr     PollFlyMouse
+.endif
 @ControlsDone:
-        RW_forced a16i16
-        jsr     UpdateFlyMode7Warp
         RW_forced a8i16
-
+.ifdef PLAYABLE_WEAPON_OBJ
+        lda     quake_restart_pending
+        bne     :+
+        jsr     ShotgunVBlank
+:
+  .ifdef QC_HUB_WARNING_COUNT
+        ; Reserve this VBlank for a changed centerprint. A bulk upload
+        ; could otherwise use the time needed for the BG2 tilemap DMA.
+    .ifdef QC_E1M1_HINTS
+        jsl     StartWarningVBlank
+    .else
+        jsr     StartWarningVBlank
+    .endif
+        bcc     :+
+        jmp     @SoundVBlank
+:
+  .endif
+        ; Reserve the extra CGRAM DMA on a tint transition while retaining
+        ; the regular world cadence on steady tint frames.
+        lda     weapon_obj_palette_key
+        and     #$1c
+        cmp     weapon_obj_tint_effect
+        beq     :+
+        jmp     @SoundVBlank
+:
+.endif
         lda     upload_active
         beq     :+
         jmp     @Upload
@@ -649,6 +939,16 @@ BSPVBlank:
 :
         lda     slot_camera+10,x
         and     #$00FF
+.ifdef QC_E1M2_DEFER_UPLOAD
+        stz     upload_defer_budget
+        cmp     #RUNTIME_MENU_TECHNIQUE_FACE_COLORS
+        bne     :+
+        pha
+        lda     #(E1M2_DEFER_ACTIVE | E1M2_DEFER_LATCH)
+        sta     upload_defer_budget
+        pla
+:
+.endif
         cmp     #$0002
         bcs     @TextureUploadFormat
         stz     upload_palette_mode
@@ -661,7 +961,7 @@ BSPVBlank:
         sta     upload_palette_mode
         bra     @TextureUploadFormatReady
 @NaturalTexturePalette:
-        stz     upload_palette_mode
+        jsr     SelectUploadWeaponPalette
 @TextureUploadFormatReady:
         lda     upload_slot
         asl
@@ -669,17 +969,61 @@ BSPVBlank:
         lda     slot_present_direct,x
         cmp     #.loword(F3_UploadPresentDirect)
         bne     @PlanarTextureFormat
-        lda     #BSP_UPLOAD_FORMAT_MODE7
+        lda     #BSP_UPLOAD_FORMAT_TEXTURE_X3
         bra     @UploadFormatReady
 @PlanarTextureFormat:
         lda     #BSP_UPLOAD_FORMAT_TEXTURE
 @UploadFormatReady:
         sta     upload_format
+.ifdef PLAYABLE_WEAPON_OBJ
+        ; Resident weapon tiles free enough VBlank bandwidth for three
+        ; equally sized world transfers, with no OBJ CHR DMA on those blanks.
+        ldx     #0
+        cmp     #BSP_UPLOAD_FORMAT_TEXTURE
+        bne     @ObjUploadPlanReady
+        lda     upload_slot
+        asl
+        tay
+        lda     slot_weapon_frame,y
+        and     #$00ff
+        beq     @ObjShortUpload
+        cmp     weapon_obj_resident
+        beq     @ObjShortUpload
+        cmp     weapon_obj_alternate
+        bne     @ObjUploadPlanReady
+@ObjShortUpload:
+        inx
+@ObjUploadPlanReady:
+        stx     weapon_obj_short_upload
+        lda     upload_format
+.endif
         cmp     presented_format
         beq     :+
         RW_forced a8i16
+.ifndef PLAYABLE_MAP_ID
+        lda     runtime_menu_open
+        bne     @ReloadFormatMap
+.endif
         lda     #inidisp(OFF, DISP_BRIGHTNESS_MIN)
         sta     SFX_inidisp
+        sta     INIDISP
+.ifndef PLAYABLE_MAP_ID
+@ReloadFormatMap:
+.endif
+        ; Reload the tilemap in its own VBlank before the regular frame DMA.
+        lda     upload_format
+.ifndef PLAYABLE_MAP_ID
+        beq     @ReloadFlatMap
+.endif
+        cmp     #BSP_UPLOAD_FORMAT_TEXTURE_X3
+        bne     @Upload
+        VRAM_memcpy VRAM_FLY3_TILEMAP, BSP_CPU_CODE_ADDRESS(Fly3Tilemap), $0800
+        jmp     @SoundVBlank
+.ifndef PLAYABLE_MAP_ID
+@ReloadFlatMap:
+        VRAM_memcpy VRAM_TILEMAP, BSP_CPU_CODE_ADDRESS(QuakeBSPTilemap), $0800
+        jmp     @SoundVBlank
+.endif
 :
         RW_forced a8i16
 @Upload:
@@ -687,549 +1031,85 @@ BSPVBlank:
         bcs     @SoundVBlank
         jsr     UploadFrameChunk
 @SoundVBlank:
-.include "quake/SoundVBlank.s"
-        ; Pixel, palette and Mode 7 publication are finished for both demo
-        ; and flight. Camera snapshots are CPU-only and may follow unblank.
+.if BSP_QUAKEC_GAMEPLAY
+.ifdef PLAYABLE_WEAPON_OBJ
+        jsr     WeaponObjSyncPalette
+.else
+        lda     quake_restart_pending
+        bne     :+
+        jsr     ShotgunVBlank
+:
+.endif
+.if .defined(PLAYABLE_MAP_ID) && !.defined(PLAYABLE_WEAPON_OBJ)
+        jsr     StatusHudVBlank
+.endif
+.if .defined(QC_HUB_WARNING_COUNT) && !.defined(PLAYABLE_WEAPON_OBJ)
+        jsr     StartWarningVBlank
+.endif
+.if .defined(PLAYABLE_MAP_ID) && .defined(PLAYABLE_WEAPON_OBJ)
+        jsr     StatusHudVBlank
+.endif
+.endif
+        ; Pixel and palette publication are finished for this VBlank.
         RW_forced a8i16
         lda     SFX_inidisp
         sta     INIDISP
         RW_forced a16i16
+.ifdef PLAYABLE_WEAPON_OBJ
+        lda     weapon_obj_menu_pending
+        bne     BSPVBlankInputReady
+.endif
+.ifndef PLAYABLE_MAP_ID
         lda     runtime_menu_open
-        bne     BSPVBlankDone
-        lda     demo_mode
-        beq     @FlyControls
-        jsr     FinishDemoWarpCamera
-        bra     BSPVBlankDone
-@FlyControls:
+        bne     BSPVBlankInputReady
+.endif
         RW_forced a8i16
 FlyControlsVisible:
+.if BSP_QUAKEC_GAMEPLAY && !.defined(QC_QUEUED_INPUT)
+        RW_forced a16i16
+        lda     quake_restart_pending
+        bne     BSPVBlankInputReady
+.endif
+.if BSP_PLAYER_WALK && !.defined(QC_QUEUED_INPUT)
+        RW_forced a16i16
+        jsl     WalkPublishPosition
+.endif
         jsr     UpdateCameraControls
-        jsr     FinishHdmaWarpCamera
+        RW_forced a16i16
+BSPVBlankInputReady:
+        GameplayInputEndVBlank
 BSPVBlankDone:
-        jsr     ServiceHdmaWarpDeadline
-        ; Menu/demo exits can arrive here in A16; retain the byte-wide callback
+        ; Menu exits can arrive here in A16; retain the byte-wide callback
         ; contract for the libSFX epilogue's NMITIMEN and INIDISP writes.
         RW_forced a8i16
+.ifdef PLAYABLE_MAP_ID
+        plb
+.endif
         rtl
 .include "quake/RuntimeControls.s"
-.include "quake/DemoAdvance.s"
-.include "quake/DemoRenderPrediction.s"
-; Start a new schedule epoch at pose zero. Ordered mode advances only after a
-; completed frame is staged; real-time mode advances from video_tick in
-; UpdateRealtimeDemo. Both publish through the same camera/control revision.
-RestartDemoPlayback:
-        RW_assume a16i16
-        stz     demo_offset
-        stz     demo_timing_offset
-        stz     demo_next_pose
-        jsr     ApplyBootDemoCursor
-        stz     demo_pose_counter
-        stz     demo_source_due_counter
-        stz     demo_coalesced_counter
-        stz     demo_loop_counter
-        stz     demo_playhead_tick
-        lda     video_tick
-        sta     demo_playhead_origin
-        inc     demo_schedule_revision
-        jsr     InvalidateScheduledFrameIdentity
-        jsr     LoadNextDemoPose
-        inc     demo_source_due_counter
-        rts
-; Consume the next canonical track/timing cursor. Step mode uses the derived
-; 3 Hz stride and wraps for visible playback. Real-time advances one canonical
-; configured-rate record and stops at the end so a fixed-duration benchmark
-; cannot enter a second epoch.
-AdvanceDemoCursor:
-        RW_assume a16i16
-        lda     demo_schedule
-        bne     @RealtimePose
-        lda     demo_next_pose
-        clc
-        adc     demo_ordered_pose_stride
-        sta     demo_next_pose
-        bra     @CheckEnd
-@RealtimePose:
-        inc     demo_next_pose
-@CheckEnd:
-        lda     demo_next_pose
-        cmp     #BSP_DEMO_PRECISE_TRACK_POSE_COUNT
-        bcc     @AdvanceOffsets
-        lda     demo_schedule
-        bne     @RealtimeEnd
-        stz     demo_next_pose
-        stz     demo_offset
-        stz     demo_timing_offset
-        inc     demo_loop_counter
-        rts
-@RealtimeEnd:
-        lda     #BSP_DEMO_PRECISE_TRACK_POSE_COUNT
-        sta     demo_next_pose
-        lda     #BSP_DEMO_PRECISE_TRACK_BYTES
-        sta     demo_offset
-        lda     #BSP_DEMO_PRECISE_TIMING_BYTES
-        sta     demo_timing_offset
-        rts
-@AdvanceOffsets:
-        lda     demo_schedule
-        bne     @RealtimeOffsets
-        lda     demo_ordered_pose_stride
-        cmp     #$0001
-        beq     @RealtimeOffsets
-        lda     demo_offset
-        clc
-        adc     #BSP_DEMO_PRECISE_TRACK_RECORD_BYTES * BSP_DEMO_ORDERED_POSE_STRIDE
-        sta     demo_offset
-        lda     demo_timing_offset
-        clc
-        adc     #BSP_DEMO_PRECISE_TIMING_RECORD_BYTES * BSP_DEMO_ORDERED_POSE_STRIDE
-        sta     demo_timing_offset
-        rts
-@RealtimeOffsets:
-        lda     demo_offset
-        clc
-        adc     #BSP_DEMO_PRECISE_TRACK_RECORD_BYTES
-        sta     demo_offset
-        lda     demo_timing_offset
-        clc
-        adc     #BSP_DEMO_PRECISE_TIMING_RECORD_BYTES
-        sta     demo_timing_offset
-        rts
-
-LoadNextDemoPose:
-        RW_assume a16i16
-        lda     demo_next_pose
-        sta     demo_track_pose
-        ldx     demo_timing_offset
-        lda     f:QuakeBSPDemoPreciseTiming,x
-        sta     demo_pose_due_tick
-        ldx     demo_offset
-        jsr     LoadDemoPoseRecord
-        jsr     AdvanceDemoCursor
-        inc     demo_pose_counter
-        inc     control_revision
-        rts
-
-; Load one absolute Q3/u16 canonical camera record at X. Positions remain Q8
-; through the CPU handoff; the current GSU command quantizes them to its
-; existing whole map units.
-LoadDemoPoseRecord:
-        RW_assume a16i16
-        lda     f:QuakeBSPDemoPreciseTrack+0,x
-        sec
-        sbc     #.loword(BSP_WORLD_ORIGIN_X * 8)
-        asl
-        sta     camera_x
-        lda     f:QuakeBSPDemoPreciseTrack+2,x
-        sec
-        sbc     #.loword(BSP_WORLD_ORIGIN_Y * 8)
-        asl
-        sta     camera_y
-        lda     f:QuakeBSPDemoPreciseTrack+4,x
-        sec
-        sbc     #.loword(BSP_WORLD_ORIGIN_Z * 8)
-        asl
-        sta     camera_z
-        lda     f:QuakeBSPDemoPreciseTrack+6,x
-        clc
-        adc     #$0400
-        xba
-        and     #$00F8                 ; Keep the recorded 32-step path exact.
-        sta     yaw_index
-        lda     #$0000
-        sec
-        sbc     f:QuakeBSPDemoPreciseTrack+8,x
-        clc
-        adc     #$0400
-        xba
-        and     #$00F8
-        bit     #$0080
-        beq     @StorePitch
-        ora     #$FF00
-@StorePitch:
-        sta     pitch_level
-        rts
-; Publish the newest pose due at shifted source time; retain due coalescing.
-UpdateRealtimeInactiveReturn:
-        RW_forced a8i16
-        rts
-UpdateRealtimeDemo:
-        RW_forced a16i16
-        BSP_SOUND_HOLD_DEMO UpdateRealtimeReturn
-        lda     runtime_menu_open
-        beq     :+
-        RW_forced a8i16
-        rts
-:
-        RW_assume a16i16
-        lda     demo_mode
-        beq     UpdateRealtimeInactiveReturn
-        lda     demo_schedule
-        beq     UpdateRealtimeInactiveReturn
-        lda     video_tick
-        sec
-        sbc     demo_playhead_origin
-        ldx     demo_playback_rate_shift
-        beq     @PlayheadReady
-@ScalePlayhead:
-        lsr
-        dex
-        bne     @ScalePlayhead
-@PlayheadReady:
-        sta     demo_playhead_tick
-        stz     realtime_due_batch
-@CheckDue:
-        lda     demo_timing_offset
-        cmp     #BSP_DEMO_PRECISE_TIMING_BYTES
-        bcs     @RealtimeEnd
-        tax
-        lda     f:QuakeBSPDemoPreciseTiming,x
-        cmp     demo_playhead_tick
-        bcc     @Due
-        beq     @Due
-        bra     @Publish
-@Due:
-        sta     realtime_candidate_tick
-        lda     demo_offset
-        sta     realtime_candidate_offset
-        lda     demo_next_pose
-        sta     realtime_candidate_pose
-        jsr     AdvanceDemoCursor
-        inc     demo_source_due_counter
-        inc     realtime_due_batch
-        bra     @CheckDue
-@RealtimeEnd:
-.if BSP_SOUND_ENABLED
-        ; Keep the ordinary source-clock and refill cadence byte-for-byte in
-        ; timing: loop coordination runs only after the cursor is exhausted.
-        jsr     QuakeSoundRealtimeLoop
-        bcs     UpdateRealtimeReturn
+.if BSP_QUAKEC_GAMEPLAY
+.include "quake/QuakeSkill.s"
 .endif
-@Publish:
-        lda     realtime_due_batch
-        beq     UpdateRealtimeReturn
-        dec
-        clc
-        adc     demo_coalesced_counter
-        sta     demo_coalesced_counter
-        lda     control_revision
-        cmp     render_camera+12
-        beq     @NoPendingCommand
-        inc     demo_coalesced_counter
-@NoPendingCommand:
-        lda     realtime_candidate_pose
-        sta     demo_track_pose
-        lda     realtime_candidate_tick
-        sta     demo_pose_due_tick
-        ldx     realtime_candidate_offset
-        jsr     LoadDemoPoseRecord
-        inc     demo_pose_counter
-        inc     control_revision
-UpdateRealtimeReturn:
-        RW_forced a8i16
-        rts
-; Drain one chunk each VBlank; present only after the complete page is resident.
-UploadFrameChunk:
-        RW_forced a16i16
-        lda     upload_format
-        cmp     #BSP_UPLOAD_FORMAT_MODE7
-        bne     :+
-        jmp     UploadFlyMode7Chunk
-:
-        jsr     RestorePlanarMenuFont
-        lda     upload_offset
-        lsr
-        tay
-        lda     upload_format
-        bne     @TextureDestination
-        lda     upload_target
-        beq     @DestinationA
-        tya
-        clc
-        adc     #VRAM_TILES_B >> 1
-        tay
-        bra     UploadChunkDestinationReady
-@DestinationA:
-        tya
-        clc
-        adc     #VRAM_TILES_A >> 1
-        tay
-        bra     UploadChunkDestinationReady
-@TextureDestination:
-        lda     upload_target
-        beq     @TextureDestinationA
-        tya
-        clc
-        adc     #VRAM_TEXTURE_TILES_B >> 1
-        tay
-        bra     UploadChunkDestinationReady
-@TextureDestinationA:
-        tya
-        clc
-        adc     #VRAM_TEXTURE_TILES_A >> 1
-        tay
-UploadChunkDestinationReady:
-        lda     upload_offset
-        ldx     upload_slot
-        beq     @SourceSlot0
-        clc
-        adc     #.loword(StagedFrame1)
-        tax
-        bra     @SourceReady
-@SourceSlot0:
-        clc
-        adc     #.loword(StagedFrame0)
-        tax
-@SourceReady:
-        stx     A1T7L
-        ldx     #BSP_UPLOAD_CHUNK_BYTES
-        lda     upload_format
-        beq     @ChunkBytesReady
-        ldx     #BSP_TEXTURE_UPLOAD_CHUNK_BYTES
-        lda     upload_chunk
-        cmp     #BSP_TEXTURE_UPLOAD_CHUNKS-1
-        bne     @ChunkBytesReady
-        ldx     #BSP_TEXTURE_UPLOAD_LAST_CHUNK_BYTES
-        bra     @ChunkBytesReady
-@ChunkBytesReady:
-        RW      a8
-        stz     MDMAEN
-        sty     VMADDL
-        lda     #$80                    ; Word writes; advance after $2119.
-        sta     VMAINC
-        lda     #^StagedFrame0
-        sta     A1B7
-        stx     DAS7L
-        lda     #$01                    ; Alternate $2118/$2119 for tile bytes.
-        sta     DMAP7
-        lda     #$18
-        sta     BBAD7
-        lda     #%10000000
-        sta     MDMAEN
-        RW      a16
-        inc     vram_chunk_counter
-        txa
-        clc
-        adc     upload_offset
-        sta     upload_offset
-        inc     upload_chunk
-        lda     upload_format
-        beq     @FlatUploadChunks
-        lda     #BSP_TEXTURE_UPLOAD_CHUNKS
-        bra     @UploadChunksReady
-@FlatUploadChunks:
-        lda     #BSP_UPLOAD_CHUNKS
-@UploadChunksReady:
-        cmp     upload_chunk
-        beq     @FrameUploadComplete
-        jmp     UploadFrameReturn
-@FrameUploadComplete:
-        RW      a8
-        lda     upload_format
-        beq     @PresentFlat
-        jmp     UploadPresentTexture
-@PresentFlat:
-        jmp     UploadPresentFlat
-UploadPresentTexture:
-        lda     presented_format
-        cmp     upload_format
-        bne     UploadLoadTexturePalette
-        lda     upload_palette_mode
-        cmp     presented_palette_mode
-        bne     :+
-        jmp     UploadTexturePaletteReady
-:
-UploadLoadTexturePalette:
-        lda     upload_palette_mode
-        beq     UploadLoadNaturalTexturePalette
-        CGRAM_memcpy 0, QuakeBSPUntexturedPalette, 512
-        bra     UploadTexturePaletteLoaded
-UploadLoadNaturalTexturePalette:
-        CGRAM_memcpy 0, QuakeBSPTexturePalette, 512
-UploadTexturePaletteLoaded:
-        lda     upload_palette_mode
-        sta     presented_palette_mode
-UploadTexturePaletteReady:
-        stz     BG1HOFS
-        stz     BG1HOFS
-        lda     #bgmode(BG_MODE_3, BG3_PRIO_NORMAL, BG_SIZE_8X8, BG_SIZE_8X8, BG_SIZE_8X8, BG_SIZE_8X8)
-        sta     BGMODE                 ; Mode 3 gives BG1 all eight bitplanes.
-        RW      a16
-        lda     upload_slot
-        asl
-        tax
-        RW      a8
-        jmp     (slot_present_direct,x)
-UploadPresentDirect:
-        stz     TMW
-        lda     #2
-        sta     presented_render_scale
-        lda     #$11                    ; Mosaic size 2, BG1 enabled.
-        sta     MOSAIC
-        lda     #bgsc(VRAM_TEXTURE_TILEMAP, SC_SIZE_32X32)
-        sta     BG1SC
-        ; Align mosaic pairs to source rows (0,1), (2,3), ... . With the
-        ; mirrored tile quads this makes the GSU row swizzle present in
-        ; ascending logical order instead of reversing every eight-row tile.
-        lda     #$FF
-        sta     BG1VOFS
-        sta     BG1VOFS
-        lda     upload_target
-        beq     UploadPresentDirectA
-        lda     #bg12nba(VRAM_TEXTURE_TILES_B, 0)
-        sta     BG12NBA
-        bra     UploadPresented
-UploadPresentDirectA:
-        lda     #bg12nba(VRAM_TEXTURE_TILES_A, 0)
-        sta     BG12NBA
-        bra     UploadPresented
-UploadPresentFlat:
-        lda     presented_format
-        beq     UploadFlatPaletteReady
-        CGRAM_memcpy 0, QuakeBSPPalette, 32
-UploadFlatPaletteReady:
-        stz     BG1HOFS
-        stz     BG1HOFS
-        lda     #bgmode(BG_MODE_1, BG3_PRIO_NORMAL, BG_SIZE_8X8, BG_SIZE_8X8, BG_SIZE_8X8, BG_SIZE_8X8)
-        sta     BGMODE
-        stz     MOSAIC
-        lda     #bgsc(VRAM_TILEMAP, SC_SIZE_32X32)
-        sta     BG1SC
-        lda     #$FF
-        sta     BG1VOFS
-        sta     BG1VOFS
-        lda     upload_target
-        beq     UploadPresentFlatA
-        lda     #bg12nba(VRAM_TILES_B, 0)
-        sta     BG12NBA
-        bra     UploadPresented
-UploadPresentFlatA:
-        lda     #bg12nba(VRAM_TILES_A, 0)
-        sta     BG12NBA
-UploadPresented:
-        lda     upload_metadata_only
-        bne     UploadPresentedMetadata
-        lda     upload_format
-        sta     presented_format
-        lda     upload_target
-        eor     #$01
-        sta     upload_target
-        lda     #inidisp(ON, DISP_BRIGHTNESS_MAX)
-        sta     SFX_inidisp
-
-        RW      a16
-        inc     page_flip_counter
-        bra     UploadPresentedState
-UploadPresentedMetadata:
-        stz     upload_metadata_only
-        ; This entry is called from the A8 NMI dispatcher. Force the physical
-        ; REP here: assembler state also reaches this merge from the A16 pixel
-        ; path and a state-only RW would elide it, truncating slot-1 metadata.
-        RW_forced a16i16
-        inc     metadata_present_counter
-UploadPresentedState:
-        jsr     PublishUploadSlotState
-        inc     present_counter
-        ; Idle is the final commit word: when it becomes observable, the
-        ; visible page, slot identity, metadata, and counters already agree.
-        stz     upload_active
-UploadFrameReturn:
-        RW_forced a8i16
-        rts
-
-PublishUploadSlotState:
-        RW_assume a16i16
-        ldx     #0
-        lda     upload_slot
-        beq     @PresentedCameraReady
-        ldx     #CAMERA_COMMAND_BYTES
-@PresentedCameraReady:
-        lda     slot_camera+0,x
-        sta     presented_camera+0
-        lda     slot_camera+2,x
-        sta     presented_camera+2
-        lda     slot_camera+4,x
-        sta     presented_camera+4
-        lda     slot_camera+6,x
-        sta     presented_camera+6
-        lda     slot_camera+8,x
-        sta     presented_camera+8
-        lda     slot_camera+10,x
-        sta     presented_camera+10
-        lda     slot_camera+12,x
-        sta     presented_camera+12
-        lda     slot_camera+14,x
-        sta     presented_camera+14
-
-        lda     upload_slot
-        asl
-        tax
-@PresentedBrushStateReady:
-        lda     slot_metadata_only,x
-        bne     @WarpReferenceReady
-        lda     presented_camera+0
-        sta     presented_warp_yaw
-        lda     presented_camera+2
-        sta     presented_warp_pitch
-        lda     slot_warp_strafe,x
-        sta     presented_warp_strafe
-        lda     slot_warp_forward,x
-        sta     presented_warp_forward
-        lda     slot_demo_epoch,x
-        sta     presented_warp_epoch
-        lda     slot_warp_x,x
-        sta     presented_warp_x
-        lda     slot_warp_y,x
-        sta     presented_warp_y
-        lda     slot_warp_z,x
-        sta     presented_warp_z
-@WarpReferenceReady:
-        lda     slot_brush_visual_state,x
-        sta     presented_brush_visual_state
-
-@PresentedCoverageReady:
-        lda     slot_coverage_mode,x
-        sta     presented_coverage_mode
-
-        lda     slot_demo_pose,x
-        sta     presented_demo_pose
-        lda     slot_demo_due_tick,x
-        sta     presented_demo_due_tick
-        lda     slot_demo_epoch,x
-        sta     presented_demo_epoch
-        jsr     PresentSkyStateFromSlot       ; X: word offset -> Q16 offset.
-        jsr     PresentTurbulenceStateFromSlot ; Reuse that immutable slot offset.
-        rts
-.segment "ZEROPAGE"
-camera_collision_mask: .res 1
+.include "Data/QuakeBSPWeaponSprites.i"
+.include "quake/WeaponSprites.s"
+.ifdef PLAYABLE_WEAPON_OBJ
+.include "quake/WeaponObj.s"
+  .ifdef PLAYABLE_X3_SOFTWARE_WEAPON
+        .include "quake/X3SoftwareWeapon.s"
+  .endif
+.endif
+.include "quake/FrameUpload.s"
 .segment "LORAM"
 yaw_index:          .res 2
 pitch_level:        .res 2
 camera_x:           .res 2
 camera_y:           .res 2
 camera_z:           .res 2
-camera_forward_pitch_cos: .res 2
-camera_forward_x:   .res 2
-camera_forward_y:   .res 2
-camera_forward_z:   .res 2
-camera_collision_previous_x: .res 2
-camera_collision_previous_y: .res 2
-camera_collision_previous_z: .res 2
-camera_collision_rejected: .res 2
-camera_collision_reject_counter: .res 2
 temporal_stage_metadata_only: .res 2
 upload_metadata_only: .res 2
 slot_metadata_only: .res 4
 texture_input_reuse_counter: .res 2
 metadata_present_counter: .res 2
-camera_collision_candidate_x: .res 2
-camera_collision_candidate_y: .res 2
-camera_collision_candidate_z: .res 2
-camera_collision_x_index: .res 2
-camera_collision_y_index: .res 2
-camera_collision_cell: .res 2
-camera_collision_offset: .res 2
-camera_collision_column: .res 2
-camera_collision_z_byte: .res 2
 technique:          .res 2
 ; Nonzero selects the dedicated technique-4 renderer. Keeping this writable
 ; makes the legacy dynamic technique-4 path directly qualifiable in the same
@@ -1240,6 +1120,9 @@ technique4_specialized_path: .res 2
 texture_renderer_code_variant: .res 2
 texture_colormap_mode: .res 2
 texture_phase_overlay_valid: .res 2
+.if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && .defined(PLAYABLE_PAIRED_WORLD_CODE)
+flat_monotone_resident: .res 2
+.endif
 brush_code_valid: .res 2
 control_divider:    .res 2
 control_revision:   .res 2
@@ -1247,14 +1130,25 @@ runtime_menu_open:  .res 2
 runtime_menu_selection: .res 2
 runtime_menu_release_gate: .res 2
 runtime_menu_restart_action: .res 2
-runtime_menu_saved_playhead_tick: .res 2
-runtime_menu_apply_flags: .res 2
+.ifdef PLAYABLE_MAP_ID
+runtime_menu_saved_backdrop: .res 2
+runtime_menu_saved_inidisp: .res 1
+.endif
 runtime_menu_draft_playback: .res 2
 runtime_menu_draft_technique: .res 2
+.ifndef PLAYABLE_MAP_ID
 runtime_menu_draft_textures: .res 2
 runtime_menu_draft_lighting: .res 2
+.else
+        .res 4                          ; Preserve following WRAM bindings.
+.endif
 runtime_menu_draft_brushes: .res 2
 runtime_menu_draft_entities: .res 2
+.if BSP_QUAKEC_GAMEPLAY
+quake_skill_selected: .res 2
+quake_skill_active: .res 2
+quake_restart_pending: .res 2
+.endif
 dynamic_brushes_enabled: .res 2
 mdl_entities_enabled: .res 2
 dynamic_brush_revision: .res 2
@@ -1262,30 +1156,10 @@ brush_visual_state: .res 2
 coverage_debug:     .res 2
 control_dirty:      .res 2
 demo_mode:          .res 2
-demo_schedule:      .res 2
-demo_playback_rate_shift: .res 2
-boot_fixed_step_sample: .res 2
-boot_ordered_source_pose: .res 2
-demo_ordered_pose_stride: .res 2
-demo_offset:        .res 2
-demo_timing_offset: .res 2
-demo_next_pose:     .res 2
 demo_track_pose:    .res 2
-demo_pose_due_tick: .res 2
-demo_pose_counter:  .res 2
-demo_source_due_counter: .res 2
-demo_coalesced_counter: .res 2
-demo_playhead_tick: .res 2
-demo_playhead_origin: .res 2
 demo_schedule_revision: .res 2
-demo_loop_counter:  .res 2
 video_tick:         .res 2
 staging_scanline:    .res 2
-realtime_due_batch: .res 2
-realtime_candidate_offset: .res 2
-realtime_candidate_pose: .res 2
-realtime_candidate_tick: .res 2
-monster_camera_index: .res 2
 producer_slot:      .res 2
 ready_slot:         .res 2
 upload_slot:        .res 2
@@ -1298,6 +1172,9 @@ upload_palette_mode: .res 2
 presented_palette_mode: .res 2
 upload_offset:      .res 2
 upload_chunk:       .res 2
+.ifdef QC_E1M2_DEFER_UPLOAD
+upload_defer_budget: .res 2
+.endif
 stage_frame_required: .res 2
 render_counter:     .res 2
 present_counter:    .res 2
@@ -1355,12 +1232,52 @@ slot_demo_pose:     .res 4
 slot_demo_due_tick: .res 4
 slot_demo_epoch:    .res 4
 presented_demo_pose: .res 2
+presented_weapon_frame: .res 2
 presented_demo_due_tick: .res 2
 presented_demo_epoch: .res 2
 scheduled_frame_camera: .res CAMERA_COMMAND_BYTES
 scheduled_frame_camera_q8: .res 6
 scheduled_frame_coverage_mode: .res 2
 scheduled_frame_brush_visual_state: .res 2
+.if BSP_QUAKEC_GAMEPLAY
+  .if QC_ENTRANCE_COUNT > 0
+render_entrance_variants: .res 4
+staging_entrance_variants: .res 4
+scheduled_entrance_variants: .res 4
+slot_entrance_variants: .res 8
+presented_entrance_variants: .res 4
+  .endif
+  .ifdef QC_EXIT_MOVER_COUNT
+.export presented_exit_pose_word
+.ifdef QC_SECRET_DOOR_COUNT
+render_secret_poses: .res 2*QC_MOVING_DOOR_POSES
+render_secret_revision: .res 2
+uploaded_secret_revision: .res 2
+staging_secret_revision: .res 2
+scheduled_secret_revision: .res 2
+.endif
+render_exit_pose_word: .res 2
+render_exit_pose_index: .res 2
+staging_exit_pose_word: .res 2
+scheduled_exit_pose_word: .res 2
+slot_exit_pose_word: .res 4
+presented_exit_pose_word: .res 2
+    .ifdef PLAYABLE_PACKET_VIEW_REUSE
+uploaded_exit_pose_word: .res 2
+    .endif
+    .if QC_EXIT_MOVER_COUNT > 8
+.export presented_exit_pose_word_high
+render_exit_pose_word_high: .res 2
+staging_exit_pose_word_high: .res 2
+scheduled_exit_pose_word_high: .res 2
+slot_exit_pose_word_high: .res 4
+presented_exit_pose_word_high: .res 2
+      .ifdef PLAYABLE_PACKET_VIEW_REUSE
+uploaded_exit_pose_word_high: .res 2
+      .endif
+    .endif
+  .endif
+.endif
 scheduled_frame_valid: .res 2
 temporal_alias_raster_identity: .res 2
 render_coverage_mode: .res 2
@@ -1371,38 +1288,58 @@ RuntimeMenuBuildColumns: .res 2
 RuntimeMenuOAM:     .res 512+32
 sky_phase_override_valid: .res 2
 sky_phase_override_q16: .res 4
-warp_background_active: .res 2
+sky_phase_override_float32_valid: .res 2
+sky_phase_override_float32: .res 4
 .segment "EXRAM"
-QuakeBSPCollisionRAM:
-        .res BSP_COLLISION_PAYLOAD_BYTES
-QuakeBSPCollisionRAMEnd:
-QuakeBSPCollisionMapRAM = QuakeBSPCollisionRAM
-QuakeBSPCollisionDictionaryRAM = QuakeBSPCollisionRAM + BSP_COLLISION_DICTIONARY_OFFSET
-.assert QuakeBSPCollisionRAM = BSP_COLLISION_RAM_BASE, lderror, "Fly collision WRAM base moved"
-.assert QuakeBSPCollisionRAMEnd - QuakeBSPCollisionRAM = BSP_COLLISION_PAYLOAD_BYTES, error, "Fly collision WRAM reservation size disagrees"
+.if BSP_QUAKEC_GAMEPLAY
+.include "quake/QuakeCGameplay.s"
+.endif
+.ifdef PLAYABLE_SPRITE_STREAM
+.if .defined(QC_SECRET_DOOR_COUNT) || .defined(QC_CAMPAIGN_ITEMS)
+; The combat VM occupies high WRAM. DMA6 can read the same shadow from low WRAM.
+.segment "LORAM"
+SpriteStreamColormapStorage: .res SPRITE_STREAM_CACHE_BYTES
+SpriteStreamColormapShadow = $7E0000 + .loword(SpriteStreamColormapStorage)
+.assert SpriteStreamColormapShadow + SPRITE_STREAM_CACHE_BYTES <= $7E2000, lderror, "Colormap shadow exceeds the low WRAM mirror"
+.else
+.segment "EXRAM"
+SpriteStreamColormapShadow: .res SPRITE_STREAM_CACHE_BYTES
+.endif
+.assert ^SpriteStreamColormapShadow = ^(SpriteStreamColormapShadow+SPRITE_STREAM_CACHE_BYTES-1), lderror, "Sprite colormap shadow must fit one WRAM DMA bank"
+.endif
 .segment "HIRAM"
-StagedFrame0:       .res GSU_OUTPUT_BYTES
-StagedFrame1:       .res GSU_OUTPUT_BYTES
+StagedFrame0:       .res BSP_FRAME_STAGE_BYTES
+StagedFrame1:       .res BSP_FRAME_STAGE_BYTES
+.assert ^StagedFrame0 = ^(StagedFrame1+BSP_FRAME_STAGE_BYTES-1), lderror, "Frame DMA slots must share one WRAM bank"
+.ifdef PLAYABLE_POINT_SIGHT_CACHE
+  .ifndef PLAYABLE_WEAPON_OBJ
+; The source build uses the larger software-weapon staging slots.
+.segment "EXRAM"
+  .endif
+SightTraceCache: .res QC_GRUNT_COUNT*SIGHT_TRACE_ROW_BYTES
+.endif
 ;-------------------------------------------------------------------------------
 .segment "RODATA"
 BSP_CAMERA_MOVE_TABLES
 .segment "BSPDATA"
-QuakeBSPVertices:
-        .incbin "Data/QuakeBSPVertices.bin"
-QuakeBSPIndices:
-        .incbin "Data/QuakeBSPIndices.bin"
-QuakeBSPFaces:
-        .incbin "Data/QuakeBSPFaces.bin"
-QuakeBSPFacePlanes:
-        .incbin "Data/QuakeBSPFacePlanes.bin"
+.segment "BSP_CPU_MAP_PALETTE"
 QuakeBSPPalette:
         .incbin "Data/QuakeBSPPalette.bin"
-QuakeBSPTilemap:
-        .incbin "Data/QuakeBSPTilemap.bin"
+.ifndef PLAYABLE_MAP_ID
+.if BSP_QUAKEC_GAMEPLAY
+.segment "BSP_CPU_MAP_TILEMAP"
+QuakeBSPTilemap: .incbin "Data/QuakeBSPDisplayTilemap.bin"
+.else
+.segment "BSPDATA"
+QuakeBSPTilemap: .incbin "Data/QuakeBSPTilemap.bin"
+.endif
+.endif
+.segment "BSPDATA"
 QuakeBSPSin:
         .incbin "Data/QuakeBSPSin.bin"
 QuakeBSPCos:
         .incbin "Data/QuakeBSPCos.bin"
+.export QuakeBSPReciprocal
 QuakeBSPReciprocal:
         .incbin "Data/QuakeBSPReciprocal.bin"
 QuakeBSPReciprocalEnd:
@@ -1495,24 +1432,17 @@ QuakeBSPWorldPVS2:
 .segment "BSP_WORLD_PVS_3"
 QuakeBSPWorldPVS3:
         .incbin "Data/QuakeBSPWorldPVS3.bin"
-.segment "BSP_DEMO_TRACK"
-QuakeBSPDemoPreciseTrack:
-        .incbin "Data/QuakeBSPDemoPrecise.bin"
-QuakeBSPDemoPreciseTrackEnd:
-.assert QuakeBSPDemoPreciseTrackEnd - QuakeBSPDemoPreciseTrack = BSP_DEMO_PRECISE_TRACK_BYTES, error, "demo1 precise track asset size disagrees with generated constants"
-.segment "BSP_DEMO_CLOCK"
-; ROM112's physical $380000 payload is read by the CPU through $F8:0000.
-QuakeBSPDemoPreciseTiming:
-        .incbin "Data/QuakeBSPDemoPreciseTiming.bin"
-QuakeBSPDemoPreciseTimingEnd:
-.assert QuakeBSPDemoPreciseTimingEnd - QuakeBSPDemoPreciseTiming = BSP_DEMO_PRECISE_TIMING_BYTES, error, "demo1 precise timing asset size disagrees with generated constants"
+.segment "BSP_WORLD_PVS_4"
+        .incbin "Data/QuakeBSPWorldPVS4.bin"
+.assert __BSP_WORLD_PVS_4_LOAD__ = BSP_ROM_LOAD_BSP_WORLD_PVS_4, lderror, "Fly PVS bank 4 moved"
 .include "Data/QuakeBSPSkyAssets.s"
 .include "Data/QuakeBSPTurbulenceAssets.s"
+.include "Data/QuakeBSPSkyFloatPhases.s"
 .segment "BSP_WORLD_FACE_OWNERS"
 QuakeBSPWorldFaceOwners:
         .incbin "Data/QuakeBSPWorldFaceOwners.bin"
 QuakeBSPWorldFaceOwnersEnd:
-.assert QuakeBSPWorldFaceOwnersEnd - QuakeBSPWorldFaceOwners = BSP_WORLD_FACE_COUNT * BSP_WORLD_FACE_OWNER_RECORD_BYTES, error, "Full-map face-owner asset size disagrees with generated counts"
+.assert QuakeBSPWorldFaceOwnersEnd - QuakeBSPWorldFaceOwners = BSP_PHYSICAL_FACE_OWNER_BYTES, error, "Full-map face-owner asset size disagrees with generated counts"
 .segment "BSP_WORLD_NODE_PARENTS"
 QuakeBSPWorldNodeParents:
         .incbin "Data/QuakeBSPWorldNodeParents.bin"
@@ -1533,23 +1463,57 @@ QuakeBSPWorldTextureCoordinates1:
         .incbin "Data/QuakeBSPWorldTextureCoordinates1.bin"
 QuakeBSPWorldTextureCoordinates1End:
 .assert QuakeBSPWorldTextureCoordinates1End - QuakeBSPWorldTextureCoordinates1 = BSP_WORLD_TEXTURE_COORD_1_BYTES, error, "Texture-coordinate bank 1 size disagrees"
-.segment "BSP_WORLD_TEXTURE_AUX"
+.segment "BSP_WORLD_TEXCOORD_2"
 QuakeBSPWorldTextureCoordinates2:
         .incbin "Data/QuakeBSPWorldTextureCoordinates2.bin"
 QuakeBSPWorldTextureCoordinates2End:
+.segment "BSP_WORLD_TEXCOORD_3"
+QuakeBSPWorldTextureCoordinates3:
+        .incbin "Data/QuakeBSPWorldTextureCoordinates3.bin"
+QuakeBSPWorldTextureCoordinates3End:
+.assert QuakeBSPWorldTextureCoordinates3End-QuakeBSPWorldTextureCoordinates3 = BSP_WORLD_TEXTURE_COORD_3_BYTES, error, "Level UV3 size"
+.ifndef PLAYABLE_WORLD_COORDINATE_STREAM
+.if BSP_WORLD_TEXTURE_COORD_2_BYTES
+.assert QuakeBSPWorldTextureCoordinates2 = ($82+BSP_WORLD_TEXTURE_COORD_FIRST_GSU_ROM_BANK)*$10000+$8000, lderror, "Level UV2 bank moved"
+.endif
+.if BSP_WORLD_TEXTURE_COORD_3_BYTES
+.assert QuakeBSPWorldTextureCoordinates3 = ($83+BSP_WORLD_TEXTURE_COORD_FIRST_GSU_ROM_BANK)*$10000+$8000, lderror, "Level UV3 bank moved"
+.endif
+.endif
+.segment "BSP_WORLD_TEXTURE_AUX"
 QuakeBSPWorldFaceTextureIds:
         .incbin "Data/QuakeBSPWorldFaceTextureIds.bin"
 QuakeBSPWorldFaceTextureIdsEnd:
 QuakeBSPWorldTextureDirectory:
         .incbin "Data/QuakeBSPWorldTextureDirectory.bin"
 QuakeBSPWorldTextureDirectoryEnd:
+.assert .loword(QuakeBSPWorldFaceTextureIds) = BSP_WORLD_FACE_TEXTURE_ID_GSU_ROM_ADDRESS, lderror, "World texture IDs moved"
+.assert .loword(QuakeBSPWorldTextureDirectory) = BSP_WORLD_TEXTURE_DIRECTORY_GSU_ROM_ADDRESS, lderror, "World texture directory moved"
 QuakeBSPTexturePalette:
-        .incbin "Data/Warp/QuakeBSPTexturePalette.bin"
+        .incbin "Data/QuakeBSPTexturePalette.bin"
 QuakeBSPTexturePaletteEnd:
+        .pushseg
+        .segment "BSP_WEAPON_TABLES"
+.ifdef PLAYABLE_SHARED_FLASH_PALETTE
+QuakeBSPFlashPalette = PLAYABLE_SHARED_FLASH_PALETTE
+QuakeBSPFlashPaletteEnd = QuakeBSPFlashPalette + 512
+.else
+QuakeBSPFlashPalette:
+        .incbin "Data/QuakeBSPFlashPalette.bin"
+QuakeBSPFlashPaletteEnd:
+.endif
+        .popseg
 .include "quake/TexturelessPalette.s"
+.if !(.defined(PLAYABLE_MAP_ID) && .defined(PLAYABLE_WEAPON_OBJ))
 QuakeBSPTextureTilemap:
+.if BSP_QUAKEC_GAMEPLAY
+        .incbin "Data/QuakeBSPTextureDisplayTilemap.bin"
+.else
         .incbin "Data/QuakeBSPTextureTilemap.bin"
+.endif
 QuakeBSPTextureTilemapEnd:
+.assert QuakeBSPTextureTilemapEnd - QuakeBSPTextureTilemap = $0800, error, "Exact texture tilemap must be 32x32"
+.endif
 QuakeBSPTextureCoordinateMap:
         .incbin "Data/QuakeBSPTextureCoordinateMap.bin"
 QuakeBSPTextureCoordinateMapEnd:
@@ -1557,22 +1521,40 @@ QuakeBSPTextureCoordinateMapEnd:
 .assert QuakeBSPWorldFaceTextureIdsEnd - QuakeBSPWorldFaceTextureIds = BSP_WORLD_FACE_TEXTURE_ID_BYTES, error, "Face texture-ID size disagrees"
 .assert QuakeBSPWorldTextureDirectoryEnd - QuakeBSPWorldTextureDirectory = BSP_WORLD_TEXTURE_DIRECTORY_BYTES, error, "Texture directory size disagrees"
 .assert QuakeBSPTexturePaletteEnd - QuakeBSPTexturePalette = 512, error, "Exact texture palette must have 256 colors"
-.assert QuakeBSPTextureTilemapEnd - QuakeBSPTextureTilemap = $0800, error, "Exact texture tilemap must be 32x32"
+.assert QuakeBSPFlashPaletteEnd - QuakeBSPFlashPalette = 512, error, "Flash scene palette must have 256 colors"
 .assert QuakeBSPTextureCoordinateMapEnd - QuakeBSPTextureCoordinateMap = GSU_TEXTURE_COORD_MAP_BYTES, error, "Exact texture coordinate-map size disagrees"
 .segment "BSP_WORLD_TEXTURE_0"
-        .incbin "Data/Warp/QuakeBSPWorldTexturePixels0.bin"
+        .incbin "Data/QuakeBSPWorldTexturePixels0.bin"
 .segment "BSP_WORLD_TEXTURE_1"
-        .incbin "Data/Warp/QuakeBSPWorldTexturePixels1.bin"
+        .incbin "Data/QuakeBSPWorldTexturePixels1.bin"
 .segment "BSP_WORLD_TEXTURE_2"
-        .incbin "Data/Warp/QuakeBSPWorldTexturePixels2.bin"
+        .incbin "Data/QuakeBSPWorldTexturePixels2.bin"
 .segment "BSP_WORLD_TEXTURE_3"
-        .incbin "Data/Warp/QuakeBSPWorldTexturePixels3.bin"
+        .incbin "Data/QuakeBSPWorldTexturePixels3.bin"
 .segment "BSP_WORLD_TEXTURE_4"
-        .incbin "Data/Warp/QuakeBSPWorldTexturePixels4.bin"
+        .incbin "Data/QuakeBSPWorldTexturePixels4.bin"
 .segment "BSP_WORLD_TEXTURE_5"
-        .incbin "Data/Warp/QuakeBSPWorldTexturePixels5.bin"
+        .incbin "Data/QuakeBSPWorldTexturePixels5.bin"
+.segment "BSP_WORLD_TEXTURE_6"
+        .incbin "Data/QuakeBSPWorldTexturePixels6.bin"
+.segment "BSP_WORLD_TEXTURE_7"
+        .incbin "Data/QuakeBSPWorldTexturePixels7.bin"
+.segment "BSP_WORLD_TEXTURE_8"
+        .incbin "Data/QuakeBSPWorldTexturePixels8.bin"
+.segment "BSP_WORLD_TEXTURE_9"
+        .incbin "Data/QuakeBSPWorldTexturePixels9.bin"
+.segment "BSP_WORLD_TEXTURE_10"
+        .incbin "Data/QuakeBSPWorldTexturePixels10.bin"
+.segment "BSP_WORLD_TEXTURE_11"
+        .incbin "Data/QuakeBSPWorldTexturePixels11.bin"
 .segment "BSP_WORLD_LIGHTMAP_DIRECTORY"
+.if BSP_WORLD_LIGHTMAP_DIRECTORY_BYTES <= BSP_WORLD_ROM_BANK_BYTES
         .incbin "Data/QuakeBSPWorldLightmapDirectory.bin"
+.else
+        .incbin "Data/QuakeBSPWorldLightmapDirectory.bin", 0, BSP_WORLD_ROM_BANK_BYTES
+.segment "BSP_WORLD_LIGHTMAP_DIRECTORY_TAIL"
+        .incbin "Data/QuakeBSPWorldLightmapDirectory.bin", BSP_WORLD_ROM_BANK_BYTES
+.endif
 .segment "BSP_WORLD_LIGHTMAP_0"
         .incbin "Data/QuakeBSPWorldLightmapSamples0.bin"
 .segment "BSP_WORLD_LIGHTMAP_1"
@@ -1581,21 +1563,27 @@ QuakeBSPTextureCoordinateMapEnd:
         .incbin "Data/QuakeBSPWorldLightmapSamples2.bin"
 .segment "BSP_WORLD_LIGHTMAP_3"
         .incbin "Data/QuakeBSPWorldLightmapSamples3.bin"
+.if BSP_WORLD_LIGHTMAP_CHUNK_COUNT > 4
+.segment "BSP_WORLD_LIGHTMAP_4"
+        .incbin "Data/QuakeBSPWorldLightmapSamples4.bin"
+.endif
 .segment "BSP_LIGHTMAP_COLORMAPS"
 QuakeBSPLightmapLevelZeroColormap:
-        .incbin "Data/Warp/QuakeBSPLightmapLevelZeroColormap.bin"
+        .incbin "Data/QuakeBSPLightmapLevelZeroColormap.bin"
 QuakeBSPLightmapLevelZeroColormapEnd:
 .assert QuakeBSPLightmapLevelZeroColormapEnd - QuakeBSPLightmapLevelZeroColormap = 256, error, "Quake lightmap level-zero colormap must contain 256 indices"
 QuakeBSPLightmapColormap:
-        .incbin "Data/Warp/QuakeBSPLightmapColormap.bin"
+        .incbin "Data/QuakeBSPLightmapColormap.bin"
 QuakeBSPLightmapColormapEnd:
 .assert QuakeBSPLightmapColormapEnd - QuakeBSPLightmapColormap = GSU_LIGHTMAP_COLORMAP_BYTES, error, "Natural lightmap colormap size disagrees"
 .include "quake/DivideQ12ReciprocalAssets.s"
 .include "quake/FlyMouseState.s"
 .include "quake/CameraAngles.s"
 .include "quake/DynamicBrushAssets.s"
-.include "Data/Warp/QuakeBSPComposedCacheAssets.s"
-.include "Data/Warp/QuakeBSPAliasAssets.s"
+.ifndef PLAYABLE_EMPTY_COMPOSED
+.include "Data/QuakeBSPComposedCacheAssets.s"
+.endif
+.include "Data/QuakeBSPAliasAssets.s"
 .include "Data/QuakeBSPAliasVisibility.s"
 .segment "BSP_COLLISION_PACKED_0"
 QuakeBSPCollisionPacked0:
@@ -1607,26 +1595,15 @@ QuakeBSPCollisionPacked1:
         .incbin "Data/QuakeBSPCollisionPacked1.bin"
 QuakeBSPCollisionPacked1End:
 .assert QuakeBSPCollisionPacked1End - QuakeBSPCollisionPacked1 = BSP_COLLISION_PACKED_1_BYTES, error, "Fly collision payload chunk 1 size disagrees"
-.include "quake/SoundEngine.s"
-
-; Qualification-only state follows the runtime BSS so adding it cannot move
-; the hot renderer or sound state across an indexed-address page boundary.
-.segment "BSS"
-temporal_reuse_enabled: .res 2
-; Keep mode state after existing BSS declarations. BSS growth can still move
-; the following LORAM segment; qualify its final addresses and frame timing.
-frame_pipeline_entry: .res 2
-fly_playback_mode: .res 2
-active_render_scale: .res 2
-presented_render_scale: .res 2
-slot_present_direct: .res 4
-.include "quake/FlyMode7WarpState.s"
-runtime_menu_draft_scale: .res 2
-.include "quake/DemoMode7WarpState.s"
-.include "quake/HdmaWarpState.s"
-; Append immutable image input positions without relocating the hot state.
-; Each axis has two producer slots; metadata-only reuse never republishes it.
-slot_warp_x: .res 4
-slot_warp_y: .res 4
-slot_warp_z: .res 4
-.include "quake/WarpBackgroundState.s"
+.include "Data/QuakeBSPSoundtrackAssets.s"
+.assert BSP_SOUND_ENABLED = 0, error, "Legacy demo soundtrack playback is unavailable"
+.if BSP_QUAKEC_GAMEPLAY
+.include "quake/ShotgunPresentation.s"
+.ifdef PLAYABLE_MAP_ID
+.include "quake/StatusHud.s"
+.endif
+.ifdef QC_HUB_WARNING_COUNT
+.include "quake/StartWarning.s"
+.endif
+.endif
+.include "quake/FramePipelineState.s"

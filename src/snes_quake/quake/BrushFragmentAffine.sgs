@@ -1,0 +1,93 @@
+; Prepare S and T once from the material and slot's origin. With the
+; low word of the product, this preserves the wrapped Q4 coordinates:
+; sign * (64 * vertex + 16 * world_origin - 2 * slot_origin) + 16 * offset.
+.macro BRUSH_APPLY_AFFINE vertex, scale, bias, output
+        lm      R8, (vertex)
+        ldw     (R8)
+        lm      R6, (scale)
+        lmult
+        lm      R8, (bias)
+        from    R4
+        add     R8
+        sm      (output), R0
+.endmacro
+        BRUSH_APPLY_AFFINE BRUSH_AFFINE_S_VERTEX, BRUSH_AFFINE_S_SCALE, BRUSH_AFFINE_S_BIAS, TEXTURE_CUR_S
+        BRUSH_APPLY_AFFINE BRUSH_AFFINE_T_VERTEX, BRUSH_AFFINE_T_SCALE, BRUSH_AFFINE_T_BIAS, TEXTURE_CUR_T
+        ret
+        nop
+
+.macro BRUSH_PREPARE_AFFINE axis, offset, vertex, scale, bias
+        lm      R7, (axis)
+        lm      R8, (offset)
+        jal     BrushPrepareFragmentAxis
+        nop
+        sm      (vertex), R1
+        sm      (scale), R3
+        sm      (bias), R0
+.endmacro
+
+        .export BrushPrepareFragmentAffine
+BrushPrepareFragmentAffine:
+        move    R13, R11
+        lm      R2, (BRUSH_CURRENT_SLOT)
+        from    R2
+        add     R2
+        add     R0
+        add     R0
+        iwt     R10, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_X_Q3
+        with    R10
+        add     R0
+        BRUSH_PREPARE_AFFINE BRUSH_FACE_S_AXIS, BRUSH_FACE_S_OFFSET, BRUSH_AFFINE_S_VERTEX, BRUSH_AFFINE_S_SCALE, BRUSH_AFFINE_S_BIAS
+        BRUSH_PREPARE_AFFINE BRUSH_FACE_T_AXIS, BRUSH_FACE_T_OFFSET, BRUSH_AFFINE_T_VERTEX, BRUSH_AFFINE_T_SCALE, BRUSH_AFFINE_T_BIAS
+        jmp     R13
+        nop
+
+BrushPrepareFragmentAxis:
+        ibt     R3, #64
+        moves   R7, R7
+        bpl     @AxisPositive
+        nop
+        move    R0, #0
+        sub     R7
+        move    R7, R0
+        ibt     R3, #$C0                 ; -64 as a signed byte.
+@AxisPositive:
+        move    R9, R10
+        iwt     R1, #BRUSH_VERTEX_X_Q2
+        iwt     R2, #.loword(BSP_WORLD_ORIGIN_X * 16)
+        dec     R7
+        beq     @AxisReady
+        nop
+        inc     R9
+        inc     R9
+        iwt     R1, #BRUSH_VERTEX_Y_Q2
+        iwt     R2, #.loword(BSP_WORLD_ORIGIN_Y * 16)
+        dec     R7
+        beq     @AxisReady
+        nop
+        inc     R9
+        inc     R9
+        iwt     R1, #BRUSH_VERTEX_Z_Q2
+        iwt     R2, #.loword(BSP_WORLD_ORIGIN_Z * 16)
+@AxisReady:
+        ldw     (R9)
+        add     R0
+        move    R5, R0
+        from    R2
+        sub     R5
+        move    R5, R0
+        moves   R3, R3
+        bpl     @BiasReady
+        nop
+        move    R0, #0
+        sub     R5
+        move    R5, R0
+@BiasReady:
+        from    R8
+        add     R8
+        add     R0
+        add     R0
+        add     R0
+        add     R5
+        ret
+        nop

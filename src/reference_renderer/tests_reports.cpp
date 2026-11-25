@@ -1,5 +1,7 @@
 #include "tests_reports.hpp"
+#include "gameplay.hpp"
 #include "world.hpp"
+#include "packed_material_chunk_tests.hpp"
 #include "particles.hpp"
 #include "geometry.hpp"
 #include "brushes.hpp"
@@ -12,8 +14,11 @@
 #include "artifacts_options.hpp"
 #include "report.hpp"
 #include "alias_tests.hpp"
+#include "alias_storage_tests.hpp"
 #include "sky_tests.hpp"
 #include "turbulence.hpp"
+#include "fly_camera.hpp"
+#include "source_fly_scene.hpp"
 
 namespace quake_bsp_reference {
 
@@ -164,12 +169,32 @@ bool run_packet_selection_self_test()
             return true;
         }
     };
-    const std::array<std::uint8_t, 0> empty{};
+    // An explicitly supplied empty packet selects no world geometry. It is
+    // different from omitting the packet argument and must never grow a BVH
+    // root whose zero count is mistaken for an internal node.
+    const auto empty = parse_packet_selection({}, world);
+    if (!empty.source_faces.empty() || !empty.triangles.empty() ||
+        empty.selected_faces != std::vector<std::uint8_t>{0, 0, 0} ||
+        empty.painter_ranks != std::vector<int>{-1, -1, -1})
+    {
+        return false;
+    }
+    const Bvh empty_bvh(empty.triangles);
+    if (empty_bvh.node_count() != 0)
+    {
+        return false;
+    }
+    const Ray oblique{{0, 0, 0}, {1, 1, 1}};
+    if (empty_bvh.nearest(oblique, empty.selected_faces).face != kMissFace ||
+        empty_bvh.painter(oblique, empty.selected_faces, empty.painter_ranks).face != kMissFace)
+    {
+        return false;
+    }
     const std::array<std::uint8_t, 1> odd = {0};
     const std::array<std::uint8_t, 4> duplicate = {0, 0, 0, 0};
     const std::array<std::uint8_t, 2> escaped = {3, 0};
     const std::array<std::uint8_t, 2> nondrawable = {2, 0};
-    return rejected(empty) && rejected(odd) && rejected(duplicate) && rejected(escaped) && rejected(nondrawable);
+    return rejected(odd) && rejected(duplicate) && rejected(escaped) && rejected(nondrawable);
 }
 } // namespace
 
@@ -221,6 +246,35 @@ bool run_material_layer_self_test()
 } // namespace
 
 namespace {
+bool run_inline_brush_pose_self_test()
+{
+    PackedBrushAssets assets;
+    assets.external_entity_slot_first = 2;
+    assets.entities = {{15, 1, 17, 0}, {16, 2, 17, 17}};
+    assets.sections = {
+        {"ROWSTATE", {1, 0, 2, 0}, 0, 0, 2, 2},
+        {"VSTATES", {0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0, 2, 0}, 0, 0, 8, 2},
+        {"VTRANS", {0, 16, 0, 1, 0, 0, 0, 3, 0, 1, 13, 0}, 0, 0, 3, 4},
+        {"VTEX", {}, 0, 0, 3, 0}
+    };
+    const auto left = packed_brush_inline_variant_at_pose(assets, 1, 15);
+    const auto right = packed_brush_inline_variant_at_pose(assets, 0, 16);
+    if (left.entity != 15 || left.local_variant != 3 || right.entity != 16 || right.local_variant != 0)
+        return false;
+    const auto rejects = [&](std::size_t pose, std::uint16_t entity) {
+        try
+        {
+            (void)packed_brush_inline_variant_at_pose(assets, pose, entity);
+            return false;
+        }
+        catch (const std::runtime_error&)
+        {
+            return true;
+        }
+    };
+    return rejects(2, 15) && rejects(0, 17);
+}
+
 bool run_render_mode_self_test()
 {
     SourceWorld world;
@@ -380,7 +434,7 @@ bool run_liquid_lighting_self_test()
         }
     }
     {
-        const RenderViewportScope viewport(RenderScale::X3Warp);
+        const RenderViewportScope viewport(RenderScale::X3);
         const auto inspection = liquid_lighting_inspection(frame, {true, Lighting::LightMap, Lighting::None});
         if (inspection["pixels"] != 85 * 74 || inspection["pixelRuns"] != Json::array({Json::array({0, 85 * 74})}))
         {
@@ -572,9 +626,26 @@ bool run_packed_brush_compact_lightmap_self_test()
     world.face_lightmaps = {lightmap};
     world.lighting = {56, 54, 56, 54};
 
-    return exact_lightmap_colormap_is_identity() && sample_packed_bsp_lightmap_level(world, 0, 0, 0) == 56 &&
-           sample_packed_bsp_lightmap_level(world, 0, 48, 240) == 56 &&
-           sample_packed_bsp_lightmap_level(world, 0, 256, 0) == 54;
+    if (!exact_lightmap_colormap_is_identity() || sample_packed_bsp_lightmap_level(world, 0, 0, 0) != 56 ||
+        sample_packed_bsp_lightmap_level(world, 0, 48, 240) != 56 ||
+        sample_packed_bsp_lightmap_level(world, 0, 256, 0) != 54)
+        return false;
+    // Bright brush samples legitimately reach level zero. Retain both
+    // endpoints and their rounded interpolation through the real sampler.
+    world.lighting = {checked_packed_brush_lightmap_level(0), 63, 0, 63};
+    if (sample_packed_bsp_lightmap_level(world, 0, 0, 0) != 0 ||
+        sample_packed_bsp_lightmap_level(world, 0, 128, 0) != 32 ||
+        sample_packed_bsp_lightmap_level(world, 0, 256, 0) != 63)
+        return false;
+    try
+    {
+        checked_packed_brush_lightmap_level(64);
+    }
+    catch (const std::exception&)
+    {
+        return true;
+    }
+    return false;
 }
 } // namespace
 
@@ -829,6 +900,23 @@ bool run_quantized_world_self_test()
 } // namespace
 
 namespace {
+bool run_frustum_geometry_rounding_self_test()
+{
+    // A shallow side-frustum edge must retain its small negative correction.
+    if (interpolate_view_nearest_q12(71, 60, 251) != 70)
+        return false;
+    for (int delta = -32768; delta <= 32767; ++delta)
+        for (const int factor : {0, 1, 251, 1024, 2047, 2048})
+            for (const int base : {-30000, -1, 0, 1, 30000})
+            {
+                const int other = wrap_i16(base + delta);
+                const int rounded = static_cast<int>(std::floor(static_cast<double>(delta) * factor / 4096.0 + 0.5));
+                if (interpolate_view_nearest_q12(base, other, factor) != wrap_i16(base + rounded))
+                    return false;
+            }
+    return true;
+}
+
 bool run_current_pipeline_self_test()
 {
     SourceWorld world;
@@ -1071,12 +1159,77 @@ bool run_alias_visibility_encoding_self_test()
 }
 } // namespace
 
+namespace {
+bool run_fly_camera_self_test()
+{
+    const auto close = [](double a, double b) { return std::abs(a - b) < 1e-10; };
+    const auto close_vector = [&](const Vec3& a, const Vec3& b) {
+        return close(a.x, b.x) && close(a.y, b.y) && close(a.z, b.z);
+    };
+    SourceCamera native{{1432.0, 1124.0, 676.0}};
+    native.capture_basis = std::array{
+        Vec3{-0.34375, -0.9375, -0.09375},
+        Vec3{0.9375, -0.34375, 0.0},
+        Vec3{-0.0322265625, -0.087890625, 1.0}
+    };
+    for (const auto& original : {SourceCamera{{1.0, 2.0, 3.0}, 12.0, 43.0, 0.0}, native})
+    {
+        const auto before = source_view_transform(original);
+        auto camera = original;
+        if (advance_fly_camera(camera, {}, 1.0) || !exactly_equal(camera.origin, original.origin))
+            return false;
+        if (!advance_fly_camera(camera, {.forward = 1.0}, 0.05) ||
+            !close(length_squared(camera.origin - original.origin), 64.0))
+            return false;
+        const auto translated = source_view_transform(camera);
+        if (!exactly_equal(translated.forward, before.forward) ||
+            !exactly_equal(translated.screen_right, before.screen_right) || !exactly_equal(translated.up, before.up))
+            return false;
+        camera = original;
+        advance_fly_camera(camera, {.forward = 1.0, .right = 1.0, .vertical = 1.0}, 0.05);
+        if (!close(length_squared(camera.origin - original.origin), 64.0))
+            return false;
+        camera = original;
+        advance_fly_camera(camera, {.mouse_x = 20.0}, 0.0);
+        if (dot(source_view_transform(camera).forward - before.forward, before.screen_right) <= 0.0)
+            return false;
+        advance_fly_camera(camera, {.mouse_x = -20.0}, 0.0);
+        if (!close_vector(source_view_transform(camera).forward, before.forward))
+            return false;
+        camera = original;
+        advance_fly_camera(camera, {.mouse_y = -20.0}, 0.0);
+        const auto looked = source_view_transform(camera);
+        if (dot(looked.forward - before.forward, before.up) <= 0.0)
+            return false;
+        const std::array before_axes{before.forward, before.screen_right, before.up};
+        const std::array after_axes{looked.forward, looked.screen_right, looked.up};
+        for (std::size_t a = 0; a < 3; ++a)
+            for (std::size_t b = 0; b < 3; ++b)
+                if (!close(dot(before_axes[a], before_axes[b]), dot(after_axes[a], after_axes[b])))
+                    return false;
+        camera = original;
+        advance_fly_camera(camera, {.forward = 1.0, .fast = true}, 1000.0);
+        if (!close(length_squared(camera.origin - original.origin), 4096.0))
+            return false;
+        camera = original;
+        if (advance_fly_camera(camera, {.forward = 1.0}, -1.0))
+            return false;
+    }
+    SourceCamera vertical{};
+    vertical.capture_basis = std::array{Vec3{0, 0, 1}, Vec3{0, -1, 0}, Vec3{-1, 0, 0}};
+    advance_fly_camera(vertical, {.mouse_y = 10000.0}, 0.0);
+    const auto limited = source_view_transform(vertical);
+    return close(length_squared(limited.forward), 1.0) &&
+           std::abs(limited.forward.z) <= std::sin(89.0 * std::numbers::pi / 180.0) + 1e-10;
+}
+} // namespace
+
 bool run_self_test()
 {
     // The ROM rounds the odd X3 width upward: both raster projection and
     // source rays must use (43,37), even though integer width/2 is 42.
     bool viewport_contract = true;
-    for (const auto scale : {RenderScale::X2, RenderScale::X3, RenderScale::X3Warp})
+    for (const auto scale : {RenderScale::X2, RenderScale::X3})
     {
         const RenderViewportScope viewport(scale);
         const bool x2 = scale == RenderScale::X2;
@@ -1126,9 +1279,15 @@ bool run_self_test()
     };
     check(viewport_contract, "native_viewport_projection_contract");
     check(run_brush_reference_self_test(), "run_brush_reference_self_test");
+    check(run_source_fly_scene_self_test(), "run_source_fly_scene_self_test");
     check(run_quake_audio_self_test(), "run_quake_audio_self_test");
+    check(run_gameplay_self_test(), "run_gameplay_self_test");
+    check(run_inline_brush_pose_self_test(), "run_inline_brush_pose_self_test");
     check(run_particle_self_test(), "run_particle_self_test");
     check(run_particle_option_contract_self_test(), "run_particle_option_contract_self_test");
+    check(run_raw_owner_plane_self_test(), "run_raw_owner_plane_self_test");
+    check(run_raw_owner_option_self_test(), "run_raw_owner_option_self_test");
+    check(run_projection_ray_owner_option_self_test(), "run_projection_ray_owner_option_self_test");
     check(run_external_bsp_replay_self_test(), "run_external_bsp_replay_self_test");
     check(run_surface_visibility_self_test(), "run_surface_visibility_self_test");
     check(
@@ -1146,15 +1305,20 @@ bool run_self_test()
     check(run_source_turbulence_self_test(), "run_source_turbulence_self_test");
     check(run_bsp_lightmap_self_test(), "run_bsp_lightmap_self_test");
     check(run_packed_brush_compact_lightmap_self_test(), "run_packed_brush_compact_lightmap_self_test");
+    check(run_packed_brush_coordinate_self_test(), "run_packed_brush_coordinate_self_test");
     check(run_packed_brush_ordering_self_test(), "run_packed_brush_ordering_self_test");
     check(run_packed_texture_span_self_test(), "run_packed_texture_span_self_test");
     check(run_texture_mapping_fidelity_self_test(), "run_texture_mapping_fidelity_self_test");
+    check(run_packed_material_chunk_self_test(), "run_packed_material_chunk_self_test");
     check(run_quantized_world_self_test(), "run_quantized_world_self_test");
+    check(run_frustum_geometry_rounding_self_test(), "run_frustum_geometry_rounding_self_test");
     check(run_current_pipeline_self_test(), "run_current_pipeline_self_test");
     check(run_span_endpoint_self_test(), "run_span_endpoint_self_test");
     check(run_demo_timing_self_test(), "run_demo_timing_self_test");
     check(run_precise_demo_self_test(), "run_precise_demo_self_test");
+    check(run_fly_camera_self_test(), "run_fly_camera_self_test");
     check(run_packed_alias_occlusion_self_test(), "run_packed_alias_occlusion_self_test");
+    check(run_alias_storage_loader_self_test(), "run_alias_storage_loader_self_test");
     check(run_packed_alias_projection_self_test(), "run_packed_alias_projection_self_test");
     check(run_alias_order_self_test(), "run_alias_order_self_test");
     check(run_alias_inspection_self_test(), "run_alias_inspection_self_test");

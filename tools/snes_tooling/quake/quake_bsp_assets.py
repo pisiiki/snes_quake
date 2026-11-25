@@ -179,7 +179,7 @@ WORLD_SHADING_TABLE_BYTES = (
     * DISTANCE_BUCKET_COUNT
     * WORLD_SHADING_TABLE_RECORD_BYTES
 )
-DEFAULT_OUTPUT = Workspace.discover().root / "src/snes_quake/Data"
+DEFAULT_OUTPUT = Workspace.discover().quake_example / "Data"
 # This generator reserves the complete namespace, including named assets and
 # variable-count numbered chunks. The packet oracle is JSON and remains owned
 # by its independent producer.
@@ -647,6 +647,25 @@ def quantized_bsp_plane(
     if distance < -0x8000 or distance > 0x7FFF:
         raise AssertionError(f"Q6 BSP plane distance exceeds int16: {distance}")
     return (normal[0], normal[1], normal[2]), distance
+
+
+def polygon_has_area(polygon: list[tuple[float, float, float]]) -> bool:
+    """Reject only exact fan degeneracy, independent of coordinate scale.
+
+    A nonzero source sliver can expand into a visible packed polygon. Neither
+    representation may be discarded by a fixed world-space area threshold.
+    """
+    if len(polygon) < 3:
+        return False
+    origin = polygon[0]
+    for index in range(1, len(polygon) - 1):
+        a = tuple(polygon[index][axis] - origin[axis] for axis in range(3))
+        b = tuple(polygon[index + 1][axis] - origin[axis] for axis in range(3))
+        if (a[1] * b[2] != a[2] * b[1]
+                or a[2] * b[0] != a[0] * b[2]
+                or a[0] * b[1] != a[1] * b[0]):
+            return True
+    return False
 
 
 def polygon_area(polygon: list[tuple[float, float, float]]) -> float:
@@ -1343,6 +1362,13 @@ def build_world_node_topology(
     return encoded_parents, tuple(owners), reachable, maximum_depth
 
 
+def stock_orientation_tilemap(tilemap: bytes) -> bytes:
+    """Reverse display columns and flip each tile to preserve its pixels."""
+    entries = struct.unpack("<1024H", tilemap)
+    return b"".join(struct.pack("<H", entries[row * 32 + (31 - column)] ^ 0x4000)
+                    for row in range(32) for column in range(32))
+
+
 def tilemap_bytes() -> bytes:
     output = bytearray()
     for row in range(32):
@@ -1417,6 +1443,8 @@ def pack_world_lightmaps(
     lighting: bytes,
     *,
     sky_enabled: bool = True,
+    first_bank: int = WORLD_LIGHTMAP_FIRST_GSU_ROM_BANK,
+    maximum_bank_count: int = WORLD_LIGHTMAP_ROM_BANKS,
 ) -> tuple[
     bytes,
     tuple[bytes, ...],
@@ -1532,8 +1560,8 @@ def pack_world_lightmaps(
 
     packed_build = pack_lightmap_payloads(
         tuple(samples for samples in face_samples if samples is not None),
-        first_bank=WORLD_LIGHTMAP_FIRST_GSU_ROM_BANK,
-        maximum_bank_count=WORLD_LIGHTMAP_ROM_BANKS,
+        first_bank=first_bank,
+        maximum_bank_count=maximum_bank_count,
     )
     directory = bytearray()
     location_iterator = iter(packed_build.locations)
@@ -1649,6 +1677,8 @@ def world_table_include(info: dict[str, object]) -> bytes:
     lines = [
         "; Full E1M3 world package and demo1 track; generated for runtime traversal.",
         f"BSP_WORLD_ROOT_NODE = {info['root_node']}",
+        *([f"BSP_WORLD_PLAYABLE_CAMERA_POSITION_UNITS = {info['playable_camera_position_units']}"]
+          if info.get('playable_camera_position_units') else []),
         f"BSP_WORLD_FIRST_FACE = {info['first_face']}",
         f"BSP_WORLD_VERTEX_COUNT = {info['vertex_count']}",
         f"BSP_WORLD_INDEX_COUNT = {info['index_count']}",
@@ -1682,31 +1712,35 @@ def world_table_include(info: dict[str, object]) -> bytes:
         f"BSP_WORLD_TEXTURE_COORD_0_BYTES = {info['texture_coordinate_0_bytes']}",
         f"BSP_WORLD_TEXTURE_COORD_1_BYTES = {info['texture_coordinate_1_bytes']}",
         f"BSP_WORLD_TEXTURE_COORD_2_BYTES = {info['texture_coordinate_2_bytes']}",
-        f"BSP_WORLD_TEXTURE_COORD_FIRST_GSU_ROM_BANK = {WORLD_TEXCOORD_FIRST_GSU_ROM_BANK}",
+        f"BSP_WORLD_TEXTURE_COORD_FIRST_GSU_ROM_BANK = {info.get('texture_coordinate_first_bank', WORLD_TEXCOORD_FIRST_GSU_ROM_BANK)}",
         f"BSP_WORLD_FACE_TEXTURE_ID_BYTES = {info['face_texture_id_bytes']}",
-        f"BSP_WORLD_FACE_TEXTURE_ID_GSU_ROM_ADDRESS = ${0x8000 + int(info['texture_coordinate_2_bytes']):04X}",
+        *([f"BSP_WORLD_TEXTURE_COORD_3_BYTES = {info['texture_coordinate_3_bytes']}"]
+          if not info.get("demo_playback_supported", 1) else []),
+        f"BSP_WORLD_FACE_TEXTURE_ID_GSU_ROM_ADDRESS = ${0x8000 + int(info.get('texture_aux_prefix_bytes', info['texture_coordinate_2_bytes'])):04X}",
         f"BSP_WORLD_TEXTURE_DIRECTORY_RECORD_BYTES = {TEXTURE_DIRECTORY_RECORD_BYTES}",
         f"BSP_WORLD_TEXTURE_FLAG_POWER_OF_TWO_AXES = {TEXTURE_FLAG_POWER_OF_TWO_AXES}",
         f"BSP_WORLD_TEXTURE_FLAG_SINGLE_BANK = {TEXTURE_FLAG_SINGLE_BANK}",
         f"BSP_WORLD_TEXTURE_FLAG_TURBULENT = {TEXTURE_FLAG_TURBULENT}",
         f"BSP_WORLD_TEXTURE_DIRECTORY_BYTES = {info['texture_directory_bytes']}",
         f"BSP_WORLD_TEXTURE_DIRECTORY_GSU_ROM_BANK = {WORLD_TEXTURE_DIRECTORY_GSU_ROM_BANK}",
-        f"BSP_WORLD_TEXTURE_DIRECTORY_GSU_ROM_ADDRESS = ${0x8000 + int(info['texture_coordinate_2_bytes']) + int(info['face_texture_id_bytes']):04X}",
+        f"BSP_WORLD_TEXTURE_DIRECTORY_GSU_ROM_ADDRESS = ${0x8000 + int(info.get('texture_aux_prefix_bytes', info['texture_coordinate_2_bytes'])) + int(info['face_texture_id_bytes']):04X}",
         f"BSP_WORLD_TEXTURE_PIXEL_BYTES = {info['texture_pixel_bytes']}",
         f"BSP_WORLD_TEXTURE_PIXEL_CHUNK_COUNT = {info['texture_pixel_chunk_count']}",
         f"BSP_WORLD_TEXTURE_FIRST_GSU_ROM_BANK = {WORLD_TEXTURE_FIRST_GSU_ROM_BANK}",
         f"BSP_WORLD_LIGHTMAP_DIRECTORY_RECORD_BYTES = {LIGHTMAP_DIRECTORY_RECORD_BYTES}",
         f"BSP_WORLD_LIGHTMAP_DIRECTORY_BYTES = {info['lightmap_directory_bytes']}",
-        f"BSP_WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_BANK = {WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_BANK}",
-        "BSP_WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_ADDRESS = $8000",
+        f"BSP_WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_BANK = {info.get('lightmap_directory_bank', WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_BANK)}",
+        f"BSP_WORLD_LIGHTMAP_DIRECTORY_GSU_ROM_ADDRESS = ${info.get('lightmap_directory_address', 0x8000):04X}",
         "BSP_WORLD_LIGHTMAP_SAMPLE_BITS = 6",
         "BSP_WORLD_LIGHTMAP_SAMPLES_PER_GROUP = 4",
         "BSP_WORLD_LIGHTMAP_BYTES_PER_GROUP = 3",
         f"BSP_WORLD_LIGHTMAP_LOGICAL_SAMPLE_COUNT = {info['lightmap_logical_sample_count']}",
         f"BSP_WORLD_LIGHTMAP_PACKED_BYTES = {info['lightmap_packed_bytes']}",
         f"BSP_WORLD_LIGHTMAP_MAX_FACE_SAMPLE_BYTES = {info['lightmap_max_face_sample_bytes']}",
+        *([f"BSP_LIGHTMAP_UNPACK_ROM_BANK = {info['lightmap_unpack_bank']}"]
+          if not info.get("demo_playback_supported", 1) else []),
         f"BSP_WORLD_LIGHTMAP_CHUNK_COUNT = {info['lightmap_chunk_count']}",
-        f"BSP_WORLD_LIGHTMAP_FIRST_GSU_ROM_BANK = {WORLD_LIGHTMAP_FIRST_GSU_ROM_BANK}",
+        f"BSP_WORLD_LIGHTMAP_FIRST_GSU_ROM_BANK = {info.get('lightmap_first_bank', WORLD_LIGHTMAP_FIRST_GSU_ROM_BANK)}",
         f"BSP_WORLD_LIGHTMAPPED_FACE_COUNT = {info['lightmapped_face_count']}",
         f"BSP_WORLD_NODE_RECORD_BYTES = {WORLD_NODE_RECORD_BYTES}",
         f"BSP_WORLD_NODE_PARENT_RECORD_BYTES = {WORLD_NODE_PARENT_RECORD_BYTES}",
@@ -1734,6 +1768,11 @@ def world_table_include(info: dict[str, object]) -> bytes:
         f"BSP_WORLD_PVS_FIRST_GSU_ROM_BANK = {WORLD_PVS_FIRST_GSU_ROM_BANK}",
         f"BSP_DEMO_TRACK_RECORD_BYTES = {DEMO_TRACK_RECORD_BYTES}",
         f"BSP_DEMO_TRACK_POSE_COUNT = {info['demo_pose_count']}",
+        *(["BSP_DEMO_PLAYBACK_SUPPORTED = 0",
+           f"BSP_WORLD_FACE_OWNERS_ROM_BANK = {info['face_owner_bank']}", *(
+            f"BSP_FLY_START_{axis}_Q8 = {value}"
+            for axis, value in zip("XYZ", info["initial_eye_q8"], strict=True))]
+          if not info.get("demo_playback_supported", 1) else []),
         f"BSP_DEMO_TRACK_BYTES = {info['demo_track_bytes']}",
         f"BSP_DEMO_TIMING_RECORD_BYTES = {DEMO_TIMING_RECORD_BYTES}",
         f"BSP_DEMO_TIMING_BYTES = {info['demo_timing_bytes']}",

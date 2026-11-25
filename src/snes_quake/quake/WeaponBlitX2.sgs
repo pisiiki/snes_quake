@@ -1,0 +1,200 @@
+; X2 sparse composition between the world job and its staging DMA. Preserve
+; every touched plane word in renderer-only bank-$71 scratch. The next packet
+; selector can run concurrently with the staging DMA: its painter stack
+; ends at GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET and its indices start at $5200.
+;
+; Blit ABI: R1 = ROM stream offset, R2 = ROM bank, R12 = nonzero row count.
+; Each eleven-byte record is (address16, opaque8, planes01,23,45,67).
+; All replacement plane words contain zero in transparent positions.
+; Restore ABI: R12 = same nonzero row count. It needs no sprite data reads.
+.segment "BSP_WEAPON_FX3_CODE"
+.export WeaponBlitX2, WeaponBlitShiftedX2, WeaponRestoreX2
+
+.assert WEAPON_UNDO_FIRST_LIMIT <= GSU_INDICES_OFFSET, error, "Weapon undo overlaps selector indices"
+.assert WEAPON_UNDO_SECOND = PACKET_PAINTER_STACK_END, error, "Weapon undo must follow the selector painter stack"
+
+.macro WEAPON_UNDO_NEXT_ROW
+        .local Ready
+        iwt     R0, #WEAPON_UNDO_FIRST_LIMIT
+        cmp     R6
+        bne     Ready
+        nop
+        iwt     R6, #WEAPON_UNDO_SECOND
+Ready:
+.endmacro
+
+.macro WEAPON_ADVANCE_PLANE address
+        with    address
+        add     R10
+.endmacro
+
+.macro WEAPON_BLIT_KERNEL Entry, Shifted
+GSU_CACHE_KERNEL_BEGIN Entry
+        move    R0, #0
+        ramb                            ; 8bpp output lives in bank $70.
+        from    R2
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R1
+        iwt     R6, #WEAPON_UNDO_FIRST
+        ibt     R10, #16
+        iwt     R13, #.loword(@Row)
+@Row:
+        ; Let the next ROM byte arrive while selecting the undo range.
+        to      R4
+        getb
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        WEAPON_UNDO_NEXT_ROW
+        with    R4
+        getbh
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+
+  .if Shifted
+        ; The low address nibble encodes the permuted line within its tile.
+        ; Its delta also includes the carry into the adjacent tile row.
+        iwt     R3, #WEAPON_BOB_DELTAS
+        from    R4
+        and     #14
+        to      R7
+        add     R3
+        move    R0, #1
+        ramb
+        ldw     (R7)
+        with    R4
+        add     R0
+        move    R0, #0
+        ramb
+  .endif
+        ; Interleave the remaining ROM reads with the original pixel reads.
+        move    R7, R4
+        movew   R1, (R7)
+        BSP_ROM_LOAD_BYTE R5            ; Opaque bits in pixel order.
+        WEAPON_ADVANCE_PLANE R7
+        movew   R2, (R7)
+        to      R8
+        getb
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        WEAPON_ADVANCE_PLANE R7
+        movew   R3, (R7)
+        with    R8
+        getbh
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        WEAPON_ADVANCE_PLANE R7
+        movew   R11, (R7)
+        to      R9
+        getb
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+
+        move    R0, #1
+        ramb
+        movew   (R6), R4
+        inc     R6
+        inc     R6
+        with    R9
+        getbh
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        movew   (R6), R1
+        inc     R6
+        inc     R6
+        movew   (R6), R2
+        inc     R6
+        inc     R6
+        movew   (R6), R3
+        inc     R6
+        inc     R6
+        movew   (R6), R11
+        inc     R6
+        inc     R6
+        move    R0, #0
+        ramb
+
+        move    R0, R5
+        swap
+        or      R5
+        not
+        move    R7, R0                  ; Preserve the complementary bits.
+        from    R1
+        and     R7
+        or      R8
+        stw     (R4)
+        WEAPON_ADVANCE_PLANE R4
+        from    R2
+        and     R7
+        or      R9
+        stw     (R4)
+        to      R8
+        getb
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        WEAPON_ADVANCE_PLANE R4
+        from    R3
+        and     R7
+        with    R8
+        getbh
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        or      R8
+        stw     (R4)
+        to      R8
+        getb
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        WEAPON_ADVANCE_PLANE R4
+        from    R11
+        and     R7
+        with    R8
+        getbh
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        or      R8
+        loop
+        stw     (R4)
+
+        move    R0, #1
+        ramb                            ; Restore the renderer completion ABI.
+        stop
+        nop
+GSU_CACHE_KERNEL_END Entry
+.endmacro
+
+WEAPON_BLIT_KERNEL WeaponBlitX2, 0
+WEAPON_BLIT_KERNEL WeaponBlitShiftedX2, 1
+
+GSU_CACHE_KERNEL_BEGIN WeaponRestoreX2
+        iwt     R6, #WEAPON_UNDO_FIRST
+        ibt     R10, #16
+        iwt     R13, #.loword(@Row)
+@Row:
+        WEAPON_UNDO_NEXT_ROW
+        move    R0, #1
+        ramb
+        .repeat 5, word
+          .if word = 0
+            movew R4, (R6)
+          .elseif word = 1
+            movew R1, (R6)
+          .elseif word = 2
+            movew R2, (R6)
+          .elseif word = 3
+            movew R3, (R6)
+          .else
+            movew R11, (R6)
+          .endif
+            inc   R6
+            inc   R6
+        .endrepeat
+        move    R0, #0
+        ramb
+
+        movew   (R4), R1
+        WEAPON_ADVANCE_PLANE R4
+        movew   (R4), R2
+        WEAPON_ADVANCE_PLANE R4
+        movew   (R4), R3
+        WEAPON_ADVANCE_PLANE R4
+        from    R11
+        ; LOOP resets the source register, so commit the last word first.
+        stw     (R4)
+        loop
+        nop
+
+        move    R0, #1
+        ramb
+        stop
+        nop
+GSU_CACHE_KERNEL_END WeaponRestoreX2

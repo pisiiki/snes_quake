@@ -7,6 +7,16 @@
 namespace quake_bsp_reference {
 
 bool run_particle_option_contract_self_test();
+bool run_raw_owner_plane_self_test();
+bool run_raw_owner_option_self_test();
+bool run_projection_ray_owner_option_self_test();
+
+void write_raw_owner_planes(
+    const fs::path& prefix,
+    std::span<const std::uint16_t> faces,
+    std::span<const std::uint16_t> entities = {},
+    std::span<const std::uint16_t> models = {}
+);
 
 void write_quake_sky_artifacts(
     const fs::path& indices_path,
@@ -122,10 +132,6 @@ struct Options
 {
     std::string render_scale{"x2"};
     int diagnostic_source_focal{64};
-    std::string warp_model{"projective"};
-    double warp_depth{192.0};
-    int warp_bands{16};
-    std::vector<int> warp_profile;
     fs::path pak;
     std::string map_entry{"maps/e1m3.bsp"};
     fs::path data_dir;
@@ -147,6 +153,9 @@ struct Options
     fs::path packed_alias_render_indices;
     fs::path quake_sky_indices;
     fs::path fly_alias_render_indices;
+    fs::path x2_weapon_assets;
+    fs::path full_precision_replay;
+    fs::path x2_weapon_output;
     fs::path realtime_demo_track;
     fs::path brush_replay;
     fs::path external_bsp_replay;
@@ -154,17 +163,28 @@ struct Options
     fs::path particle_replay;
     fs::path particle_output;
     fs::path alias_assets;
+    fs::path fly_alias_replay;
     fs::path ordered_replay;
     fs::path ordered_alias_visibility;
     fs::path packed_realtime_demo_track;
     fs::path realtime_demo_timing;
     std::string instrumentation_session;
     std::string instrumentation_pipe;
+    bool gameplay{};
+    std::vector<fs::path> gameplay_assets;
+    std::string gameplay_map{"start"};
+    bool gameplay_face_colors{};
+    fs::path gameplay_script;
+    fs::path gameplay_tape_dir;
+    fs::path gameplay_record_dir;
+    fs::path gameplay_report;
     Camera camera{-46, -80, -7, 192, 0};
     std::string camera_label{"spawn"};
     int allowed_holes{};
     int demo_pose{-1};
     int fly_source_pose{};
+    int x2_weapon_frame{-1};
+    int x2_weapon_source_pose{-1};
     int alias_yaw_q8{};
     double surface_time{};
     bool surface_time_override{};
@@ -187,6 +207,8 @@ struct Options
     float volume{0.7F};
     bool self_test{};
     bool report_only{};
+    bool raw_owner_planes{};
+    bool projection_ray_owner_planes{};
 };
 
 struct RawOptionValues

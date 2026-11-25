@@ -29,28 +29,12 @@ StageAliasVisibilityArchive:
 @StateReady:
 .if BSP_RENDER_SCALE = 3
         lda     render_camera+10
-        bit     #(BSP_OVERLAY_WARP_OVERSCAN << 8)
-        beq     @Unity
-.if BSP_WARP_SOURCE_FOCAL <> BSP_ALIAS_ARCHIVE_WARP_FOCAL
-        ; An independently built focal remains correct until its masks are
-        ; regenerated; it must not consume the configured archive's stream.
-        bra     @Live
-.else
-        and     #(BSP_OVERLAY_DYNAMIC_BRUSHES << 8)
-        beq     @WarpDisabled
-        lda     f:QuakeBSPAliasVisibilityX3WarpEnabled,x
-        bra     @Publish
-@WarpDisabled:
-        lda     f:QuakeBSPAliasVisibilityX3WarpDisabled,x
-        bra     @Publish
-.endif
-@Unity:
         and     #(BSP_OVERLAY_DYNAMIC_BRUSHES << 8)
         beq     @UnityDisabled
-        lda     f:QuakeBSPAliasVisibilityX3UnityEnabled,x
+        lda     f:QuakeBSPAliasVisibilityX3Enabled,x
         bra     @Publish
 @UnityDisabled:
-        lda     f:QuakeBSPAliasVisibilityX3UnityDisabled,x
+        lda     f:QuakeBSPAliasVisibilityX3Disabled,x
 .else
         lda     render_camera+10
         and     #(BSP_OVERLAY_DYNAMIC_BRUSHES << 8)

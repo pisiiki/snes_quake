@@ -18,7 +18,7 @@ inline constexpr std::uint16_t kAliasFace = 0xfffe;
 inline constexpr std::uint16_t kAliasDirectionalTag = 0x8000;
 inline constexpr std::uint16_t kAliasDirectionalMask = 0x7fff;
 inline constexpr std::size_t kAliasFlyRowCount = 8;
-inline constexpr std::array<std::pair<std::uint8_t, std::uint16_t>, 18> kAliasStorageLocations{{
+inline constexpr std::array<std::pair<std::uint8_t, std::uint16_t>, 21> kAliasStorageLocations{{
     {0x6b, 0x8000},
     {0x6c, 0x0000},
     {0x6c, 0x8000},
@@ -37,6 +37,9 @@ inline constexpr std::array<std::pair<std::uint8_t, std::uint16_t>, 18> kAliasSt
     {0x25, 0x8000},
     {0x0f, 0x8000},
     {0x37, 0x8000},
+    {0x3f, 0x8000},
+    {0x0c, 0x8000},
+    {0x0d, 0x8000},
 }};
 
 struct AliasSprite
@@ -85,6 +88,7 @@ struct AliasAssets
     std::vector<AliasRow> rows;
     std::vector<std::string> model_names;
     std::vector<std::string> model_kinds;
+    std::vector<bool> model_rotates;
     std::vector<int> static_entity_ids;
     std::vector<std::vector<int>> row_entity_ids;
 };
@@ -166,13 +170,23 @@ AliasAssets load_alias_assets(const fs::path& directory);
 
 void require_alias_camera_identity(const AliasAssets& assets, const fs::path& camera_track);
 
+struct SourceAliasPlacement
+{
+    Vec3 origin;
+    std::size_t sprite;
+};
+
+using SourceAliasPlacementAt = std::function<SourceAliasPlacement(const AliasToken&, const AliasState&)>;
+
 template <typename Consumer>
 void for_each_alias_pixel(
     const SourceWorld& world,
     const ViewTransform& view,
     const AliasAssets& assets,
     std::size_t sample_index,
-    Consumer&& consume
+    Consumer&& consume,
+    std::optional<std::uint8_t> fly_rotation = std::nullopt,
+    const SourceAliasPlacementAt& source_placement = {}
 )
 {
     if (sample_index >= assets.rows.size())
@@ -183,13 +197,30 @@ void for_each_alias_pixel(
     for (const auto& token : row.tokens)
     {
         const auto& state = token.is_static ? assets.static_states.at(token.index) : row.dynamic_states.at(token.index);
-        const auto& sprite = assets.sprites.at(alias_sprite_id(state));
-        const Vec3 origin = {
+        Vec3 origin = {
             world.origin.x + state.origin_q2[0] * (kWorldScale / 4.0),
             world.origin.y + state.origin_q2[1] * (kWorldScale / 4.0),
             world.origin.z + state.origin_q2[2] * (kWorldScale / 4.0),
         };
+        std::optional<std::size_t> source_sprite;
+        if (source_placement)
+        {
+            const auto placement = source_placement(token, state);
+            origin = placement.origin;
+            source_sprite = placement.sprite;
+        }
         const auto delta = origin - view.origin;
+        const auto sprite_id =
+            source_sprite ? *source_sprite
+            : fly_rotation
+                ? alias_resolved_sprite_id(
+                      state,
+                      wrap_i16(static_cast<int>(std::lround(delta.x * 4.0 / kWorldScale))),
+                      wrap_i16(static_cast<int>(std::lround(delta.y * 4.0 / kWorldScale))),
+                      *fly_rotation
+                  )
+                : alias_sprite_id(state);
+        const auto& sprite = assets.sprites.at(sprite_id);
         const double depth = dot(delta, view.forward);
         if (depth <= 1e-7)
         {
@@ -242,7 +273,9 @@ void compose_alias_billboards(
     const ViewTransform& view,
     const AliasAssets& assets,
     std::size_t sample_index,
-    AliasCoverage* coverage = nullptr
+    AliasCoverage* coverage = nullptr,
+    std::optional<std::uint8_t> fly_rotation = std::nullopt,
+    const SourceAliasPlacementAt& source_placement = {}
 );
 
 struct PackedAliasAxisProjection

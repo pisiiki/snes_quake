@@ -1,0 +1,127 @@
+; Correctly rounded sqrt of a positive normalized24 significand.
+; Reduce to floor sqrt(m << (23 or24)); every radicand is an integer.
+SkyFloatSqrt24:
+        lm      R4, (SF_A0)
+        lm      R6, (SF_A1)
+        move    R5, R4
+        with    R5
+        lob
+        with    R5
+        swap
+        with    R4
+        hib
+        with    R6
+        swap
+        with    R6
+        or      R4
+        move    R4, #0
+        lm      R10, (SF_AEXP)
+        move    R1, R10
+        with    R1
+        and     #1
+        with    R10
+        asr
+        move    R0, #12
+        with    R10
+        sub     R0
+        moves   R1, R1
+        beq     @RadicandReady
+        nop
+        inc     R10
+        with    R6
+        lsr
+        with    R5
+        ror
+        with    R4
+        ror
+@RadicandReady:
+        sm      (SF_EXP), R10
+        move    R8, R6
+        with    R8
+        hib
+        .repeat 6
+          with  R8
+          lsr
+        .endrepeat
+        dec     R8
+        move    R9, #0
+        move    R12, #1
+        move    R13, #0
+        .repeat 2
+          with  R4
+          add   R4
+          with  R5
+          adc   R5
+          with  R6
+          adc   R6
+        .endrepeat
+        move    R7, #23
+@DigitLoop:
+        .repeat 2
+          with  R4
+          add   R4
+          with  R5
+          adc   R5
+          with  R6
+          adc   R6
+          with  R8
+          rol
+          with  R9
+          rol
+        .endrepeat
+        with    R12
+        add     R12
+        with    R13
+        adc     R13
+        move    R2, R12
+        move    R3, R13
+        with    R2
+        add     R2
+        with    R3
+        adc     R3
+        inc     R2
+        with    R8
+        sub     R2
+        with    R9
+        sbc     R3
+        bcc     @RestoreTrial
+        nop
+        inc     R12
+        bra     @DigitDone
+        nop
+@RestoreTrial:
+        with    R8
+        add     R2
+        with    R9
+        adc     R3
+@DigitDone:
+        dec     R7
+        bne     @DigitLoop
+        cache
+        ; Integer radicand cannot tie at (root+.5)^2: round up iff r>root.
+        with    R8
+        sub     R12
+        with    R9
+        sbc     R13
+        bcc     @Publish
+        nop
+        with    R8
+        or      R9
+        beq     @Publish
+        nop
+        move    R0, #1
+        with    R12
+        add     R0
+        move    R0, #0
+        with    R13
+        adc     R0
+@Publish:
+        sm      (SF_W0), R12
+        sm      (SF_W1), R13
+        move    R0, #0
+        sm      (SF_W2), R0
+        sm      (SF_SIGN), R0
+        ret
+        nop
+SkyFloatSqrt24End:
+.assert SkyFloatSqrt24End-(SkyFloatSqrt24 & $FFFFF0)<=512, lderror, "Float sqrt escaped one cache window"

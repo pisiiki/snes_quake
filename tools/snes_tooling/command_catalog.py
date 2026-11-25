@@ -91,6 +91,13 @@ def discover_wrappers(workspace: Workspace) -> dict[str, str]:
         'from pathlib import Path\nimport sys\n'
         'sys.path.insert(0, str(Path(__file__).resolve().parents[2]))\n'
     ).body
+    environment_bootstrap = ast.parse(
+        "import os\nimport sys\nfrom pathlib import Path\n"
+        'workspace = os.environ.get("SNES_WORKSPACE")\n'
+        'tools = Path(workspace).expanduser().resolve() / "tools" if workspace else Path(__file__).resolve().parents[2]\n'
+        'sys.path.insert(0, str(tools))\n'
+    ).body
+    prefixes = [tuple(map(ast.dump, nodes)) for nodes in (local_bootstrap, environment_bootstrap)]
     wrappers = {}
     for root in (workspace.shared_tools, workspace.quake_tools):
         for source in sorted(root.glob("*.py")):
@@ -98,10 +105,12 @@ def discover_wrappers(workspace: Workspace) -> dict[str, str]:
             body = list(tree.body)
             if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
                 body.pop(0)
-            # Detached dashboard delegates pin imports to their own checkout.
-            # Accept only this exact bootstrap, never arbitrary wrapper logic.
-            if [ast.dump(node) for node in body[:3]] == [ast.dump(node) for node in local_bootstrap]:
-                body = body[3:]
+            # Both checkout selection policies are exact delegates; additional logic is rejected.
+            statements = tuple(map(ast.dump, body))
+            for prefix in prefixes:
+                if statements[:len(prefix)] == prefix:
+                    body = body[len(prefix):]
+                    break
             if (len(body) != 2 or not isinstance(body[0], ast.ImportFrom)
                     or not body[0].module or not body[0].module.startswith("snes_tooling.")
                     or len(body[0].names) != 1 or not is_main_guard(body[1])):

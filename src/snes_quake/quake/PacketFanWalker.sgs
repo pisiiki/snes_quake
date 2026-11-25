@@ -1,0 +1,27 @@
+; Keep the per-vertex dispatch in the same window as the lookup. The
+; conservative three-vertex screen predicate keeps its existing cold entry.
+PacketProjectFaceLoopCached:
+        jal     PacketLoadProjectedWorldVertex
+        nop
+        lm      R0, (PACKET_FAN_ORDINAL)
+        moves   R0, R0
+        beq     PacketFanFirst
+        nop
+        dec     R0
+        beq     PacketFanSecond
+        nop
+        lm      R0, (PACKET_PROJ_VALID)
+        moves   R0, R0
+        beq     PacketFanAdvancePrevious
+        nop
+        lm      R0, (PACKET_FAN_VALID)
+        with    R0
+        and     #3
+        move    R1, #3
+        with    R0
+        cmp     R1
+        bne     PacketFanAdvancePrevious
+        nop
+        GSU_ABSOLUTE_GOTO PacketFanThreeValid
+        .include "quake/PacketFanTail.sgs"
+        .assert * - GSU_SelectVisibility <= $04D0, error, "Cached fan exceeded the projection padding budget"

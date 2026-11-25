@@ -1,0 +1,197 @@
+; E1M1 keeps the industrial loops resident. Foreground samples sharing V0 or V2
+; retain their original BRR packets in cartridge ROM and upload on a cache miss.
+; Tokens use ports 2 and 3. Body and auxiliary events retain their own ports.
+.macro RECEIVE_INDUSTRIAL_BYTE
+:       cmp     x,CPUIO3
+        beq     :-
+        mov     x,CPUIO3
+        mov     a,CPUIO2
+        mov     CPUIO3,x
+.endmacro
+@ReceiveByte:
+        RECEIVE_INDUSTRIAL_BYTE
+        ret
+@TransferSample:
+        push    x
+        mov     x,CPUIO3
+        mov     CPUIO3,x
+        mov     y,#0
+@TransferHeader:
+        call    !@ReceiveByte
+        mov     !transfer_ptr+y,a       ; start, byte count, voice release mask.
+        inc     y
+        cmp     y,#5
+        bne     @TransferHeader
+        mov     y,#0
+        mov     a,transfer_mask
+        bpl     :+
+        jmp     !GAMEPLAY_TRANSFER_BULK_RUN
+:       DSP_set KOF,a
+        mov     a,transfer_count+1
+        beq     @TransferData
+@TransferPage:
+        RECEIVE_INDUSTRIAL_BYTE
+        mov     [transfer_ptr]+y,a
+        inc     y
+        bne     @TransferPage
+        inc     transfer_ptr+1
+        dec     transfer_count+1
+        bne     @TransferPage
+        mov     a,transfer_count
+        beq     @TransferStored
+@TransferData:
+        RECEIVE_INDUSTRIAL_BYTE
+        mov     [transfer_ptr]+y,a
+        inc     y                       ; The partial page starts at Y=0.
+        dbnz    transfer_count,@TransferData
+@TransferStored:
+        DSP_set KOF,#0
+        bra     @TransferDone
+
+; Update a background voice only after its original foreground event finishes.
+; Holding an inaudible looping voice at zero gain keeps its DSP phase continuous.
+@IndustrialGain:
+        push    x
+        mov     x,CPUIO3
+        mov     CPUIO3,x
+        mov     y,#0
+@GainHeader:
+        call    !@ReceiveByte
+        mov     !industrial_regs+y,a
+        inc     y
+        cmp     y,#7
+        bne     @GainHeader
+        mov     industrial_mode,#1
+        mov     a,industrial_regs
+        or      a,#4                    ; SRCN
+        mov     DSPADDR,a
+        mov     a,DSPDATA
+        cmp     a,industrial_regs+1
+        beq     @UseGain
+        mov     a,industrial_regs+4
+        or      a,industrial_regs+5
+        beq     @TransferDone
+        mov     a,industrial_regs
+        or      a,#8                    ; ENVX is zero after a non-looping voice ends.
+        mov     DSPADDR,a
+        mov     a,DSPDATA
+        bne     @TransferDone
+@UseGain:
+        mov     y,industrial_regs
+        mov     DSPADDR,y
+        mov     DSPDATA,industrial_regs+4
+        inc     y
+        mov     DSPADDR,y
+        mov     DSPDATA,industrial_regs+5
+        inc     y
+        mov     DSPADDR,y
+        mov     DSPDATA,industrial_regs+2
+        inc     y
+        mov     DSPADDR,y
+        mov     DSPDATA,industrial_regs+3
+        inc     y
+        mov     DSPADDR,y
+        mov     DSPDATA,industrial_regs+1
+        mov     a,industrial_regs+4
+        or      a,industrial_regs+5
+        beq     @TransferDone
+        mov     a,industrial_regs
+        or      a,#8
+        mov     DSPADDR,a
+        mov     a,DSPDATA
+        bne     @TransferDone
+        mov     a,industrial_regs+6
+        DSP_set KON,a
+@TransferDone:
+        mov     a,x
+        mov     y,a
+        pop     x
+        jmp     !@Wait
+.delmacro RECEIVE_INDUSTRIAL_BYTE
+
+.ifdef PLAYABLE_E1M1_SPC_CARRIER
+; E1M1 installs this code through the existing byte transport. The shared
+; SPC image and the warm-load BRR ranges retain their allocated extents.
+IndustrialReceiveByte = @ReceiveByte
+.import __LIBSFX_SMP_RUN__, __LIBSFX_SMP_SIZE__
+.assert __LIBSFX_SMP_RUN__ + __LIBSFX_SMP_SIZE__ <= GAMEPLAY_TRANSFER_BULK_RUN, lderror, "E1M1 bulk receiver overlaps libSFX SPC code"
+.pushseg
+.segment "BSP_CPU_BRR_INSTALL"
+.export IndustrialBulkImage, IndustrialBulkSize
+IndustrialBulkImage:
+        .org GAMEPLAY_TRANSFER_BULK_RUN
+; The S-CPU borrows the body and auxiliary ports only between the snapshot
+; and restore strobes. Keep the ordinary input and output mailboxes separate.
+@TransferBulk:
+        and     a,#$ff-GAMEPLAY_TRANSFER_BULK
+        DSP_set KOF,a
+        mov     CPUIO0,CPUIO0
+        mov     CPUIO1,CPUIO1
+        call    !IndustrialReceiveByte            ; Snapshot ready, no payload consumed.
+@Chunk:
+        ; At most 84 complete packets fit before Y would wrap.
+        mov     a,transfer_count+1
+        bne     @FullChunk
+        mov     a,transfer_count
+        cmp     a,#252
+        bcc     @TailChunk
+@FullChunk:
+        setc
+        mov     a,transfer_count
+        sbc     a,#252
+        mov     transfer_count,a
+        bcs     :+
+        dec     transfer_count+1
+:       mov     transfer_mask,#84
+        bra     @BulkPacket
+@TailChunk:
+        push    x
+        mov     x,#3
+        div     ya,x                    ; Y begins at zero, and the length is divisible by three.
+        pop     x
+        mov     transfer_mask,a
+        mov     transfer_count,#0
+@BulkPacket:
+        cmp     x,CPUIO3
+        beq     @BulkPacket
+        mov     x,CPUIO3
+        mov     a,CPUIO0
+        mov     [transfer_ptr]+y,a
+        inc     y
+        mov     a,CPUIO1
+        mov     [transfer_ptr]+y,a
+        inc     y
+        mov     a,CPUIO2
+        mov     CPUIO3,x                 ; All lanes are latched once the echo is visible.
+        mov     [transfer_ptr]+y,a
+        inc     y
+        dbnz    transfer_mask,@BulkPacket
+        mov     a,transfer_count
+        or      a,transfer_count+1
+        beq     @BulkEnd
+        clrc
+        mov     a,transfer_ptr
+        adc     a,#252
+        mov     transfer_ptr,a
+        bcc     :+
+        inc     transfer_ptr+1
+:       mov     y,#0
+        bra     @Chunk
+@BulkEnd:
+        ; The transfer loop leaves DSPADDR on KOF.
+        mov     DSPDATA,#0
+@RestorePorts:
+        cmp     x,CPUIO3
+        beq     @RestorePorts
+        mov     y,CPUIO3
+        mov     CPUIO0,#$a5
+        pop     x
+        mov     CPUIO1,x
+        mov     CPUIO3,y
+        jmp     !IndustrialGameplayWait
+
+IndustrialBulkSize = * - GAMEPLAY_TRANSFER_BULK_RUN
+.assert * <= $f0, error, "E1M1 bulk receiver overlaps SPC I/O"
+        .reloc
+.popseg
+.endif

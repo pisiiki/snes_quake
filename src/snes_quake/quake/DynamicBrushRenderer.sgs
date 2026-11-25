@@ -8,11 +8,82 @@
 DynamicBrushOverlayStart:
 
 .include "DynamicBrushMerge.sgs"
+.include "FlyWorldMaskClaims.sgs"
 .include "DynamicBrushRaster.sgs"
 .include "DynamicBrushArbiter.sgs"
 .include "DynamicBrushArbiterSpan.sgs"
-; Preserve the current entry and T4 fallback windows when shared arithmetic
-; shrinks. This space follows a returning helper and is never executed.
+; The fragment loader has returned before any facing query. Its old return
+; word is free while the exact predicate uses State84. R13 stays untouched;
+; all caller-live data other than R0/R11 is already dead across the old dot.
+BRUSH_FACING_LAZY_RETURN = BRUSH_FRAGMENT_LOAD_RETURN
+        .res $1B8E - (* - DynamicBrushOverlayStart), $01
+BrushFaceLazyFacing:
+        lm      R0, (BRUSH_CURRENT_FRAGMENT_ID)
+        moves   R0, R0
+        bpl     BrushFaceLazyMiss
+        nop
+        ; KNOWN is bit15; double to test BACK in bit14 without extra masks.
+        add     R0
+        bmi     BrushFaceLazyHitDone
+        sub     R0                      ; Single-byte delay clears either result.
+        inc     R0
+BrushFaceLazyHitDone:
+        ret
+BrushFaceLazyMiss:
+        sm      (BRUSH_FACING_LAZY_RETURN), R11
+        jal     BrushFaceFrontFacing
+        move    R3, R0                   ; Exact0/1 survives pointer reconstruction.
+        dec     R0
+        iwt     R1, #BRUSH_LINK_BACKFACING_TAG
+        and     R1
+        iwt     R1, #BRUSH_LINK_KNOWN_TAG
+        or      R1
+        ; Clear both old memo bits before installing the authoritative result.
+        lm      R1, (BRUSH_CURRENT_FRAGMENT_ID)
+.if BSP_BRUSH_TEN_BIT_LINKS
+        iwt     R2, #BRUSH_LINK_PAYLOAD_MASK ; Preserve packed next bit9.
+.else
+        iwt     R2, #BRUSH_LINK_FRAGMENT_MASK
+.endif
+        with    R1
+        and     R2
+        or      R1
+        sm      (BRUSH_CURRENT_FRAGMENT_ID), R0
+        lm      R1, (BRUSH_CURRENT_LINK)
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        iwt     R10, #BRUSH_LINKS
+        with    R10
+        add     R1
+        movew   (R10), R0
+        move    R0, R3
+        lm      R11, (BRUSH_FACING_LAZY_RETURN)
+        ret
+BrushFaceLazyEnd:
+.assert .loword(BrushFaceLazyFacing) = $A78E, lderror, "Lazy facing left retired padding"
+.assert .loword(BrushFaceLazyEnd) <= $A7E9, lderror, "Lazy facing exceeds retired padding"
+
+; Keep the following brush entries and T4 fallback windows pinned.
+.if .defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)
+; T4 passes the bounds comparison in carry and the marker address in R10.
+; A bounded peek at the second following token proves there is no contest.
+BrushArbiterCheckSingleton:
+        bcs     @Direct
+        nop
+        with    R10
+        add     #4
+        ldw     (R10)
+        rol
+        bcs     @Collect                ; The original token's fragment bit.
+        nop
+@Direct:
+        GSU_ABSOLUTE_GOTO BrushArbiterDirectGroup
+@Collect:
+        GSU_ABSOLUTE_GOTO BrushArbiterCollectBegin
+.assert .loword(*) <= $A7E9, lderror, "Singleton gate exceeds the retired brush padding"
+.endif
 .res $1BE9 - (* - DynamicBrushOverlayStart)
 
 GSU_BrushTextureCode:
@@ -20,9 +91,21 @@ GSU_BrushTextureCode:
         bra     BrushRendererStart
         nop
 
-; Keep the address-sensitive technique-4 brush windows stable while obsolete
-; entry slots remain vacant.
-.res $10
+; Keep the qualified technique-4 brush entry and all later overlay addresses fixed.
+.if .defined(PLAYABLE_MAP_ID) && BSP_QUAKEC_GAMEPLAY && (BSP_RENDER_SCALE = 3)
+.export ClearFreshX3World
+ClearFreshX3World:
+        GSU_RAMBANK0
+        move    R10, R0
+        move    R7, #(BSP_VIEW_HEIGHT+7)/8
+        iwt     R8, #(16-(BSP_VIEW_WIDTH+7)/8)*64
+        bra     ClearFreshX3Rows
+        nop
+.assert * - ClearFreshX3World <= $10, error, "X3 background setup exceeds the retired entry window"
+        .res    $10 - (* - ClearFreshX3World)
+.else
+        .res    $10
+.endif
 
 GSU_BrushTextureLightmapCode:
         move    R0, #1
@@ -51,6 +134,14 @@ BrushRendererComposeReady:
         ; Packet selection's Q2 camera cache is phase-overlaid with the
         ; near-clip return words. Dynamic fragments invoke that clipper many
         ; times, so preserve a brush-private copy for every later face cull.
+.if BSP_QUAKEC_GAMEPLAY
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_X)
+        sm      (BRUSH_CAMERA_Q2_X), R0
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_Y)
+        sm      (BRUSH_CAMERA_Q2_Y), R0
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_Z)
+        sm      (BRUSH_CAMERA_Q2_Z), R0
+.else
         lm      R0, (CAMERA_X)
         with    R0
         add     R0
@@ -69,7 +160,12 @@ BrushRendererComposeReady:
         with    R0
         add     R0
         sm      (BRUSH_CAMERA_Q2_Z), R0
+.endif
+.if .defined(PLAYABLE_PACKET_VIEW_REUSE) && (BSP_RENDER_SCALE = 2) && !BSP_ALIAS_LIVE_POSES
+        jal     BrushReuseMixedBuild
+.else
         jal     BrushBuildMixedTokens
+.endif
         nop
         lm      R0, (BRUSH_OVERFLOW)
         moves   R0, R0
@@ -88,15 +184,64 @@ BrushRendererComposeReady:
         beq     BrushRenderFallbackWorld
         nop
 BrushRenderMixed:
+.if .defined(PLAYABLE_PACKET_VIEW_REUSE) && (BSP_RENDER_SCALE = 2)
+        jal     BuildPacketViewCacheIfNeeded
+.else
         jal     BuildPacketViewCache
+.endif
         nop
         bra     BrushRenderMixedFast
         nop
         ; Reserved address-layout window outside the executed path preserves
         ; every qualified technique-4 brush overlay address.
+.if .defined(PLAYABLE_PACKET_VIEW_REUSE) && (BSP_RENDER_SCALE = 2)
+BuildPacketViewCacheIfNeeded:
+        lm      R0, (GSU_PACKET_VIEW_CACHE_VALID_OFFSET)
+        moves   R0, R0
+        beq     @Build
+        nop
+        ret
+        nop
+@Build:
+        move    R0, #1
+        sm      (GSU_PACKET_VIEW_CACHE_VALID_OFFSET), R0
+        GSU_ABSOLUTE_GOTO BuildPacketViewCache
+.assert * - BuildPacketViewCacheIfNeeded <= $1C, error, "Packet view cache gate exceeds the retired brush window"
+        .res $1C - (* - BuildPacketViewCacheIfNeeded)
+.elseif .defined(PLAYABLE_MAP_ID) && BSP_QUAKEC_GAMEPLAY && (BSP_RENDER_SCALE = 3)
+; Source tiles occupy the first eleven columns of each 16-tile planar row.
+; PLOT keeps unwritten pixels, including holes between clipped polygon spans.
+ClearFreshX3Rows:
+        iwt     R13, #ClearFreshX3Word
+ClearFreshX3Row:
+        iwt     R12, #((BSP_VIEW_WIDTH+7)/8)*32
+ClearFreshX3Word:
+        movew   (R10), R0
+        inc     R10
+        loop
+        inc     R10
+        with    R10
+        add     R8
+        dec     R7
+        bne     ClearFreshX3Row
+        nop
+        move    R0, #1
+        ramb
+        jmp     R9
+        nop
+.assert * - ClearFreshX3Rows <= $1C, error, "X3 background pass exceeds the retired packet-cache window"
+        .res $1C - (* - ClearFreshX3Rows)
+.elseif BSP_QUAKEC_GAMEPLAY
+        .res    $1C
+.else
         .res    $10
+.endif
 BrushRenderMixedFast:
+.if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2)
+        jal     BrushRenderResidentWorld
+.else
         jal     BrushRenderMixedTokens
+.endif
         nop
         bra     BrushRenderComplete
         nop

@@ -31,9 +31,9 @@ struct QuakeMixChannel
 class QuakeSoundMixer
 {
   public:
-    explicit QuakeSoundMixer(const QuakeSoundAssets& assets)
+    explicit QuakeSoundMixer(const QuakeSoundAssets& assets, bool live = false)
     :
-    assets_(assets)
+    assets_(assets), live_(live)
     {
     }
 
@@ -48,6 +48,16 @@ class QuakeSoundMixer
     void set_mixing(bool value)
     {
         mixing_ = value;
+    }
+
+    void play_live(QuakeSoundEvent event)
+    {
+        apply_event(event);
+    }
+
+    void reset_live()
+    {
+        dynamic_ = {};
     }
 
     void seek(double seconds)
@@ -83,7 +93,7 @@ class QuakeSoundMixer
         }
         for (std::size_t frame = 0; frame < stereo.size() / 2U; ++frame)
         {
-            if (timeline_seconds_ >= assets_.replay.duration_seconds())
+            if (!live_ && timeline_seconds_ >= assets_.replay.duration_seconds())
             {
                 seek(0.0);
                 ++mixed_loop_count_;
@@ -107,6 +117,8 @@ class QuakeSoundMixer
             stereo[frame * 2U + 1U] = std::clamp(right * volume_, -1.0F, 1.0F);
             timeline_seconds_ += 1.0 / kAudioOutputRate;
             ++mixed_frames_;
+            if (live_ && (stereo[frame * 2U] != 0.0F || stereo[frame * 2U + 1U] != 0.0F))
+                ++nonzero_frames_;
         }
     }
 
@@ -117,6 +129,10 @@ class QuakeSoundMixer
     std::uint64_t mixed_frames() const
     {
         return mixed_frames_;
+    }
+    std::uint64_t nonzero_frames() const
+    {
+        return nonzero_frames_;
     }
     std::uint64_t processed_events() const
     {
@@ -153,6 +169,7 @@ class QuakeSoundMixer
 
   private:
     const QuakeSoundAssets& assets_;
+    bool live_{};
     ViewTransform listener_{};
     std::array<QuakeMixChannel, kDynamicSoundChannels> dynamic_{};
     std::vector<QuakeMixChannel> statics_;
@@ -160,7 +177,7 @@ class QuakeSoundMixer
     double timeline_seconds_{};
     float volume_{0.7F};
     bool mixing_{};
-    std::uint64_t mixed_frames_{};
+    std::uint64_t mixed_frames_{}, nonzero_frames_{};
     std::uint64_t processed_events_{};
     std::uint64_t seek_count_{};
     std::uint64_t mixed_loop_count_{};
@@ -646,10 +663,20 @@ class QuakeAudioSession::Impl
     mixer_(assets != nullptr ? std::make_unique<QuakeSoundMixer>(*assets) : nullptr)
     {
         if (assets_ == nullptr)
-        {
             reason_ = "no sound replay configured";
-            return;
-        }
+        else
+            open_device();
+    }
+
+    explicit Impl(std::span<const std::uint8_t> pak)
+    : live_pak_(pak), assets_(&live_assets_), mixer_(std::make_unique<QuakeSoundMixer>(live_assets_, true))
+    {
+        live_assets_.replay.view_entity = 512;
+        open_device();
+    }
+
+    void open_device()
+    {
         if (!SDL_InitSubSystem(SDL_INIT_AUDIO))
         {
             reason_ = std::string("SDL audio unavailable: ") + SDL_GetError();
@@ -670,6 +697,52 @@ class QuakeAudioSession::Impl
     ~Impl()
     {
         shutdown();
+    }
+
+    void play_live(std::string_view sound, std::uint16_t entity, std::uint8_t channel,
+                   std::uint8_t volume, std::uint8_t attenuation, Vec3 origin)
+    {
+        if (!stream_ || live_pak_.empty() || sound.empty() || sound == "misc/null.wav")
+            return;
+        auto slot = live_slots_.find(sound);
+        std::optional<QuakeWave> wave;
+        if (slot == live_slots_.end())
+        {
+            const auto entry = "sound/" + std::string(sound);
+            try
+            {
+                wave = parse_quake_wave(extract_pak_entry(live_pak_, entry), entry);
+            }
+            catch (const std::exception& error)
+            {
+                live_slots_.emplace(sound, kNoSoundSlot);
+                device_error_ = error.what();
+                return;
+            }
+        }
+        else if (slot->second == kNoSoundSlot)
+            return;
+        if (!SDL_LockAudioStream(stream_))
+            return;
+        if (wave)
+        {
+            const auto index = static_cast<std::uint16_t>(live_assets_.waves.size());
+            slot = live_slots_.emplace(sound, index).first;
+            live_assets_.waves.push_back(std::move(*wave));
+        }
+        mixer_->play_live({0, kSoundEventStart, slot->second, entity, channel, volume, attenuation, origin, 0});
+        SDL_UnlockAudioStream(stream_);
+        last_live_sound_ = sound;
+    }
+
+    void reset_live()
+    {
+        if (!stream_ || live_pak_.empty() || !SDL_LockAudioStream(stream_))
+            return;
+        mixer_->reset_live();
+        SDL_ClearAudioStream(stream_);
+        SDL_UnlockAudioStream(stream_);
+        last_live_sound_.clear();
     }
 
     void synchronize(
@@ -695,7 +768,7 @@ class QuakeAudioSession::Impl
             const bool discontinuity =
                 loop != transport_loop_ || std::abs(mixer_->timeline_seconds() - seconds) > 0.20 ||
                 (should_mix && !effective_);
-            if (discontinuity)
+            if (live_pak_.empty() && discontinuity)
             {
                 mixer_->seek(seconds);
             }
@@ -766,6 +839,11 @@ class QuakeAudioSession::Impl
         {
             result["timelineSeconds"] = mixer_->timeline_seconds();
             result["mixedFrames"] = mixer_->mixed_frames();
+            if (!live_pak_.empty())
+            {
+                result["nonzeroFrames"] = mixer_->nonzero_frames();
+                result["lastSound"] = last_live_sound_;
+            }
             result["processedEvents"] = mixer_->processed_events();
             result["activeDynamicChannels"] = mixer_->active_dynamic();
             result["activeStaticChannels"] = mixer_->active_static();
@@ -782,6 +860,10 @@ class QuakeAudioSession::Impl
     }
 
   private:
+    QuakeSoundAssets live_assets_;
+    std::span<const std::uint8_t> live_pak_;
+    std::map<std::string, std::uint16_t, std::less<>> live_slots_;
+    std::string last_live_sound_;
     const QuakeSoundAssets* assets_{};
     std::unique_ptr<QuakeSoundMixer> mixer_;
     SDL_AudioStream* stream_{};
@@ -846,7 +928,24 @@ impl_(std::make_unique<Impl>(assets))
 {
 }
 
+QuakeAudioSession::QuakeAudioSession(std::span<const std::uint8_t> gameplay_pak)
+:
+impl_(std::make_unique<Impl>(gameplay_pak))
+{
+}
+
 QuakeAudioSession::~QuakeAudioSession() = default;
+
+void QuakeAudioSession::play_live(std::string_view sound, std::uint16_t entity, std::uint8_t channel,
+                                  std::uint8_t volume, std::uint8_t attenuation, Vec3 origin)
+{
+    impl_->play_live(sound, entity, channel, volume, attenuation, origin);
+}
+
+void QuakeAudioSession::reset_live()
+{
+    impl_->reset_live();
+}
 
 void QuakeAudioSession::synchronize(
     double seconds,

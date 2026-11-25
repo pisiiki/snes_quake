@@ -1,0 +1,113 @@
+; Standalone technique 7 retains exact lightmap decoding without fetching a
+; texel from a row whose 256 colormap entries are identical. Append these
+; routes so the shared cache kernels and technique-4 overlays stay pinned.
+.segment "GSUCODE"
+
+TextureSelectStandaloneSampleRoutine:
+        ; Preserve the incoming R0 wrap flags for the ordinary selector.
+        lm      R1, (TEXTURE_RENDER_MODE)
+        dec     R1
+        bne     @Textured
+        nop
+        lm      R1, (TEXTURE_COMPOSED_ALLOWED)
+        moves   R1, R1
+        beq     @Untextured
+        nop
+@Textured:
+        ; Tail-call with the original flags and face-walker's R11 return.
+        GSU_ABSOLUTE_GOTO TextureSelectSampleRoutine
+@Untextured:
+        ; Singleton spans bypass the block table and enter the generic pixel
+        ; loop directly. Its indirect sampler must have a valid return too.
+        iwt     R1, #TextureUntexturedSampleZero
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        iwt     R1, #TextureUntexturedLightmapBlock
+        sm      (TEXTURE_STEP_S), R1
+        iwt     R1, #TextureUntexturedLightmapBilinearBlock
+        sm      (TEXTURE_STEP_T), R1
+        iwt     R1, #TextureUntexturedLightmapConstantBlock
+        sm      (TEXTURE_REM_S), R1
+        iwt     R1, #TextureUntexturedLightmapVerticalBlock
+        sm      (TEXTURE_REM_T), R1
+        iwt     R1, #TextureUntexturedLightmapHorizontalBlock
+        sm      (TEXTURE_ERR_S), R1
+        iwt     R1, #TextureUntexturedLightmapInteriorBlock
+        sm      (TEXTURE_ERR_T), R1
+        ret
+        nop
+
+TextureUntexturedLightmapBlock:
+        ; Slot zero proves checked mode for the complete prepared block. The
+        ; face's bank cannot change within it, so test missing data once.
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bmi     TextureUntexturedLightmapMissingBlock
+        nop
+        iwt     R7, #TextureUntexturedLightmapSampleReady
+        move    R12, #0
+        iwt     R13, #TextureUntexturedLightmapSpanLoop
+TextureUntexturedLightmapSpanLoop:
+        move    R8, R5
+        move    R9, R6
+        ; The shared checked decoder preserves R7 as its pixel return. No
+        ; per-pixel mode/bank dispatch or JAL/trampoline is required here.
+        GSU_ABSOLUTE_GOTO LightmapSampleGenericClamped
+
+TextureUntexturedLightmapMissingBlock:
+        ; Missing lightmaps publish one encoded level for the entire face.
+        ; Like the existing sky path, retain COLOR through the block's PLOTs.
+        iwt     R13, #TextureLightmapSkyRepeatPixel
+        lm      R4, (LIGHTMAP_ROM_ADDRESS)
+        GSU_ABSOLUTE_GOTO TextureUntexturedLightmapSampleReady
+
+; Each block keeps its fixed decoder and zero texel index live across pixels.
+; Enter the established cached arithmetic directly instead of paying the
+; generic lightmap mode dispatch again for every prepared sample.
+TextureUntexturedLightmapBilinearBlock:
+        ; Projective endpoints can replace CBR; restore the shared sampler
+        ; window once per block, before publishing its pixel continuation.
+        jal     TexturePrimeLightmapCache
+        nop
+        iwt     R7, #TextureUntexturedLightmapSampleReady
+        move    R12, #0
+        iwt     R13, #TextureUntexturedLightmapBilinearSpanLoop
+TextureUntexturedLightmapBilinearSpanLoop:
+        move    R3, R5
+        move    R9, R6
+        iwt     R1, #$00F0
+        GSU_ABSOLUTE_GOTO LightmapSampleBlockBilinearCached
+
+TextureUntexturedLightmapConstantBlock:
+        move    R12, #0
+        iwt     R13, #TextureLightmapSkyRepeatPixel
+TextureUntexturedLightmapConstantSpanLoop:
+        lm      R4, (LIGHTMAP_BLOCK_LR)
+        GSU_ABSOLUTE_GOTO TextureUntexturedLightmapSampleReady
+
+TextureUntexturedLightmapVerticalBlock:
+        iwt     R7, #TextureUntexturedLightmapSampleReady
+        move    R12, #0
+        iwt     R13, #TextureUntexturedLightmapVerticalSpanLoop
+TextureUntexturedLightmapVerticalSpanLoop:
+        move    R5, R6
+        lm      R6, (LIGHTMAP_BLOCK_LL)
+        GSU_ABSOLUTE_GOTO TextureLightmapOneAxisSample
+
+TextureUntexturedLightmapHorizontalBlock:
+        iwt     R7, #TextureUntexturedLightmapSampleReady
+        move    R12, #0
+        iwt     R13, #TextureUntexturedLightmapHorizontalSpanLoop
+TextureUntexturedLightmapHorizontalSpanLoop:
+        lm      R6, (LIGHTMAP_BLOCK_UR)
+        GSU_ABSOLUTE_GOTO TextureLightmapOneAxisSample
+
+; The interior block and its repeated continuation now share an entry in the
+; sampler's resident cache window. Keep the remaining late sampler pinned.
+  .repeat 16
+        nop
+  .endrepeat
+
+TextureUntexturedSampleZero:
+        move    R0, #0
+        ret
+        nop

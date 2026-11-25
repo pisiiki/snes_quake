@@ -10,6 +10,26 @@ inline constexpr int kQuakeTurbulenceTextureSize = 64;
 
 struct PackedTextureRaster;
 
+inline thread_local std::optional<std::uint8_t> active_turbulence_phase;
+class QuakeTurbulencePhaseScope
+{
+  public:
+    explicit QuakeTurbulencePhaseScope(std::uint8_t phase)
+    :
+    previous_(active_turbulence_phase)
+    {
+        active_turbulence_phase = phase & 127U;
+    }
+    ~QuakeTurbulencePhaseScope()
+    {
+        active_turbulence_phase = previous_;
+    }
+    QuakeTurbulencePhaseScope(const QuakeTurbulencePhaseScope&) = delete;
+    QuakeTurbulencePhaseScope& operator=(const QuakeTurbulencePhaseScope&) = delete;
+
+  private:
+    std::optional<std::uint8_t> previous_;
+};
 std::uint8_t quake_turbulence_phase(double surface_time);
 
 const std::array<std::uint8_t, kQuakeTurbulenceCycle>& source_quake_turbulence_table();

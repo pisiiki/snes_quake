@@ -25,7 +25,7 @@ from snes_tooling.quake.quake_alias_billboards import build_alias_assets  # noqa
 from snes_tooling.quake.quake_rom_config import DEFAULT_CONFIG  # noqa: E402
 
 
-DEFAULT_OUTPUT = Workspace.discover().root / "src/snes_quake/Data"
+DEFAULT_OUTPUT = Workspace.discover().quake_example / "Data"
 METADATA_NAME = Path("QuakeBSPAliasAssets.json")
 INCLUDE_NAME = Path("QuakeBSPAliasAssets.i")
 ASSEMBLY_NAME = Path("QuakeBSPAliasAssets.s")
@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         f"({metadata['timeline']['rowCount']} demo + "
         f"{metadata['timeline']['flyRowCount']} fly), "
         f"{mdl_count} MDLs + {effect_count} IDSP effects / "
+        f"{metadata['rasterDensity']['mdlMasters']['masterCount']} retained quarter-unit masters and conversions / "
         f"{metadata['residency']['generatedVariantCount']} projected -> "
         f"{metadata['coverage']['variantCount']} cartridge frame-view sprites, "
         f"{metadata['staticStateCount']} static states in "

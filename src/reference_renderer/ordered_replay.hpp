@@ -7,10 +7,14 @@
 #include "audio.hpp"
 #include "external_models.hpp"
 #include "aliases.hpp"
+#include "source_fly_aliases.hpp"
 #include "packed_brushes.hpp"
 #include "particles.hpp"
 
 namespace quake_bsp_reference {
+
+class X2WeaponAssets;
+struct FullPrecisionReplay;
 
 inline constexpr std::size_t kOrderedReplayHeaderBytes = 40;
 inline constexpr std::size_t kOrderedReplayFrameBytes = 14;
@@ -121,7 +125,11 @@ int run_realtime_demo(
     float sound_volume,
     const ParticleReplay* particles = nullptr,
     bool particles_enabled = false,
-    bool inspect_external_visibility = false
+    bool inspect_external_visibility = false,
+    const BrushReplay* fly_brush_replay = nullptr,
+    const SourceFlyAliases* fly_aliases = nullptr,
+    const X2WeaponAssets* x2_weapon = nullptr,
+    const FullPrecisionReplay* full_precision = nullptr
 );
 
 } // namespace quake_bsp_reference

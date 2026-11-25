@@ -162,6 +162,30 @@ std::uint8_t quake_sky_sample(const QuakeSkyTile& tile, std::int32_t s, std::int
     return tile.indices.at(offset);
 }
 
+namespace {
+std::array<std::int32_t, 2> snes_x3_sky_endpoint(const ViewTransform& view, int x, int y, std::uint32_t phase_q16)
+{
+    // The packed Q6 basis is exact after multiplying by 4096. X3 advances
+    // the sky ray three units per pixel and uses twice the source focal length.
+    const auto ray = (view.forward * (2.0 * render_focal_length()) + view.screen_right * (3.0 * (x - render_center_x())) +
+                      view.up * (3.0 * (render_center_y() - y))) * 4096.0;
+    const auto sx = static_cast<std::int64_t>(ray.x);
+    const auto sy = static_cast<std::int64_t>(ray.y);
+    const auto sz = static_cast<std::int64_t>(3.0 * ray.z);
+    const auto square = sx * sx + sy * sy + sz * sz;
+    auto root = static_cast<std::int64_t>(std::sqrt(static_cast<double>(square)));
+    // The integer sky rounds up at three quarters of the interval between squares.
+    if (square - root * root >= root + (root + 1) / 2 + 1)
+        ++root;
+    if (root == 0)
+        fail("SNES X3 sky view direction cannot be normalized");
+    constexpr auto scale_q16 = std::int64_t(kQuakeSkyProjectionScale) * 65536;
+    const auto phase = static_cast<std::int64_t>(phase_q16);
+    return {static_cast<std::int32_t>(phase + scale_q16 * sx / root),
+            static_cast<std::int32_t>(phase + scale_q16 * sy / root)};
+}
+} // namespace
+
 void draw_quake_sky_span(
     std::vector<std::uint8_t>& indices,
     const QuakeSkyTile& tile,
@@ -169,7 +193,8 @@ void draw_quake_sky_span(
     const QuakeSkyClock& clock,
     int y,
     int first_x,
-    int last_x
+    int last_x,
+    std::optional<std::uint32_t> snes_x3_phase_q16
 )
 {
     if (indices.size() != kLogicalPixels || y < 0 || y >= render_height() || first_x < 0 || last_x >= render_width() ||
@@ -180,7 +205,11 @@ void draw_quake_sky_span(
     int u = first_x;
     int output_x = first_x;
     int remaining = last_x - first_x + 1;
-    auto current = quake_sky_uv_to_st(view, u, y, clock);
+    const auto endpoint = [&](int x) {
+        return snes_x3_phase_q16 ? snes_x3_sky_endpoint(view, x, y, *snes_x3_phase_q16) :
+                                  quake_sky_uv_to_st(view, x, y, clock);
+    };
+    auto current = endpoint(u);
     while (remaining > 0)
     {
         const int count = std::min(kQuakeSkySpanMaximum, remaining);
@@ -191,14 +220,14 @@ void draw_quake_sky_span(
         if (remaining > 0)
         {
             u += count;
-            next = quake_sky_uv_to_st(view, u, y, clock);
+            next = endpoint(u);
             s_step = quake_sky_arithmetic_shift5(next[0] - current[0]);
             t_step = quake_sky_arithmetic_shift5(next[1] - current[1]);
         }
         else if (count > 1)
         {
             u += count - 1;
-            next = quake_sky_uv_to_st(view, u, y, clock);
+            next = endpoint(u);
             s_step = (next[0] - current[0]) / (count - 1);
             t_step = (next[1] - current[1]) / (count - 1);
         }
@@ -222,14 +251,20 @@ QuakeSkyPresentation render_quake_sky_presentation(
     const SourceWorld& world,
     const ViewTransform& view,
     double surface_time,
-    std::string_view time_source
+    std::string_view time_source,
+    std::optional<std::uint32_t> snes_x3_phase_q16
 )
 {
     if (base_indices.size() != kLogicalPixels || faces.size() != kLogicalPixels || entities.size() != kLogicalPixels)
     {
         fail("Quake sky presentation requires complete color/owner planes");
     }
-    const auto clock = quake_sky_clock(surface_time);
+    auto clock = quake_sky_clock(surface_time);
+    if (snes_x3_phase_q16)
+    {
+        clock.projected_phase = static_cast<float>(*snes_x3_phase_q16) / 65536.0F;
+        clock.composite_shift = static_cast<int>(*snes_x3_phase_q16 >> 16U) & (kQuakeSkySize - 1);
+    }
     QuakeSkyPresentation result;
     result.indices.assign(base_indices.begin(), base_indices.end());
     std::map<const MipTexture*, QuakeSkyTile> tiles;
@@ -265,7 +300,7 @@ QuakeSkyPresentation render_quake_sky_presentation(
             {
                 position->second = make_quake_sky_tile(*texture, clock);
             }
-            draw_quake_sky_span(result.indices, position->second, view, clock, y, first_x, x - 1);
+            draw_quake_sky_span(result.indices, position->second, view, clock, y, first_x, x - 1, snes_x3_phase_q16);
             for (int changed_x = first_x; changed_x < x; ++changed_x)
             {
                 const auto changed_pixel = logical_pixel_index(changed_x, y);
@@ -285,7 +320,7 @@ QuakeSkyPresentation render_quake_sky_presentation(
     result.inspection = Json{
         {"schema", "quake-reference-surface-inspection-v1"},
         {"available", true},
-        {"contract", "winquake-software-sky-v1"},
+        {"contract", snes_x3_phase_q16 ? "snes-x3-integer-sky-v1" : "winquake-software-sky-v1"},
         {"sourceCommit", "bf4ac424ce754894ac8f1dae6a3981954bc9852d"},
         {"timeSource", time_source},
         {"surfaceTime", surface_time},

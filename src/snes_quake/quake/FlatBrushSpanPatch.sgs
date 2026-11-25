@@ -1,0 +1,12 @@
+        .export FlatBrushAnchorPatch, FlatBrushComposePatch, FlatBrushAdvancePatch, FlatBrushPatchEnd
+FlatBrushAnchorPatch:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPixel
+FlatBrushComposePatch:
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        lm      R0, (TEXTURE_BAKED_COLOR)
+        color
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPlot
+FlatBrushAdvancePatch:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanPixel
+FlatBrushPatchEnd:

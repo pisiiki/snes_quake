@@ -1,4 +1,4 @@
-#include "presentation_warp.hpp"
+#include "presentation.hpp"
 #include "application.hpp"
 #include "world.hpp"
 #include "geometry.hpp"
@@ -15,6 +15,10 @@
 #include "tests_reports.hpp"
 #include "report.hpp"
 #include "turbulence.hpp"
+#include "source_fly_scene.hpp"
+#include "gameplay_application.hpp"
+#include "source_fly_aliases.hpp"
+#include "x2_weapon.hpp"
 
 namespace quake_bsp_reference {
 
@@ -73,7 +77,9 @@ class ReferenceRendererApplication
     struct SourceReplayContext
     {
         BrushReplay brush_replay;
+        std::optional<BrushReplay> fly_brush_replay;
         AliasAssets alias_assets;
+        std::optional<SourceFlyAliases> fly_aliases;
         BrushScene brush_scene;
         std::optional<ExternalBspReplay> external_bsp_replay;
         std::optional<ExternalBspScene> external_bsp_scene;
@@ -94,7 +100,25 @@ class ReferenceRendererApplication
         {
             fail("camera, brush, and alias replay row counts disagree");
         }
-        auto brush_scene = build_brush_scene(bsp_, brush_replay);
+        std::optional<BrushReplay> fly_brush_replay;
+        const auto compact_path = options_.alias_assets / "QuakeBSPBrushCompactReplay.bin";
+        if (!options_.ordered_3hz && options_.demo_pose < 0 && fs::exists(compact_path))
+            fly_brush_replay.emplace(complete_source_fly_brush_replay(
+                brush_replay,
+                load_packed_brush_assets(options_.alias_assets),
+                read_file(compact_path)
+            ));
+        std::optional<SourceFlyAliases> fly_aliases;
+        if (!options_.ordered_3hz && options_.demo_pose < 0 && !options_.fly_alias_replay.empty())
+            fly_aliases.emplace(load_source_fly_aliases(
+                options_.fly_alias_replay,
+                pak_bytes_,
+                options_.realtime_demo_track,
+                brush_replay,
+                alias_assets,
+                options_.map_entry
+            ));
+        auto brush_scene = build_brush_scene(bsp_, fly_brush_replay ? *fly_brush_replay : brush_replay);
         std::optional<ExternalBspReplay> external_bsp_replay;
         std::optional<ExternalBspScene> external_bsp_scene;
         if (!options_.external_bsp_replay.empty())
@@ -135,7 +159,9 @@ class ReferenceRendererApplication
             ));
         return {
             std::move(brush_replay),
+            std::move(fly_brush_replay),
             std::move(alias_assets),
+            std::move(fly_aliases),
             std::move(brush_scene),
             std::move(external_bsp_replay),
             std::move(external_bsp_scene),
@@ -240,7 +266,7 @@ class ReferenceRendererApplication
 
     void write_demo_sky(const SourceReplayContext& replay, DemoPoseState& state) const
     {
-        if (options_.quake_sky_indices.empty())
+        if (options_.quake_sky_indices.empty() && options_.x2_weapon_output.empty())
         {
             return;
         }
@@ -280,6 +306,11 @@ class ReferenceRendererApplication
             &surface_inspection,
             replay.particles && options.particles ? &*replay.particles : nullptr
         );
+        write_x2_weapon(presented, selected->source_pose);
+        if (options.quake_sky_indices.empty())
+        {
+            return;
+        }
         surface_inspection["timeSource"] = options.surface_time_override ? "command-line-override" : "demo-server-time";
         surface_inspection["canonicalSurfaceTime"] = canonical_surface_time;
         surface_inspection["surfaceTimeOverride"] = options.surface_time_override;
@@ -804,6 +835,19 @@ class ReferenceRendererApplication
         const auto initial_mode = replay.initial_mode;
         const bool brushes_enabled = replay.brushes_enabled;
         const bool entities_enabled = replay.entities_enabled;
+        std::optional<X2WeaponAssets> x2_weapon;
+        if (!options.x2_weapon_assets.empty())
+        {
+            x2_weapon.emplace(options.x2_weapon_assets);
+        }
+        std::optional<FullPrecisionReplay> full_precision;
+        if (!options.full_precision_replay.empty())
+        {
+            full_precision.emplace(
+                load_full_precision_replay(options.full_precision_replay, options.realtime_demo_track, brush_replay)
+            );
+            bind_full_precision_aliases(*full_precision, world, alias_assets);
+        }
         return run_realtime_demo(
             world,
             bvh,
@@ -831,7 +875,11 @@ class ReferenceRendererApplication
             options.volume,
             replay.particles ? &*replay.particles : nullptr,
             options.particles,
-            options.inspect_packed_external_visibility
+            options.inspect_packed_external_visibility,
+            replay.fly_brush_replay ? &*replay.fly_brush_replay : nullptr,
+            replay.fly_aliases ? &*replay.fly_aliases : nullptr,
+            x2_weapon ? &*x2_weapon : nullptr,
+            full_precision ? &*full_precision : nullptr
         );
     }
 
@@ -1041,13 +1089,15 @@ class ReferenceRendererApplication
 
     [[nodiscard]] bool needs_static_projective_raster() const
     {
-        return !options_.report_only || !options_.packed_albedo_indices.empty() ||
+        return options_.raw_owner_planes || !options_.report_only || !options_.packed_albedo_indices.empty() ||
                !options_.packed_lightmap_indices.empty() || !options_.packed_lightmap_levels.empty() ||
                !options_.packed_render_indices.empty() || !options_.fly_alias_render_indices.empty();
     }
 
     void render_static_packed_textures(StaticRenderState& state) const
     {
+        const auto authored_visibility = options_.fly_alias_render_indices.empty() ? std::vector<std::uint8_t>{} :
+            authored_world_visibility(bsp_bytes_, bsp_, packed_view_transform(world_, options_.camera).origin);
         const auto render_selected_texture = [&](TextureRasterMode raster_mode) {
             if (!options_.fly_alias_render_indices.empty())
             {
@@ -1070,9 +1120,12 @@ class ReferenceRendererApplication
                     std::move(brush_assets),
                     raster_mode,
                     options_.surface_time,
-                    true,
+                    !options_.no_entities,
                     source_pose,
-                    !options_.no_brushes
+                    !options_.no_brushes,
+                    std::nullopt,
+                    {},
+                    authored_visibility
                 );
             }
             return render_packed_texture_pipeline(
@@ -1134,6 +1187,27 @@ class ReferenceRendererApplication
         write_file(options_.packed_render_indices, selected_render_indices(selected_frame, mode));
     }
 
+    void write_x2_weapon(std::span<const std::uint8_t> world, std::size_t source_pose = 0) const
+    {
+        if (options_.x2_weapon_output.empty())
+        {
+            return;
+        }
+        const X2WeaponAssets weapon(options_.x2_weapon_assets);
+        if (options_.x2_weapon_source_pose >= 0)
+        {
+            source_pose = static_cast<std::size_t>(options_.x2_weapon_source_pose);
+        }
+        const auto frame =
+            options_.x2_weapon_frame >= 0
+                ? static_cast<std::size_t>(options_.x2_weapon_frame)
+                : weapon.frame_for_pose(source_pose);
+        std::vector<std::uint8_t> composed(world.begin(), world.end());
+        const int bob = options_.x2_weapon_frame < 0 ? weapon.bob_for_pose(source_pose) : 0;
+        weapon.composite(composed, frame, bob);
+        write_file(options_.x2_weapon_output, composed);
+    }
+
     void write_static_fly_sky(
         const StaticRenderState& state,
         const PackedTextureRaster& selected_frame,
@@ -1145,6 +1219,7 @@ class ReferenceRendererApplication
     {
         if (options_.quake_sky_indices.empty())
         {
+            write_x2_weapon(composed);
             return;
         }
         auto sky = render_quake_sky_presentation(
@@ -1194,6 +1269,7 @@ class ReferenceRendererApplication
             {"logicalHeight", kLogicalHeight}
         };
         write_quake_sky_artifacts(options_.quake_sky_indices, presented, sky.inspection);
+        write_x2_weapon(presented);
         std::cout << "fly-sky=PASS contract=winquake-software-sky-v1"
                   << " surfaceTime=" << options_.surface_time << " output=" << options_.quake_sky_indices << '\n';
     }
@@ -1228,6 +1304,87 @@ class ReferenceRendererApplication
         );
         write_file(options_.fly_alias_render_indices, composed);
         write_static_fly_sky(state, selected_frame, opaque, alias_assets, composed, mode);
+    }
+
+    void write_static_raw_owner_planes(const StaticRenderState& state) const
+    {
+        if (!options_.raw_owner_planes)
+            return;
+        const auto write = [&](std::string_view suffix, std::span<const std::uint16_t> faces) {
+            write_raw_owner_planes(with_suffix(options_.output_prefix, suffix), faces);
+        };
+        write(".source", state.frame.faces);
+        write(".quantized", required(state.quantized_frame).faces);
+        write(".packet-nearest", required(state.packet_nearest_frame).faces);
+        write(".packet-painter", required(state.packet_painter_frame).faces);
+        write(".current-pipeline", required(state.raster_layers).current_pipeline.frame.faces);
+        const auto& packed = selected_static_packed_frame(state);
+        write_raw_owner_planes(
+            with_suffix(options_.output_prefix, ".packed-projective"),
+            packed.faces,
+            packed.entities,
+            packed.models
+        );
+    }
+
+    void write_static_projection_ray_owner_planes(const StaticRenderState& state) const
+    {
+        if (!options_.projection_ray_owner_planes)
+            return;
+        const auto started = std::chrono::steady_clock::now();
+        const auto view = packed_view_transform(world_, options_.camera);
+        const auto vector_json = [](const Vec3& v) { return Json::array({v.x, v.y, v.z}); };
+        Json contract{
+            {"schema", "quake-projection-ray-owners-v1"},
+            {"integerRasterAuthority", false},
+            {"geometry", "actual source or packed-Q2 fan triangles; world only; no brush/alias entities"},
+            {"facing", "per triangle: cross(b-a,c-a) dot (camera-a) < -1e-9; no stored plane cull"},
+            {"admission", "all triangles or explicit packet-face filter; no BSP/PVS admission"},
+            {"intersection", "existing BVH Moller-Trumbore; epsilon 1e-9; nearest depth, face-id tie 1e-7"},
+            {"nominalTransposed", "legacy view_ray: forward + screen_right*right + up*up"},
+            {"inverseProjection",
+             "exact inverse of continuous packed_view_transform matrix; no integer product/clip rounding"},
+            {"encoding", "u16 little endian face IDs; miss 65535; inactive viewport cells are misses"},
+            {"viewport",
+             {{"width", render_width()},
+              {"height", render_height()},
+              {"rowStride", kLogicalWidth},
+              {"centerX", render_center_x()},
+              {"centerY", render_center_y()},
+              {"focalLength", render_focal_length()}}},
+            {"camera",
+             {options_.camera.x, options_.camera.y, options_.camera.z, options_.camera.yaw, options_.camera.pitch}},
+            {"view",
+             {{"origin", vector_json(view.origin)},
+              {"forward", vector_json(view.forward)},
+              {"screenRight", vector_json(view.screen_right)},
+              {"up", vector_json(view.up)}}},
+            {"planes", Json::array()},
+        };
+        const auto write =
+            [&](std::string_view name, const SourceWorld& world, std::span<const std::uint8_t> allowed_faces) {
+                const auto planes = projection_ray_owner_planes(world, view, allowed_faces);
+                const auto prefix = with_suffix(options_.output_prefix, name);
+                const auto nominal = with_suffix(prefix, ".ray-nominal-transposed");
+                const auto inverse = with_suffix(prefix, ".ray-inverse-projection");
+                write_raw_owner_planes(nominal, planes.nominal_transposed);
+                write_raw_owner_planes(inverse, planes.inverse_projection);
+                contract["planes"].push_back(
+                    {{"geometry", name},
+                     {"nominalTransposed", with_suffix(nominal, ".faces").string()},
+                     {"inverseProjection", with_suffix(inverse, ".faces").string()}}
+                );
+            };
+        write(".source", world_, {});
+        write(".packed-all", required(state.quantized_world), {});
+        write(".packed-selected", required(state.quantized_world), required(state.packet_selection).selected_faces);
+        contract["elapsedSeconds"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        std::ofstream output(with_suffix(options_.output_prefix, ".projection-ray-owners.json"));
+        if (!output)
+            fail("could not create projection-ray owner contract");
+        output << contract.dump(2) << '\n';
+        if (!output)
+            fail("could not write projection-ray owner contract");
     }
 
     void write_static_raster_diagnostics(const StaticRenderState& state) const
@@ -1291,6 +1448,8 @@ class ReferenceRendererApplication
         render_static_packed_textures(state);
         write_static_packed_planes(state, mode);
         render_static_fly_alias(state, mode);
+        write_static_raw_owner_planes(state);
+        write_static_projection_ray_owner_planes(state);
         write_static_raster_diagnostics(state);
     }
 
@@ -1577,12 +1736,26 @@ class ReferenceRendererApplication
 int run_application(int argc, char** argv)
 {
     const auto options = parse_options(argc, argv);
+    if (options.gameplay || !options.gameplay_assets.empty() || !options.gameplay_script.empty() ||
+        !options.gameplay_tape_dir.empty() || !options.gameplay_record_dir.empty())
+        return run_gameplay_application(
+            {options.pak,
+             options.gameplay_assets,
+             options.gameplay_map,
+             options.gameplay_script,
+             options.gameplay_tape_dir,
+             options.gameplay_record_dir,
+             options.gameplay_report,
+             options.output_prefix,
+             {options.instrumentation_session, options.instrumentation_pipe},
+             options.gameplay_face_colors,
+             options.no_sound,
+             options.volume}
+        );
     const RenderViewportScope viewport(parse_render_scale(options.render_scale), options.diagnostic_source_focal);
-    active_warp_settings =
-        parse_warp_settings(options.warp_model, options.warp_depth, options.warp_bands, options.warp_profile);
     if (options.self_test)
     {
-        run_presentation_warp_tests();
+        run_presentation_tests();
         const bool passed = run_self_test();
         std::cout << "self-test=" << (passed ? "PASS" : "FAIL") << '\n';
         return passed ? 0 : 2;

@@ -1,0 +1,191 @@
+; Preserve the legacy arbitrary-width entry; its 263-byte RAM arena now owns
+; exact signed width-3..7 carries for the mandatory-sidecar X2 renderer.
+.ifdef PLAYABLE_SHORT_LIGHTMAP_CARRY
+        GSU_ABSOLUTE_GOTO TextureDivideUnsignedPlayableFallback
+        .res 5, $01
+.else
+        iwt     R4, #.loword(TextureDivideUnsignedColdROM)
+        move    R13, #BSP_GSU_ROM2_BANK
+        from    R4
+        ljmp    R13
+        nop
+.endif
+
+TextureLightmapShortCarrySetup:
+        lm      R12, (TEXTURE_SPAN_DEN)
+        from    R12
+        add     R12
+        iwt     R4, #TextureCoordinateFractionScale-2
+        with    R4
+        add     R0
+        move    R0, #0
+        ramb
+        movew   R6, (R4)
+        from    R12
+        add     R12
+        iwt     R4, #TextureShortAxisLeafTable-6
+        with    R4
+        add     R0
+        movew   R13, (R4)
+        move    R0, #1
+        ramb
+        lm      R1, (TEXTURE_SPAN_S)
+        from    R5
+        sub     R1
+        jal     TextureShortCarryAxis
+        move    R7, R2
+        move    R9, R3
+        move    R10, R4
+        lm      R0, (TEXTURE_BLOCK_END_T)
+        lm      R1, (TEXTURE_SPAN_T)
+        sub     R1
+        jal     TextureShortCarryAxis
+        move    R8, R2
+        move    R2, R4
+        move    R1, R10
+.ifdef QUAKE_MSU_WORLD_KEEP
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        moves   R0, R0
+        bpl     TextureShortCarryOrdinary
+        nop
+        iwt     R0, #TextureComposedSpanStart
+        sm      (TEXTURE_COORD_RETURN), R0
+        GSU_ABSOLUTE_GOTO TextureComposedCarryFinish
+.endif
+TextureShortCarryOrdinary:
+  .ifdef BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+    .if BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+        iwt     R0, #LightmapPrepareWorldClosedGrid
+    .else
+        iwt     R0, #LightmapPrepareBlock
+    .endif
+  .else
+        iwt     R0, #LightmapPrepareBlock
+  .endif
+        sm      (TEXTURE_COORD_RETURN), R0
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateOrdinaryFinish
+
+; Input R0=signed delta, R6=ceil(32768/d), R13=width leaf.
+; Output R2=signed step, R3=fraction, R4=bias. Preserve R6..R13 except R11.
+TextureShortCarryAxis:
+        moves   R1, R0
+        bpl     TextureShortCarryMagnitude
+        nop
+        with    R0
+        not
+        inc     R0
+TextureShortCarryMagnitude:
+        move    R5, R0
+        from    R0
+        lmult
+        moves   R5, R5
+        bpl     TextureShortCarryUnsignedReady
+        nop
+        ; Only abs(-32768) needs the unsigned high-word repair.
+        with    R0
+        add     R6
+TextureShortCarryUnsignedReady:
+        with    R4
+        add     R4
+        adc     R0
+        move    R2, R0
+        move    R0, R4
+        jmp     R13
+        nop
+
+TextureShortCarry3:
+        to      R3
+        from    R2
+        add     R2
+        to      R4
+        from    R3
+        add     R2
+        with    R5
+        sub     R4
+        move    R4, #2
+        GSU_ABSOLUTE_GOTO TextureShortCarryCorrect
+TextureShortCarry4:
+        move    R3, R0
+        GSU_ABSOLUTE_GOTO TextureShortCarrySign
+TextureShortCarry5:
+        to      R3
+        from    R2
+        add     R2
+        with    R3
+        add     R3
+        to      R4
+        from    R3
+        add     R2
+        with    R5
+        sub     R4
+        move    R4, #4
+        GSU_ABSOLUTE_GOTO TextureShortCarryCorrect
+TextureShortCarry6:
+        to      R4
+        from    R2
+        add     R2
+        to      R3
+        from    R4
+        add     R4
+        with    R4
+        add     R3
+        with    R3
+        add     R3
+        with    R5
+        sub     R4
+        move    R4, #8
+        GSU_ABSOLUTE_GOTO TextureShortCarryCorrect
+TextureShortCarry7:
+        to      R3
+        from    R2
+        add     R2
+        to      R4
+        from    R3
+        add     R3
+        with    R3
+        add     R4
+        to      R4
+        from    R3
+        add     R2
+        with    R3
+        add     R3
+        with    R5
+        sub     R4
+        move    R4, #12
+TextureShortCarryCorrect:
+        moves   R5, R5
+        bpl     TextureShortCarryFraction
+        nop
+        dec     R2
+        with    R3
+        sub     R4
+TextureShortCarryFraction:
+        with    R0
+        sub     R3
+        move    R3, R0
+TextureShortCarrySign:
+        move    R4, #0
+        moves   R1, R1
+        bpl     TextureShortCarryReturn
+        nop
+        with    R2
+        not
+        inc     R2
+        moves   R3, R3
+        beq     TextureShortCarryReturn
+        nop
+        dec     R2
+        with    R3
+        not
+        inc     R3
+        iwt     R4, #$FFFF
+TextureShortCarryReturn:
+        ret
+        nop
+        .align 2, $01
+TextureShortAxisLeafTable:
+.assert (.loword(TextureShortAxisLeafTable) & 1) = 0, lderror, "GSU leaf table must be word-aligned"
+        .word .loword(TextureShortCarry3), .loword(TextureShortCarry4), .loword(TextureShortCarry5)
+        .word .loword(TextureShortCarry6), .loword(TextureShortCarry7)
+.assert * - TextureDivideUnsigned <= 263, error, "Fused short carries exceed retired divider"
+        .res 263 - (* - TextureDivideUnsigned), $01

@@ -1,13 +1,13 @@
 ; S-CPU staging and phase-overlay lifetime for the Quake sky compositor.
 
-.assert ^__GSU_SKY_ROM_CODE_RUN__ = $82, lderror, "Sky compositor must remain in GSU ROM bank $02"
+.assert (^__GSU_SKY_ROM_CODE_RUN__ & $7F) = BSP_GSU_ROM2_BANK, lderror, "Sky compositor escaped its GSU ROM code bank"
 .assert BSP_SKY_PHASE_RECORD_BYTES = 3, error, "Sky phase staging requires packed LE24 records"
 .assert BSP_SKY_PHASE_POSE_COUNT = BSP_DEMO_PRECISE_TRACK_POSE_COUNT, error, "Sky phase count must match the precise demo track"
 .assert BSP_SKY_FLY_PHASE_Q16 = 0, error, "Fly sky initial phase must remain zero"
 .assert BSP_SKY_FLY_CLOCK_FRACTION_BITS = 8, error, "Fly sky residual must remain Q8"
-.assert BSP_SKY_PHASE_GSU_ROM_BANK = $03, error, "Sky phase debug identity moved from GSU ROM bank $03"
-.assert BSP_SKY_PHASE_GSU_ROM_ADDRESS >= $8000, error, "Sky phase table escaped GSU ROM bank $03"
-.assert BSP_SKY_PHASE_GSU_ROM_END_ADDRESS <= $10000, error, "Sky phase table crosses GSU ROM bank $03"
+.assert BSP_SKY_PHASE_GSU_ROM_BANK = BSP_SKY_PHASE_EXPECTED_ROM_BANK, error, "Sky phase debug identity disagrees with its assigned bank"
+.assert ((BSP_SKY_PHASE_GSU_ROM_BANK < $40) .and (BSP_SKY_PHASE_GSU_ROM_ADDRESS >= $8000)) .or ((BSP_SKY_PHASE_GSU_ROM_BANK >= $40) .and (BSP_SKY_PHASE_GSU_ROM_BANK < $70) .and (BSP_SKY_PHASE_GSU_ROM_ADDRESS >= 0)), error, "Sky phase table escaped GSU ROM"
+.assert BSP_SKY_PHASE_GSU_ROM_END_ADDRESS <= $10000, error, "Sky phase table crosses its GSU ROM bank"
 
 .segment "CODE"
 InitSkyClock:
@@ -15,6 +15,10 @@ InitSkyClock:
         stz     sky_phase_override_q16
         stz     sky_phase_override_q16+2
         stz     sky_phase_override_valid
+        stz     sky_phase_override_float32_valid
+        stz     sky_phase_override_float32
+        stz     sky_phase_override_float32+2
+        stz     fly_sky_phase_epoch
         stz     fly_sky_phase_q16
         stz     fly_sky_phase_q16+2
         stz     fly_sky_phase_fraction_q8
@@ -40,11 +44,22 @@ InitSkyClock:
 ; The generated Q8 residual schedule is within one part per million of the
 ; released eight-texel-per-second clock while remaining integer-exact.
 UpdateFlySkyClock:
-        RW_forced a16i16
+        RW_assume a16i16
+.ifndef PLAYABLE_MAP_ID
         lda     runtime_menu_open
         bne     @Return
-        lda     demo_mode
-        bne     @Return
+.endif
+.ifdef PLAYABLE_MAP_ID
+        lda     fly_sky_phase_fraction_q8
+        clc
+        adc     #BSP_SKY_FLY_CLOCK_FRACTION_STEP_Q8
+        cmp     #$0100
+        and     #$00FF
+        sta     fly_sky_phase_fraction_q8
+        ; The comparison's carry is the fractional phase rollover.
+        lda     fly_sky_phase_q16
+        adc     #BSP_SKY_FLY_CLOCK_PHASE_STEP_Q16
+.else
         lda     fly_sky_phase_fraction_q8
         clc
         adc     #BSP_SKY_FLY_CLOCK_FRACTION_STEP_Q8
@@ -60,67 +75,23 @@ UpdateFlySkyClock:
 @AddPhase:
         clc
         adc     fly_sky_phase_q16
+.endif
         sta     fly_sky_phase_q16
         lda     fly_sky_phase_q16+2
         adc     #0
+        bit     #$0080
+        beq     @EpochReady
+        pha
+        lda     fly_sky_phase_epoch
+        inc
+        and     #31
+        sta     fly_sky_phase_epoch
+        pla
+@EpochReady:
         and     #$007F
         sta     fly_sky_phase_q16+2
         inc     fly_sky_clock_revision
 @Return:
-        rts
-
-; Preserve the canonical phase of the last demo frame that will become
-; visible when the public runtime menu transitions to fly.  A ready frame is
-; newer than an active upload, and both are newer than presented state.
-SeedFlySkyClockFromDemo:
-        RW_assume a16i16
-        lda     frame_ready
-        beq     @NoReadyFrame
-        ldx     #0
-        lda     ready_slot
-        beq     :+
-        ldx     #2
-:
-        lda     slot_demo_pose,x
-        bra     @SeedPoseReady
-@NoReadyFrame:
-        lda     upload_active
-        beq     @UsePresentedPose
-        ldx     #0
-        lda     upload_slot
-        beq     :+
-        ldx     #2
-:
-        lda     slot_demo_pose,x
-        bra     @SeedPoseReady
-@UsePresentedPose:
-        lda     presented_demo_pose
-@SeedPoseReady:
-        cmp     #BSP_SKY_PHASE_POSE_COUNT
-        bcs     @PresentedPhaseFallback
-        sta     fly_sky_phase_fraction_q8
-        asl
-        clc
-        adc     fly_sky_phase_fraction_q8
-        tax
-        RW      a8
-        lda     f:QuakeBSPSkyPhases+0,x
-        sta     fly_sky_phase_q16+0
-        lda     f:QuakeBSPSkyPhases+1,x
-        sta     fly_sky_phase_q16+1
-        lda     f:QuakeBSPSkyPhases+2,x
-        sta     fly_sky_phase_q16+2
-        stz     fly_sky_phase_q16+3
-        RW      a16
-        bra     @Ready
-@PresentedPhaseFallback:
-        lda     presented_sky_phase_q16+0
-        sta     fly_sky_phase_q16+0
-        lda     presented_sky_phase_q16+2
-        and     #$007F
-        sta     fly_sky_phase_q16+2
-@Ready:
-        stz     fly_sky_phase_fraction_q8
         rts
 
 StageSkyCommand:
@@ -129,6 +100,10 @@ StageSkyCommand:
         lda     fly_sky_clock_revision
         pha
         lda     #0
+        sta     f:GSU_DATA_BASE+GSU_SKY_EXACT_PHASE_FORMAT_OFFSET
+        sta     f:GSU_DATA_BASE+GSU_SKY_EXACT_PHASE_OFFSET
+        sta     f:GSU_DATA_BASE+GSU_SKY_EXACT_PHASE_OFFSET+2
+        sta     f:GSU_DATA_BASE+GSU_SKY_EXACT_PHASE_OFFSET+4
         sta     f:GSU_DATA_BASE+GSU_SKY_PRESENT_OFFSET
         sta     f:GSU_DATA_BASE+GSU_SKY_PHASE_OFFSET
         sta     f:GSU_DATA_BASE+GSU_TURBULENCE_PRESENT_OFFSET
@@ -191,6 +166,7 @@ StageSkyCommand:
         lda     render_sky_phase_q16+2
         sta     f:GSU_DATA_BASE+GSU_SKY_PHASE_OFFSET+2
         RW      a16
+        jsr     StageSkyExactPhase
 .endif
 @Ready:
         pla
@@ -251,6 +227,7 @@ PresentSkyStateFromSlot:
 fly_sky_phase_q16: .res 4
 fly_sky_phase_fraction_q8: .res 2
 fly_sky_clock_revision: .res 2
+fly_sky_phase_epoch: .res 2
 render_sky_phase_q16: .res 4
 render_sky_present: .res 2
 staging_sky_phase_q16: .res 4

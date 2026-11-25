@@ -78,6 +78,8 @@ struct PackedTextureRaster
     std::vector<PackedTextureSpan> spans;
     std::vector<PackedBrushProjectedFragment> projected_fragments;
     std::vector<PackedBrushCandidateSample> candidate_samples;
+    std::span<const std::uint8_t> authored_visibility;
+    std::span<const std::uint8_t> face_colors;
     RasterStats stats;
     int hits{};
     int misses{};
@@ -95,6 +97,9 @@ enum class TextureRasterMode {
     affine,
     projective_block8,
 };
+
+bool hidden_packed_opaque_contact(const SourceWorld& world, const Camera& camera, std::uint16_t face,
+    std::span<const std::uint8_t> authored_visibility);
 
 std::int16_t perspective_interpolate_i16(
     std::int16_t first,
@@ -147,7 +152,8 @@ void raster_packed_texture_polygon(
     std::span<const TexturedViewVertex> view_polygon,
     const MipTexture& texture,
     std::uint16_t face,
-    TextureRasterMode mode
+    TextureRasterMode mode,
+    bool world_polygon
 );
 
 PackedTextureRaster render_packed_texture_pipeline(
@@ -155,7 +161,8 @@ PackedTextureRaster render_packed_texture_pipeline(
     const PacketSelection& packet,
     const Camera& camera,
     TextureRasterMode mode,
-    double surface_time = 0.0
+    double surface_time = 0.0,
+    std::span<const std::uint8_t> face_colors = {}
 );
 
 struct ViewPoint

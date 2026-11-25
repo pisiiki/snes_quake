@@ -4,37 +4,104 @@
 
 SkyRomCodeStart:
 
-; The generated face hash is guarded by exact texture identity in the cold
-; material selector. Its bounded nonzero marker set contains palette values
-; proven absent from every other opaque output in this configured ROM.
+; Four reserved tokens preserve painter owner-row boundaries without a face
+; palette identity: BODY, START, END and SINGLE. Opaque pixels split runs.
+BSP_SKY_SCAN_MARKER_MINIMUM = .min(BSP_SKY_TOKEN_BODY, .min(BSP_SKY_TOKEN_START, .min(BSP_SKY_TOKEN_END, BSP_SKY_TOKEN_SINGLE)))
+.if BSP_SKY_TOKEN_BODY < $100
+BSP_SKY_BLOCK_COMMON_ONE = BSP_SKY_TOKEN_BODY & BSP_SKY_TOKEN_START & BSP_SKY_TOKEN_END & BSP_SKY_TOKEN_SINGLE
+BSP_SKY_BLOCK_ANY_ONE = BSP_SKY_TOKEN_BODY | BSP_SKY_TOKEN_START | BSP_SKY_TOKEN_END | BSP_SKY_TOKEN_SINGLE
+BSP_SKY_BLOCK_COMMON_ZERO = BSP_SKY_BLOCK_ANY_ONE ^ $FF
+.else
+BSP_SKY_BLOCK_COMMON_ONE = 0
+BSP_SKY_BLOCK_COMMON_ZERO = 0
+.endif
+BSP_SKY_BLOCK_CONSTRAINTS = BSP_SKY_BLOCK_COMMON_ONE | BSP_SKY_BLOCK_COMMON_ZERO
+
+; R1/R3 are the complete covered row, R2 its logical Y, and R11 the caller.
+; Prepare before falling into the sampler on its existing bank-$02 visit.
+SkyFastSpanPrepareROM:
+        sm      (TEXTURE_SPAN_RETURN), R11
+        sm      (TEXTURE_SPAN_X), R1
+        sm      (TEXTURE_SPAN_END_X), R3
+        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R10
+        add     R2
+        move    R2, #0
+        moveb   R2, (R10)
+        sm      (TEXTURE_PLOT_Y), R2
+        ; Dead until SkyProcessRun installs its independent return.
+        iwt     R0, #SkyMarkerSpanPlotBegin
+        sm      (SKY_RUN_RETURN), R0
+
+; The face/row cache identifies only the first emitted sample, not a color.
 SkyMarkerSamplerROM:
         lm      R0, (PACKET_SOURCE_INDEX)
-        move    R1, R0
-  .repeat BSP_SKY_MARKER_HASH_SHIFT
-        with    R1
-        lsr
-  .endrepeat
+        lm      R1, (TEXTURE_SKY_MARKER_FACE)
         with    R0
-        xor     R1
-  .if BSP_SKY_MARKER_LUT_BYTES <= 16
+        cmp     R1
+        beq     @CachedFace
+        nop
+        sm      (TEXTURE_SKY_MARKER_FACE), R0
+        bra     @NewRow
+        nop
+
+@CachedFace:
+        lm      R7, (TEXTURE_SKY_MARKER_ROW)
+        move    R0, R7
+        hib
+        lm      R2, (TEXTURE_PLOT_Y)
         with    R0
-        and     #(BSP_SKY_MARKER_LUT_BYTES-1)
-  .else
-        iwt     R2, #(BSP_SKY_MARKER_LUT_BYTES-1)
+        cmp     R2
+        bne     @NewRow
+        nop
+        iwt     R7, #BSP_SKY_TOKEN_BODY
+
+        ; The common face/row hit falls straight into the original dispatch.
+        ; Only a refreshed row pays the absolute return from the cold bounds.
+@Dispatch:
+        ; Keep the original MOVE+LMS five-byte prefix and every later ROM
+        ; cache/math anchor fixed; expanded dispatch lives at the cold tail.
+        GSU_ABSOLUTE_GOTO SkyMarkerDispatchROM
+        .res 5 - (* - @Dispatch), $01
+:
+        dec     R1
+        bne     @CheckAlbedo
+        nop
+        ; Every fallback pixel needs its exact whole-row token. Normal
+        ; lightmaps retain their own unchanged constant-color plot entry.
+        iwt     R13, #SkyMarkerSampler
+@Lightmapped:
+        iwt     R4, #TextureLightmapSkyPlotReady
+:
+@ReturnToBank70:
+        move    R12, #$70
+        from    R4
+        ljmp    R12
+        nop
+@CheckAlbedo:
+        dec     R1
+        bne     @Lightmapped
+        nop
+@Albedo:
+        move    R12, #$70
+        from    R11
+        ljmp    R12
+        nop
+
+@NewRow:
+        ; One entry per actual face/row publishes its first-pixel token.
+        ; Material selection can be skipped between equal-texture faces, so
+        ; the source-face key is checked here instead of only by the selector.
+        iwt     R7, #BSP_SKY_TOKEN_START
+        lm      R2, (TEXTURE_PLOT_Y)
+        move    R0, R2
+        swap
         with    R0
-        and     R2
-  .endif
-        iwt     R4, #SkyFaceMarkerLUTROM
-        with    R4
-        add     R0
-        move    R0, #$02
-        romb
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_BYTE R7
+        or      R7
+        sm      (TEXTURE_SKY_MARKER_ROW), R0
 
         ; Invert this renderer's PLOT permutation before bounding the logical
         ; sky rows. X3 uses 3*y mod 8, whose inverse is also 3*y mod 8.
-        lm      R2, (TEXTURE_PLOT_Y)
         move    R0, R2
         with    R0
         and     #7
@@ -65,7 +132,9 @@ SkyMarkerSamplerROM:
         with    R2
         add     R0
 
-        lm      R0, (GSU_SKY_PRESENT_OFFSET)
+        ; Same four-byte call site preserves every existing ROM/cache anchor.
+        GSU_ABSOLUTE_GOTO SkyMarkerInitializeBounds
+@BoundsPrepared:
         moves   R0, R0
         bne     @UpdateBounds
         nop
@@ -101,7 +170,7 @@ SkyMarkerSamplerROM:
         with    R0
         or      R1
         sm      (BRUSH_OVERLAY_FLAGS), R0
-        bra     @Dispatch
+        bra     @RowReady
         nop
 
 @UpdateBounds:
@@ -119,36 +188,18 @@ SkyMarkerSamplerROM:
         moveb   R0, (R4)
         with    R0
         cmp     R2
-        bcs     @Dispatch
+        bcs     @RowReady
         nop
         moveb   (R4), R2
 
-@Dispatch:
-        move    R0, R7
-        lm      R1, (TEXTURE_RENDER_MODE)
-        dec     R1
-        beq     @Lightmapped
-        nop
-        dec     R1
-        beq     @Albedo
-        nop
-        bra     @Lightmapped
-        nop
-@Lightmapped:
-        iwt     R4, #TextureLightmapSkyPlotReady
-@ReturnToBank70:
-        move    R12, #$70
-        from    R4
-        ljmp    R12
-        nop
-@Albedo:
-        move    R12, #$70
-        from    R11
-        ljmp    R12
-        nop
+@RowReady:
+        GSU_ABSOLUTE_GOTO @Dispatch
 
-SkyFaceMarkerLUTROM:
-        BSP_SKY_EMIT_FACE_MARKER_LUT
+; Publish cold-dispatch destinations after every cheap-local reference.
+; Defining these at their use sites would reset ca65's cheap-local scope.
+SkyMarkerBoundsPrepared = @BoundsPrepared
+SkyMarkerOrdinaryDispatchReady = :--
+SkyMarkerReturnToBank70 = :-
 
 SKY_STATE                    = GSU_SKY_COMPOSITOR_SCRATCH_OFFSET
 SKY_PROJECT_RETURN           = SKY_STATE + $00
@@ -227,9 +278,14 @@ SKY_RUN_RETURN               = SKY_STATE + $90
 SKY_STEP_RETURN              = SKY_STATE + $92
 SKY_FOCAL_PITCH_COS          = SKY_STATE + $94
 SKY_FOCAL_PITCH_SIN          = SKY_STATE + $96
-SKY_STATE_END                = SKY_STATE + $98
+SKY_ROW_SCAN_END             = SKY_STATE + $98
+SKY_STATE_END                = SKY_STATE + $9A
+.if BSP_RENDER_SCALE = 2
+.include "quake/SkyExactState.i"
+.endif
 
 .assert SKY_STATE_END <= GSU_SIN_OFFSET, error, "Sky compositor scratch reaches live trigonometry tables"
+.assert BSP_VIEW_HEIGHT <= GSU_SKY_ROW_BOUNDS_ROWS, error, "Sky row bounds do not cover this viewport"
 .assert BSP_SKY_RAY_PRESERVE_EXACT_NUMERATORS = 1, error, "Sky projection may not truncate Q6 ray numerators"
 .assert BSP_SKY_RAY_SUMSQ_BITS <= 42, error, "Sky magnitude exceeds the proven 48-bit accumulator"
 .assert BSP_SKY_MAGNITUDE_BITS <= 21, error, "Sky root exceeds the restoring-square-root envelope"
@@ -290,7 +346,7 @@ SkySelectSampleRoutineROM:
         ; Every technique-4 block class must enter the fullbright turbulent
         ; sampler.  The ordinary specialized loops call the static sampler
         ; directly, so leaving even one in this table produces a mixed static
-        ; and warped surface.  Point all six routes at the bank-$70 sampler;
+        ; for both scales. Point all routes at the bank-$70 sampler;
         ; its RAM body and fullbright plot tail share one cache window without
         ; paying the generic sampler/lightmap dispatch.
         sm      (TEXTURE_STEP_S), R1
@@ -321,6 +377,13 @@ SkySelectSampleRoutineROM:
         cmp     R1
         beq     @Return
         nop
+        ; New commands always reselect the first material. The standalone
+        ; walker selects every face; the mixed walker clears its active ID at
+        ; command entry and after fragments/aliases. No cache survives an
+        ; owner's compositor return or a material change back to sky.
+        .assert BSP_WORLD_FACE_COUNT < $FFFF, error, "Sky cache sentinel aliases a source face"
+        iwt     R1, #$FFFF
+        sm      (TEXTURE_SKY_MARKER_FACE), R1
         iwt     R1, #SkyMarkerSampler
         sm      (TEXTURE_SAMPLE_ROUTINE), R1
 .endif
@@ -375,14 +438,15 @@ SkySelectSampleRoutineROM:
         sm      (TEXTURE_SAMPLE_ROUTINE), R1
         ; Only the proven-interior world block uses this direct lightmap
         ; continuation. Checked and cached-cell classes keep generic routes.
-        iwt     R1, #T4MixedInteriorSpanLoop
-        sm      (TEXTURE_ERR_T), R1
+        GSU_ABSOLUTE_GOTO T4InstallMixedSamplerROM
+        .res 2, $01
 @SamplerReady:
         iwt     R8, #TextureSelectSampleRoutineDone
         move    R9, #$70
         from    R8
         ljmp    R9
         nop
+T4SelectSampleRoutineDoneROM = @SamplerReady
 
 ; Stable bank-$70 thunks enter these handlers only after the complete opaque
 ; owner has returned. Restore that owner's walker, composite in ROM, then
@@ -447,19 +511,13 @@ SkyReturnToBank70:
         nop
 
 SkyCompositor:
-        move    R0, #1
-        ramb
+        GSU_ABSOLUTE_GOTO SkyScanFlushBeforeBlocks
+        .assert * - SkyCompositor = 4, error, "Sky initial drain hook moved compositor setup"
 .if BSP_RENDER_SCALE = 3
         ; Focal products are assembled for every possible quantized pitch.
         ; Select once, then use the same two forward terms for every sky ray.
         iwt     R8, #.loword(SkyFocalNormal)
-        lm      R0, (COMMAND+10)
-        moves   R0, R0
-        bpl     @OrdinaryFocal
-        nop
-        iwt     R8, #.loword(SkyFocalOverscan)
-@OrdinaryFocal:
-        move    R0, #2
+        move    R0, #BSP_GSU_ROM2_BANK
         romb
         .repeat 2, axis
           .if axis = 0
@@ -483,6 +541,11 @@ SkyCompositor:
         .endrepeat
 .endif
 
+.if BSP_RENDER_SCALE = 2
+        ; Preserve full binary32 magnitude for the independent exact fallback.
+        jal     SkyFloatPreparePhase
+        nop
+.else
         ; Stage the immutable low23 phase into aligned scratch words.
         lm      R0, (GSU_SKY_PHASE_OFFSET)
         sm      (SKY_PHASE_LO), R0
@@ -490,6 +553,7 @@ SkyCompositor:
         move    R0, #0
         moveb   R0, (R10)
         sm      (SKY_PHASE_HI), R0
+.endif
 
         ; Resolve sky1 through the generated byte-identical texture directory.
         ; This remains the single placement authority even if a future pack
@@ -515,15 +579,35 @@ SkyCompositor:
         iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
         with    R10
         add     R0
-        move    R0, #0
         moveb   R0, (R10)
         sm      (SKY_MAPPED_Y), R0
-        move    R0, #0
-        sm      (SKY_SCAN_X), R0
+        ; R8 is idle after focal setup. Keep X live until a marker run needs
+        ; the memory-backed ABI; the opaque reject loop makes no calls.
+@RowBoundsDispatch:
+        GSU_ABSOLUTE_GOTO SkyScanRowBounds
 
 @ScanPixel:
-        lm      R0, (SKY_SCAN_X)
-        iwt     R1, #BSP_VIEW_WIDTH
+  .if BSP_SKY_BLOCK_CONSTRAINTS
+        ; Keep admission resident: ordinary scalar pixels never enter cold
+        ; code. X+7 must be below the conservative exclusive end, including
+        ; the final partial X3 tile and any unaligned run continuation.
+        move    R0, R8
+        and     #7
+        bne     @ScanScalar
+        nop
+        move    R0, R8
+        add     #7
+        cmp     R9
+        bcs     @ScanScalar
+        nop
+        GSU_ABSOLUTE_GOTO SkyScanBlockReject
+  .endif
+@ScanScalar:
+:
+        move    R0, R8
+        ; R9 is this row's conservative exclusive end, restored after a run.
+        move    R1, R9
+        nop
         with    R0
         cmp     R1
         bne     @ScanPixelPresent
@@ -534,68 +618,47 @@ SkyCompositor:
         iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
         with    R10
         add     R1
-        move    R1, #0
         moveb   R1, (R10)
         lm      R2, (SKY_MAPPED_Y)
         rpix
         move    R7, R0
-        iwt     R1, #BSP_WORLD_SKY_MARKER_0
+        ; Most opaque samples are below every reserved marker. Reject them
+        ; before the exact identity chain while retaining R7 for sky runs.
+        iwt     R1, #BSP_SKY_SCAN_MARKER_MINIMUM
+        cmp     R1
+        bcc     @ScanNextPixel
+        nop
+        iwt     R1, #BSP_SKY_TOKEN_BODY
         with    R7
         cmp     R1
         beq     @MarkerFound
         nop
-        iwt     R1, #BSP_WORLD_SKY_MARKER_1
+        iwt     R1, #BSP_SKY_TOKEN_START
         with    R7
         cmp     R1
         beq     @MarkerFound
         nop
-        iwt     R1, #BSP_WORLD_SKY_MARKER_2
+        iwt     R1, #BSP_SKY_TOKEN_END
         with    R7
         cmp     R1
         beq     @MarkerFound
         nop
-        iwt     R1, #BSP_WORLD_SKY_MARKER_3
+        iwt     R1, #BSP_SKY_TOKEN_SINGLE
         with    R7
         cmp     R1
         beq     @MarkerFound
         nop
-        iwt     R1, #BSP_WORLD_SKY_MARKER_4
-        with    R7
-        cmp     R1
-        beq     @MarkerFound
-        nop
-  .if BSP_WORLD_SKY_FACE_COUNT > 5
-        iwt     R1, #BSP_WORLD_SKY_MARKER_5
-        with    R7
-        cmp     R1
-        beq     @MarkerFound
-        nop
-  .endif
-  .if BSP_WORLD_SKY_FACE_COUNT > 6
-        iwt     R1, #BSP_WORLD_SKY_MARKER_6
-        with    R7
-        cmp     R1
-        beq     @MarkerFound
-        nop
-  .endif
-  .if BSP_WORLD_SKY_FACE_COUNT > 7
-        iwt     R1, #BSP_WORLD_SKY_MARKER_7
-        with    R7
-        cmp     R1
-        beq     @MarkerFound
-        nop
-  .endif
-  .if BSP_WORLD_SKY_FACE_COUNT > 8
-        iwt     R1, #BSP_WORLD_SKY_MARKER_8
-        with    R7
-        cmp     R1
-        beq     @MarkerFound
-        nop
-  .endif
-        lm      R0, (SKY_SCAN_X)
-        inc     R0
-        sm      (SKY_SCAN_X), R0
-        GSU_ABSOLUTE_GOTO @ScanPixel
+@ScanNextPixel:
+        inc     R8
+        ; The taken absolute jump has already put ScanPixel in R15, so CACHE
+        ; anchors the whole no-call scan without changing the compare flags.
+        GSU_ABSOLUTE_GOTO @ScanPixel, shared_delay
+        cache
+@ScanResume:
+        ; SkyProcessRun may clobber R8. Only run completion enters here; its
+        ; memory X is the first pixel not included in the completed run.
+        GSU_ABSOLUTE_GOTO SkyScanResumeBounds
+.assert * - @ScanNextPixel = 9, error, "Sky scan continuation moved its marker entry"
 
 @MarkerFound:
         lm      R0, (GSU_SKY_FLAGS_OFFSET)
@@ -603,10 +666,22 @@ SkyCompositor:
         or      #BSP_SKY_FLAG_PRESENTED
         sm      (GSU_SKY_FLAGS_OFFSET), R0
         sm      (SKY_RUN_MARKER), R7
-        lm      R0, (SKY_SCAN_X)
+@MarkerScanX:
+        move    R0, R8
+        .res 4 - (* - @MarkerScanX), $01
         sm      (SKY_RUN_START), R0
         inc     R0
         sm      (SKY_SCAN_X), R0
+        iwt     R1, #BSP_SKY_TOKEN_END
+        with    R7
+        cmp     R1
+        beq     @RunComplete
+        nop
+        iwt     R1, #BSP_SKY_TOKEN_SINGLE
+        with    R7
+        cmp     R1
+        beq     @RunComplete
+        nop
 
 @ExtendRun:
         lm      R0, (SKY_SCAN_X)
@@ -619,15 +694,24 @@ SkyCompositor:
         iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
         with    R10
         add     R1
-        move    R1, #0
         moveb   R1, (R10)
         lm      R2, (SKY_MAPPED_Y)
         rpix
-        lm      R1, (SKY_RUN_MARKER)
+        iwt     R1, #BSP_SKY_TOKEN_BODY
+        with    R0
+        cmp     R1
+        beq     @RunBody
+        nop
+        iwt     R1, #BSP_SKY_TOKEN_END
         with    R0
         cmp     R1
         bne     @RunComplete
         nop
+        lm      R0, (SKY_SCAN_X)
+        inc     R0
+        sm      (SKY_SCAN_X), R0
+        GSU_ABSOLUTE_GOTO @RunComplete
+@RunBody:
         lm      R0, (SKY_SCAN_X)
         inc     R0
         sm      (SKY_SCAN_X), R0
@@ -647,14 +731,14 @@ SkyCompositor:
         sm      (SKY_RUN_END), R0
         jal     SkyProcessRun
         nop
-        GSU_ABSOLUTE_GOTO @ScanPixel
+        GSU_ABSOLUTE_GOTO @ScanResume
 
 @RowDone:
+:
         lm      R0, (SKY_SCAN_Y)
         inc     R0
         sm      (SKY_SCAN_Y), R0
         iwt     R10, #GSU_SKY_MAX_Y_OFFSET
-        move    R1, #0
         moveb   R1, (R10)
         with    R0
         cmp     R1
@@ -673,10 +757,65 @@ SkyCompositor:
         move    R1, #0
         move    R2, #0
         rpix
+; Cold helpers return to these exact old scan continuations.
+SkyScanPixelEntry = @ScanPixel
+SkyScanScalarEntry = :--
+SkyScanRowDone = :-
 SkyCompositorDone:
         lm      R8, (GSU_SKY_ROM_RETURN_OFFSET)
         jmp     R8
         nop
+
+; The resident admission gate supplies only complete aligned tiles.
+; R8/R9 retain logical X/exclusive end. Both coordinate maps permute within
+; each eight-pixel tile, never across tiles. Scalar returns bypass the gate.
+SkyScanBlockReject:
+  .if BSP_SKY_BLOCK_CONSTRAINTS
+        ; All sky owners set CMODE=$11: OBJ tiles are row-major even though
+        ; SCMR selects a128-high screen. SCBR=0,8bpp: tileY*128+tileX*8,
+        ; then the mapped within-tile row*2.
+        ; R3 is this row's physical byte base, restored after every run.
+        move    R4, R8
+        .repeat 3
+          with  R4
+          add   R4
+        .endrepeat
+        with    R4
+        add     R3
+        iwt     R2, #$00FF
+        move    R0, #0
+        ramb
+        .repeat 8, plane
+          .if BSP_SKY_BLOCK_CONSTRAINTS & (1 << plane)
+            move    R10, R4
+            iwt     R1, #((plane / 2) * 16 + (plane & 1))
+            with    R10
+            add     R1
+            moveb   R0, (R10)
+            .if BSP_SKY_BLOCK_COMMON_ZERO & (1 << plane)
+              not
+            .endif
+            to      R2
+            from    R0
+            and     R2
+          .endif
+        .endrepeat
+        ; Restore bank71 before any sky-state access or scalar RPIX path.
+        move    R0, #1
+        ramb
+        with    R2
+        and     R2
+        beq     @Empty
+        nop
+        GSU_ABSOLUTE_GOTO SkyScanScalarEntry
+@Empty:
+        move    R0, R8
+        add     #8
+        move    R8, R0
+        GSU_ABSOLUTE_GOTO SkyScanPixelEntry
+  .endif
+SkyScanBlockRejectEnd:
+.assert SkyScanBlockRejectEnd - (SkyScanPixelEntry & $FFFFF0) <= 512, lderror, "Sky block probe escaped resident scan window"
 
 ; Build the exact common-denominator-64 ray. Inputs R0/R1 are logical u/v;
 ; outputs are three signed 32-bit numerators in scratch.
@@ -841,496 +980,7 @@ SkyMultiplyScale64:
         nop
 
 ; Square unsigned WORK as a base-2^15 value into SQUARE[47:0].
-SkySquareValue48:
-        sm      (SKY_SQUARE_RETURN), R11
-        lm      R8, (SKY_WORK_LO)
-        lm      R9, (SKY_WORK_HI)
-        move    R2, R9
-        with    R2
-        add     R2
-        move    R0, R8
-        moves   R0, R0
-        bpl     @BaseReady
-        nop
-        inc     R2
-@BaseReady:
-        iwt     R1, #$7FFF
-        with    R8
-        and     R1
-
-        move    R0, R8
-        move    R6, R8
-        with    R0
-        lmult
-        sm      (SKY_SQUARE_LO), R4
-        sm      (SKY_SQUARE_MID), R0
-        move    R1, #0
-        sm      (SKY_SQUARE_HI), R1
-
-        move    R0, R8
-        move    R6, R2
-        with    R0
-        lmult
-        lm      R1, (SKY_SQUARE_MID)
-        with    R1
-        add     R4
-        sm      (SKY_SQUARE_MID), R1
-        lm      R1, (SKY_SQUARE_HI)
-        with    R1
-        adc     R0
-        sm      (SKY_SQUARE_HI), R1
-
-        move    R0, R2
-        move    R6, R2
-        with    R0
-        lmult
-        move    R1, R4
-        ; Only low product bits 1..0 reach the middle word after <<30.
-        ; LOB removes the swapped high-byte leak while R4 remains intact for
-        ; the exact >>2 contribution to the high word below.
-        with    R1
-        lob
-        with    R1
-        swap
-  .repeat 6
-        with    R1
-        add     R1
-  .endrepeat
-        move    R2, R4
-  .repeat 2
-        with    R2
-        lsr
-  .endrepeat
-        lm      R0, (SKY_SQUARE_MID)
-        with    R0
-        add     R1
-        sm      (SKY_SQUARE_MID), R0
-        lm      R0, (SKY_SQUARE_HI)
-        with    R0
-        adc     R2
-        sm      (SKY_SQUARE_HI), R0
-        lm      R11, (SKY_SQUARE_RETURN)
-        ret
-        nop
-
-; Add WORK^2 to the exact unsigned 48-bit magnitude accumulator.
-SkyAccumulateSquares48:
-        sm      (SKY_ACCUM_RETURN), R11
-        jal     SkySquareValue48
-        nop
-        lm      R0, (SKY_SUM_LO)
-        lm      R1, (SKY_SQUARE_LO)
-        with    R0
-        add     R1
-        sm      (SKY_SUM_LO), R0
-        lm      R0, (SKY_SUM_MID)
-        lm      R1, (SKY_SQUARE_MID)
-        with    R0
-        adc     R1
-        sm      (SKY_SUM_MID), R0
-        lm      R0, (SKY_SUM_HI)
-        lm      R1, (SKY_SQUARE_HI)
-        with    R0
-        adc     R1
-        sm      (SKY_SUM_HI), R0
-        lm      R11, (SKY_ACCUM_RETURN)
-        ret
-        nop
-
-; Convert signed R0:R4 to an unsigned magnitude and accumulate its square.
-SkyAccumulateSignedComponent:
-        sm      (SKY_ACCUM_SIGNED_RETURN), R11
-        moves   R0, R0
-        bpl     @MagnitudeReady
-        nop
-        move    R1, #0
-        with    R1
-        sub     R4
-        move    R2, #0
-        with    R2
-        sbc     R0
-        move    R4, R1
-        move    R0, R2
-@MagnitudeReady:
-        sm      (SKY_WORK_LO), R4
-        sm      (SKY_WORK_HI), R0
-        jal     SkyAccumulateSquares48
-        nop
-        lm      R11, (SKY_ACCUM_SIGNED_RETURN)
-        ret
-        nop
-
-; Exact base-4 restoring square root of SUM[47:0].
-; X2 rays fit 42 bits; X3's scaled rays require 43 bits and a 22-bit root.
-; Consume SUM>>40 explicitly, then iterate over the remaining 20 digits.
-; The loop leaves the exact remainder SUM-root^2, allowing the accepted 3/4
-; magnitude threshold to round without another square:
-;   round up iff remainder >= root + ceil(root/2) + 1.
-SkyFloorIsqrt48:
-        sm      (SKY_ISQRT_RETURN), R11
-        lm      R4, (SKY_SUM_LO)
-        lm      R5, (SKY_SUM_MID)
-        lm      R6, (SKY_SUM_HI)
-
-        ; Preserve the low limbs before aligning the remaining 40 input bits.
-        move    R2, R4
-        move    R3, R5
-
-        ; Seed floor(sqrt(p)) and p-root^2. X2 admits p=0..3; X3 admits
-        ; p=0..7, including p>=4 where the initial root is two, not one.
-        move    R8, R6
-        with    R8
-        hib
-        with    R8
-.if BSP_RENDER_SCALE = 3
-        and     #7
-.else
-        and     #3
-.endif
-        move    R9, #0
-        move    R12, #0
-        move    R13, #0
-        moves   R8, R8
-        beq     @TopDigitReady
-        nop
-        move    R12, #1
-.if BSP_RENDER_SCALE = 3
-        move    R0, R8
-        with    R0
-        and     #4
-        beq     @TopRootOne
-        nop
-        move    R12, #2
-        with    R8
-        sub     #3
-@TopRootOne:
-.endif
-        dec     R8
-@TopDigitReady:
-
-        ; Shift the low 40 bits left by one byte without paying eight serial
-        ; multiword shifts. The high digit was consumed above.
-        with    R4
-        lob
-        with    R4
-        swap
-        with    R5
-        lob
-        with    R5
-        swap
-        with    R2
-        hib
-        with    R5
-        or      R2
-        with    R6
-        lob
-        with    R6
-        swap
-        with    R3
-        hib
-        with    R6
-        or      R3
-
-        move    R7, #20
-@DigitLoop:
-  .repeat 2
-        ; Append the next input bit to the two-word remainder.
-        with    R4
-        add     R4
-        with    R5
-        adc     R5
-        with    R6
-        adc     R6
-        with    R8
-        rol
-        with    R9
-        rol
-  .endrepeat
-
-        ; trial = 2*(root<<1)+1. ROOT_LO is even after the shift, so each
-        ; successful digit increment is carry-free in the low word.
-        with    R12
-        add     R12
-        with    R13
-        adc     R13
-        move    R2, R12
-        move    R3, R13
-        with    R2
-        add     R2
-        with    R3
-        adc     R3
-        inc     R2
-
-        ; Subtract first and restore on borrow. This is the same unsigned
-        ; decision as a two-word compare but avoids its branch ladder.
-        with    R8
-        sub     R2
-        with    R9
-        sbc     R3
-        bcc     @RestoreTrial
-        nop
-        inc     R12
-        bra     @DigitDone
-        nop
-@RestoreTrial:
-        with    R8
-        add     R2
-        with    R9
-        adc     R3
-@DigitDone:
-        dec     R7
-        bne     @DigitLoop
-        nop
-
-        ; R4:R5 = root + floor(root/2) + 1 + (root&1)
-        ;       = root + ceil(root/2) + 1.
-        move    R4, R12
-        move    R5, R13
-        with    R5
-        lsr
-        with    R4
-        ror
-        with    R4
-        add     R12
-        with    R5
-        adc     R13
-        move    R0, R12
-        with    R0
-        and     #1
-        inc     R0
-        with    R4
-        add     R0
-        move    R0, #0
-        with    R5
-        adc     R0
-
-        ; Equality rounds upward per the generated accepted contract.
-        with    R8
-        sub     R4
-        with    R9
-        sbc     R5
-        bcc     @RootReady
-        nop
-        move    R0, #1
-        with    R12
-        add     R0
-        move    R0, #0
-        with    R13
-        adc     R0
-@RootReady:
-        sm      (SKY_ROOT_LO), R12
-        sm      (SKY_ROOT_HI), R13
-        lm      R11, (SKY_ISQRT_RETURN)
-        ret
-        nop
-
-; Unsigned restoring NUMERATOR[47:0] / DENOMINATOR[31:0]. The audited result
-; fits 32 bits, so the high numerator word is strictly below the denominator.
-; Seed that word as the remainder: the first 16 restoring steps cannot
-; subtract or set a quotient bit. Consume only the remaining low 32 bits.
-; R5:R4 holds the unconsumed numerator followed by the quotient bits already
-; produced. Each shift frees bit zero for the next quotient bit; after step
-; 32 no numerator bits remain. This saves a separate two-word quotient shift.
-SkyUnsignedDivide48By32:
-        sm      (SKY_DIVIDE_RETURN), R11
-        lm      R4, (SKY_NUMERATOR_LO)
-        lm      R5, (SKY_NUMERATOR_MID)
-        lm      R8, (SKY_NUMERATOR_HI)
-        lm      R2, (SKY_DENOMINATOR_LO)
-        lm      R3, (SKY_DENOMINATOR_HI)
-        move    R9, #0
-        move    R7, #32
-@DivideLoop:
-        with    R4
-        add     R4
-        with    R5
-        adc     R5
-        with    R8
-        rol
-        with    R9
-        rol
-
-        move    R0, R9
-        with    R0
-        cmp     R3
-        bcc     @DivideNext
-        nop
-        bne     @SubtractDenominator
-        nop
-        move    R0, R8
-        with    R0
-        cmp     R2
-        bcc     @DivideNext
-        nop
-@SubtractDenominator:
-        with    R8
-        sub     R2
-        with    R9
-        sbc     R3
-        inc     R4
-@DivideNext:
-        dec     R7
-        bne     @DivideLoop
-        nop
-        sm      (SKY_QUOTIENT_LO), R4
-        sm      (SKY_QUOTIENT_HI), R5
-        lm      R11, (SKY_DIVIDE_RETURN)
-        ret
-        nop
-
-        ; Preserve the following sky/brush code's measured instruction alignment.
-        .res 95 - (* - SkyUnsignedDivide48By32), $01
-
-; Build abs(378*N)<<16 and divide by the floor magnitude, restoring N's sign.
-SkySignedQuotient:
-        sm      (SKY_QUOTIENT_RETURN), R11
-        lm      R4, (SKY_WORK_LO)
-        lm      R0, (SKY_WORK_HI)
-        move    R1, #0
-        sm      (SKY_SIGN), R1
-        moves   R0, R0
-        bpl     @QuotientMagnitudeReady
-        nop
-        move    R1, #1
-        sm      (SKY_SIGN), R1
-        move    R1, #0
-        with    R1
-        sub     R4
-        move    R2, #0
-        with    R2
-        sbc     R0
-        move    R4, R1
-        move    R0, R2
-@QuotientMagnitudeReady:
-        ; Base-2^15 multiply by the positive constant 378.
-        move    R8, R4
-        move    R9, R0
-        move    R2, R9
-        with    R2
-        add     R2
-        move    R0, R8
-        moves   R0, R0
-        bpl     @QuotientBaseReady
-        nop
-        inc     R2
-@QuotientBaseReady:
-        iwt     R1, #$7FFF
-        with    R8
-        and     R1
-        move    R0, R8
-        iwt     R6, #BSP_SKY_PROJECTION_SCALE
-        with    R0
-        lmult
-        move    R8, R4
-        move    R9, R0
-        move    R0, R2
-        iwt     R6, #BSP_SKY_PROJECTION_SCALE
-        with    R0
-        lmult
-        move    R1, R4
-        move    R2, R4
-        with    R1
-        and     #1
-        beq     @QuotientLowContributionReady
-        nop
-        iwt     R1, #$8000
-@QuotientLowContributionReady:
-        with    R2
-        lsr
-        with    R8
-        add     R1
-        with    R9
-        adc     R2
-        move    R0, #0
-        sm      (SKY_NUMERATOR_LO), R0
-        sm      (SKY_NUMERATOR_MID), R8
-        sm      (SKY_NUMERATOR_HI), R9
-        lm      R0, (SKY_ROOT_LO)
-        sm      (SKY_DENOMINATOR_LO), R0
-        lm      R0, (SKY_ROOT_HI)
-        sm      (SKY_DENOMINATOR_HI), R0
-        jal     SkyUnsignedDivide48By32
-        nop
-        lm      R0, (SKY_SIGN)
-        moves   R0, R0
-        beq     @SignedQuotientDone
-        nop
-        lm      R4, (SKY_QUOTIENT_LO)
-        lm      R0, (SKY_QUOTIENT_HI)
-        move    R1, #0
-        with    R1
-        sub     R4
-        move    R2, #0
-        with    R2
-        sbc     R0
-        sm      (SKY_QUOTIENT_LO), R1
-        sm      (SKY_QUOTIENT_HI), R2
-@SignedQuotientDone:
-        lm      R11, (SKY_QUOTIENT_RETURN)
-        ret
-        nop
-
-; Project one endpoint from exact numerators through floor-isqrt and signed
-; trunc0 division. Output is signed Q16 S/T with the staged low23 phase added.
-SkyProjectEndpoint:
-        sm      (SKY_PROJECT_RETURN), R11
-        jal     SkyBuildRayNumerators
-        nop
-        move    R1, #0
-        sm      (SKY_SUM_LO), R1
-        sm      (SKY_SUM_MID), R1
-        sm      (SKY_SUM_HI), R1
-        lm      R4, (SKY_NX_LO)
-        lm      R0, (SKY_NX_HI)
-        jal     SkyAccumulateSignedComponent
-        nop
-        lm      R4, (SKY_NY_LO)
-        lm      R0, (SKY_NY_HI)
-        jal     SkyAccumulateSignedComponent
-        nop
-        lm      R4, (SKY_NZ_LO)
-        lm      R0, (SKY_NZ_HI)
-        jal     SkyAccumulateSignedComponent
-        nop
-        jal     SkyFloorIsqrt48
-        nop
-
-        lm      R0, (SKY_NX_LO)
-        sm      (SKY_WORK_LO), R0
-        lm      R0, (SKY_NX_HI)
-        sm      (SKY_WORK_HI), R0
-        jal     SkySignedQuotient
-        nop
-        lm      R0, (SKY_QUOTIENT_LO)
-        lm      R1, (SKY_QUOTIENT_HI)
-        lm      R2, (SKY_PHASE_LO)
-        lm      R3, (SKY_PHASE_HI)
-        with    R0
-        add     R2
-        with    R1
-        adc     R3
-        sm      (SKY_ENDPOINT_S_LO), R0
-        sm      (SKY_ENDPOINT_S_HI), R1
-
-        lm      R0, (SKY_NY_LO)
-        sm      (SKY_WORK_LO), R0
-        lm      R0, (SKY_NY_HI)
-        sm      (SKY_WORK_HI), R0
-        jal     SkySignedQuotient
-        nop
-        lm      R0, (SKY_QUOTIENT_LO)
-        lm      R1, (SKY_QUOTIENT_HI)
-        lm      R2, (SKY_PHASE_LO)
-        lm      R3, (SKY_PHASE_HI)
-        with    R0
-        add     R2
-        with    R1
-        adc     R3
-        sm      (SKY_ENDPOINT_T_LO), R0
-        sm      (SKY_ENDPOINT_T_HI), R1
-        lm      R11, (SKY_PROJECT_RETURN)
-        ret
-        nop
+.include "quake/SkyIntegerMath.sgs"
 
 ; Quake full partitions use signed arithmetic floor(delta/32).
 SkyDdaFullFloor:
@@ -1372,6 +1022,9 @@ SkyDdaPartialTrunc0:
         sm      (SKY_NUMERATOR_MID), R0
         move    R1, #0
         sm      (SKY_NUMERATOR_HI), R1
+.if BSP_RENDER_SCALE = 2
+        sm      (SKY_NUMERATOR_TOP), R1
+.endif
         lm      R0, (SKY_CHUNK_COUNT)
         dec     R0
         sm      (SKY_DENOMINATOR_LO), R0
@@ -1441,6 +1094,14 @@ SkyProcessRun:
         inc     R1
         sm      (SKY_CHUNK_REMAIN), R1
 
+        ; A nonfinal chunk's right endpoint is the next chunk's exact left
+        ; endpoint. DDA/pixel work leaves these projected words intact, so
+        ; project the first left once and reuse the preceding right thereafter.
+        lm      R0, (SKY_CHUNK_X)
+        lm      R1, (SKY_SCAN_Y)
+        jal     SkyProjectEndpoint
+        nop
+
 @ChunkLoop:
         lm      R0, (SKY_CHUNK_REMAIN)
         iwt     R1, #BSP_SKY_SPAN_MAXIMUM
@@ -1474,10 +1135,6 @@ SkyProcessRun:
 @ChunkEndpointReady:
         sm      (SKY_CHUNK_ENDPOINT_X), R2
 
-        lm      R0, (SKY_CHUNK_X)
-        lm      R1, (SKY_SCAN_Y)
-        jal     SkyProjectEndpoint
-        nop
         lm      R0, (SKY_ENDPOINT_S_LO)
         sm      (SKY_LEFT_S_LO), R0
         sm      (SKY_DDA_S_LO), R0
@@ -1541,35 +1198,7 @@ SkyProcessRun:
         sm      (SKY_STEP_T_HI), R0
 
 @ChunkPixelLoop:
-        jal     SkyPlotSample
-        nop
-        lm      R0, (SKY_DDA_S_LO)
-        lm      R1, (SKY_DDA_S_HI)
-        lm      R2, (SKY_STEP_S_LO)
-        lm      R3, (SKY_STEP_S_HI)
-        with    R0
-        add     R2
-        with    R1
-        adc     R3
-        sm      (SKY_DDA_S_LO), R0
-        sm      (SKY_DDA_S_HI), R1
-        lm      R0, (SKY_DDA_T_LO)
-        lm      R1, (SKY_DDA_T_HI)
-        lm      R2, (SKY_STEP_T_LO)
-        lm      R3, (SKY_STEP_T_HI)
-        with    R0
-        add     R2
-        with    R1
-        adc     R3
-        sm      (SKY_DDA_T_LO), R0
-        sm      (SKY_DDA_T_HI), R1
-        lm      R0, (SKY_CHUNK_X)
-        inc     R0
-        sm      (SKY_CHUNK_X), R0
-        lm      R0, (SKY_CHUNK_COUNT)
-        dec     R0
-        sm      (SKY_CHUNK_COUNT), R0
-        bne     @ChunkPixelLoop
+        jal     SkyDrawChunkPixels
         nop
         lm      R0, (SKY_CHUNK_REMAIN)
         moves   R0, R0
@@ -1581,82 +1210,310 @@ SkyProcessRun:
         ret
         nop
 
-; Sample the two 128-square halves of Quake sky1. Index zero in the shifted
-; foreground is transparent; otherwise it replaces the static background.
-SkyPlotSample:
-        iwt     R1, #(BSP_SKY_COORD_MASK >> BSP_SKY_COORD_FRACTION_BITS)
-        lm      R8, (SKY_DDA_S_HI)
-        with    R8
-        and     R1
-        lm      R9, (SKY_DDA_T_HI)
-        with    R9
-        and     R1
-        lm      R10, (SKY_PHASE_HI)
-        with    R10
-        and     R1
-        move    R5, R8
-        with    R5
-        add     R10
-        with    R5
-        and     R1
-        move    R6, R9
-        with    R6
-        add     R10
-        with    R6
-        and     R1
+; DDA coordinates and steps stay live for one complete perspective chunk.
+; SKY_STEP_RETURN is dead after SkyPrepareDdaStep, and no endpoint word is
+; touched: the next chunk must still reuse its previous right endpoint.
+SkyDrawChunkPixels:
+        sm      (SKY_STEP_RETURN), R11
+.if BSP_RENDER_SCALE = 2
+        move    R0, #0
+        sm      (SF_CHUNK_EXACT), R0
+        lm      R0, (SKY_CHUNK_X)
+        sm      (SF_CHUNK_START), R0
+SkyReloadChunkPixels:
+.endif
+        lm      R3, (SKY_DDA_S_LO)
+        lm      R4, (SKY_DDA_S_HI)
+        lm      R5, (SKY_DDA_T_LO)
+        lm      R6, (SKY_DDA_T_HI)
+        lm      R7, (SKY_STEP_S_LO)
+        lm      R8, (SKY_STEP_S_HI)
+        lm      R9, (SKY_STEP_T_LO)
+        lm      R10, (SKY_STEP_T_HI)
+        lm      R0, (SKY_CHUNK_X)
+        lm      R12, (SKY_CHUNK_COUNT)
+        iwt     R11, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R11
+        add     R0
+        with    R0
+        add     R12
+        sm      (SKY_CHUNK_X), R0
+        iwt     R13, #SkyPlotSample
+.if BSP_RENDER_SCALE = 2
+        lm      R0, (SF_CHUNK_EXACT)
+        moves   R0, R0
+        bne     SkyPlotSample
+        nop
+        iwt     R13, #SkyPlotMaybeExactSample
+SkyPlotMaybeExactSample:
+        ; The complete Q3/float/DDA proof bounds either coordinate by71Q16.
+        ; A72-unit closed envelope is conservative at both wrap boundaries.
+        iwt     R1, #72
+        iwt     R2, #144
+        move    R0, R3
+        with    R0
+        add     R1
+        with    R0
+        cmp     R2
+        bcc     @CheckEnvelope
+        nop
+        move    R0, R5
+        with    R0
+        add     R1
+        with    R0
+        cmp     R2
+        bcs     SkyPlotSample
+        nop
+@CheckEnvelope:
+        GSU_ABSOLUTE_GOTO SkyCheckColorEnvelope
+.endif
 
-        move    R4, R6
-        with    R4
+; R3:R4=S, R5:R6=T, R7:R8=dS, R9:R10=dT. Only R0/R1/R2 and the
+; ROM buffer are sampler temporaries. Index zero in the shifted foreground
+; is transparent; the background uses the original unshifted coordinates.
+SkyPlotSample:
+.assert (BSP_SKY_COORD_MASK >> BSP_SKY_COORD_FRACTION_BITS) <= $7F, error, "Sky mask must fit positive IBT"
+        move    R2, #(BSP_SKY_COORD_MASK >> BSP_SKY_COORD_FRACTION_BITS)
+        lm      R1, (SKY_PHASE_HI)
+        to      R0
+        from    R4
+        add     R1
+        with    R0
+        and     R2
+        to      R1
+        from    R6
+        add     R1
+        with    R1
+        and     R2
+        with    R1
         swap
-        with    R4
-        add     R5
-        lm      R2, (SKY_TEXTURE_ADDRESS)
-        with    R4
-        add     R2
-        GSU_SET_ROM_BUFFER_ADDRESS R4
+        with    R1
+        add     R0
+        lm      R0, (SKY_TEXTURE_ADDRESS)
+        with    R1
+        add     R0
+        GSU_SET_ROM_BUFFER_ADDRESS R1
         to      R0
         getb
         moves   R0, R0
         bne     @SkyColorReady
         nop
 
-        move    R4, R9
-        with    R4
+        to      R0
+        from    R4
+        and     R2
+        to      R1
+        from    R6
+        and     R2
+        with    R1
         swap
-        with    R4
-        add     R8
-        lm      R2, (SKY_TEXTURE_ADDRESS)
-        iwt     R3, #BSP_SKY_LAYER_SIZE
-        with    R2
-        add     R3
-        with    R4
+        with    R1
+        add     R0
+        lm      R0, (SKY_TEXTURE_ADDRESS)
+        iwt     R2, #BSP_SKY_LAYER_SIZE
+        with    R0
         add     R2
-        GSU_SET_ROM_BUFFER_ADDRESS R4
+        with    R1
+        add     R0
+        GSU_SET_ROM_BUFFER_ADDRESS R1
         to      R0
         getb
 @SkyColorReady:
         color
-        lm      R0, (SKY_CHUNK_X)
-        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
-        with    R10
-        add     R0
-        move    R1, #0
-        moveb   R1, (R10)
+        moveb   R1, (R11)
         lm      R2, (SKY_MAPPED_Y)
+SkyPlotPixel:
         plot
+        with    R3
+        add     R7
+        with    R4
+        adc     R8
+        with    R5
+        add     R9
+        with    R6
+        adc     R10
+        inc     R11
+        loop
+        cache   ; Taken LOOP primes its destination, including both layers.
+        sm      (SKY_DDA_S_LO), R3
+        sm      (SKY_DDA_S_HI), R4
+        sm      (SKY_DDA_T_LO), R5
+        sm      (SKY_DDA_T_HI), R6
+        move    R0, #0
+        sm      (SKY_CHUNK_COUNT), R0
+        lm      R11, (SKY_STEP_RETURN)
         ret
         nop
+SkyPixelLoopEnd:
+.if BSP_RENDER_SCALE = 2
+.assert SkyPixelLoopEnd-(SkyPlotMaybeExactSample & $FFFFF0)<=512, lderror, "Exact gate escaped cached loop"
+.else
+.assert * - SkyPlotSample <= $1F0, error, "Sky pixel loop exceeds its cache window"
+.endif
 
 .if BSP_RENDER_SCALE = 3
 SkyFocalNormal:
         .repeat 129, value
           .word .loword((value-64)*128)
         .endrepeat
-SkyFocalOverscan:
-        .repeat 129, value
-          .word .loword((value-64)*BSP_WARP_SOURCE_FOCAL*2)
-        .endrepeat
 .endif
+; The opaque marker phase owns this scratch until its compositor begins.
+; Normal samplers clear it on every call; the fast row publishes its exact
+; bank-$70 continuation. No formerly preserved working register is borrowed.
+SkyMarkerDispatchROM:
+        ; Update every dispatch, including same-face/row hits and split spans.
+        ; The full remaining span is conservative even when a depth test later
+        ; rejects a marker. Never assume the first span covered later fragments.
+        lm      R0, (GSU_SKY_MARKER_LOGICAL_Y_OFFSET)
+        add     R0
+        iwt     R4, #GSU_SKY_ROW_BOUNDS_OFFSET
+        with    R4
+        add     R0
+        move    R0, #0
+        moveb   R0, (R4)
+        lm      R1, (TEXTURE_SPAN_X)
+        with    R1
+        cmp     R0
+        bcs     @MinimumReady
+        nop
+        moveb   (R4), R1
+@MinimumReady:
+        inc     R4
+        moveb   R0, (R4)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        cmp     R1
+        bcs     @MaximumReady
+        nop
+        moveb   (R4), R1
+@MaximumReady:
+        lm      R4, (SKY_RUN_RETURN)
+        moves   R4, R4
+        beq     SkyMarkerDispatchOrdinary
+        nop
+        move    R0, R7
+        GSU_ABSOLUTE_GOTO SkyMarkerReturnToBank70
+SkyMarkerDispatchOrdinary:
+        ; The sampler sees the full logical span end, never an8-pixel block
+        ; endpoint. A clipped surviving first pixel is a valid START boundary.
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        with    R0
+        cmp     R1
+        bne     @TokenReady
+        nop
+        iwt     R1, #BSP_SKY_TOKEN_START
+        with    R7
+        cmp     R1
+        beq     @SingleToken
+        nop
+        iwt     R7, #BSP_SKY_TOKEN_END
+        bra     @TokenReady
+        nop
+@SingleToken:
+        iwt     R7, #BSP_SKY_TOKEN_SINGLE
+@TokenReady:
+        move    R0, R7
+        lm      R1, (TEXTURE_RENDER_MODE)
+        GSU_ABSOLUTE_GOTO SkyMarkerOrdinaryDispatchReady
+; R2 is the exact logical row recovered by the existing inverse PLOT map.
+; The material selector invalidates its face cache on each new command, so the
+; first marker always reaches this hook before any same-face/row dispatch hit.
+SkyMarkerInitializeBounds:
+        sm      (GSU_SKY_MARKER_LOGICAL_Y_OFFSET), R2
+        lm      R0, (GSU_SKY_PRESENT_OFFSET)
+        moves   R0, R0
+        bne     @Ready
+        nop
+        iwt     R4, #GSU_SKY_ROW_BOUNDS_OFFSET
+        iwt     R0, #$00FF               ; empty min=255, max=0
+.ifdef PLAYABLE_MAP_ID
+        move    R1, #BSP_VIEW_HEIGHT
+.else
+        move    R1, #GSU_SKY_ROW_BOUNDS_ROWS
+.endif
+@Clear:
+        movew   (R4), R0
+        inc     R4
+        inc     R4
+        dec     R1
+        bne     @Clear
+        nop
+        move    R0, #0
+@Ready:
+        GSU_ABSOLUTE_GOTO SkyMarkerBoundsPrepared
+
+; The outer scan is bounded; ExtendRun intentionally retains its original
+; viewport limit. A run reaching the conservative end sees one ordinary pixel
+; outside it, or the actual viewport edge, preserving all DDA run endpoints.
+SkyScanRowBounds:
+        lm      R0, (SKY_SCAN_Y)
+        add     R0
+        iwt     R4, #GSU_SKY_ROW_BOUNDS_OFFSET
+        with    R4
+        add     R0
+        move    R8, #0
+        moveb   R8, (R4)
+        inc     R4
+        move    R9, #0
+        moveb   R9, (R4)
+        inc     R9
+        sm      (SKY_ROW_SCAN_END), R9
+        with    R8
+        cmp     R9
+        bcc     @Nonempty
+        nop
+        GSU_ABSOLUTE_GOTO SkyScanRowDone
+@Nonempty:
+        sm      (SKY_SCAN_X), R8
+        GSU_ABSOLUTE_GOTO SkyScanPrepareRow
+SkyScanResumeBounds:
+        lm      R8, (SKY_SCAN_X)
+        lm      R9, (SKY_ROW_SCAN_END)
+SkyScanPrepareRow:
+        ; No-call scan owns R3; SkyProcessRun may clobber it, so both row
+        ; entry and run resume derive the OBJ row base again from mapped Y.
+        lm      R2, (SKY_MAPPED_Y)
+        move    R3, R2
+        iwt     R1, #$FFF8
+        with    R3
+        and     R1
+        with    R3
+        swap
+        with    R3
+        lsr
+        move    R0, R2
+        and     #7
+        add     R0
+        with    R3
+        add     R0
+        ; Install the same cache anchor even if the first block is rejected
+        ; or the row begins with surviving sky before the scalar backedge.
+        GSU_ABSOLUTE_GOTO SkyScanPixelEntry, shared_delay
+        cache
+; Raw RAM loads do not drain either PLOT cache. Do this once before any
+; block test; the established final RPIX still drains completed sky work.
+SkyScanFlushBeforeBlocks:
+        move    R0, #1
+        ramb
+        move    R1, #0
+        move    R2, #0
+        rpix
+        GSU_ABSOLUTE_GOTO SkyCompositor+4
+
+
+.if BSP_RENDER_SCALE = 2
+.include "quake/SkyFloatNormalize.sgs"
+.include "quake/SkyFloatRoundProduct.sgs"
+.include "quake/SkyFloatMultiply.sgs"
+.include "quake/SkyFloatAdd.sgs"
+.include "quake/SkyFloatSqrt.sgs"
+.include "quake/SkyFloatReciprocal.sgs"
+.include "quake/SkyFloatEndpoint.sgs"
+.include "quake/SkyFloatPhase.sgs"
+.include "quake/SkyFloatProjectAdapter.sgs"
+.include "quake/SkyExactGate.sgs"
+.endif
+
 SkyRomCodeEnd:
-.assert ^SkyRomCodeStart = $82, lderror, "Sky compositor left GSU ROM bank $02"
-.assert ^(SkyRomCodeEnd-1) = $82, lderror, "Sky compositor crosses its executable ROM bank"
+.assert ^SkyRomCodeStart = ($80+BSP_GSU_ROM2_BANK), lderror, "Sky compositor left GSU ROM bank $02"
+.assert ^(SkyRomCodeEnd-1) = ($80+BSP_GSU_ROM2_BANK), lderror, "Sky compositor crosses its executable ROM bank"

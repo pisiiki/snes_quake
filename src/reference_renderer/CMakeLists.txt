@@ -52,6 +52,24 @@ add_executable(quake_bsp_reference_renderer
     brushes.cpp
     external_models.cpp
     external_models_packed.cpp
+    gameplay.cpp
+    gameplay_continuation.cpp
+    gameplay_collision.cpp
+    gameplay_pusher.cpp
+    gameplay_entrance.cpp
+    gameplay_exit.cpp
+    gameplay_doors.cpp
+    gameplay_e1m2.cpp
+    gameplay_hub.cpp
+    gameplay_grunt.cpp
+    gameplay_gibs.cpp
+    gameplay_tests.cpp
+    gameplay_vm.cpp
+    gameplay_application.cpp
+    gameplay_models.cpp
+    gameplay_render.cpp
+    gameplay_script.cpp
+    gameplay_tape.cpp
     geometry.cpp
     instrumentation.cpp
     live_demo.cpp
@@ -61,10 +79,11 @@ add_executable(quake_bsp_reference_renderer
     particle_tests.cpp
     report.cpp
     main.cpp
-    presentation_hdma.cpp
-    presentation_warp.cpp
+    presentation.cpp
     sky.cpp
     sky_tests.cpp
+    source_fly_scene.cpp
+    source_fly_aliases.cpp
     tests_reports.cpp
     textured_live.cpp
     turbulence.cpp
@@ -152,6 +171,10 @@ find_program(REFERENCE_RENDERER_CLANG_FORMAT
     NAMES clang-format clang-format-22
     DOC "Clang-Format executable for the reference renderer"
 )
+find_program(REFERENCE_RENDERER_CLANG_TIDY
+    NAMES clang-tidy clang-tidy-22
+    DOC "Clang-Tidy executable for the reference renderer"
+)
 find_program(REFERENCE_RENDERER_PYTHON
     NAMES python python3
     HINTS "$ENV{CONDA_PREFIX}" "$ENV{USERPROFILE}/anaconda3"
@@ -165,15 +188,14 @@ if(NOT REFERENCE_RENDERER_PYTHON)
     )
 endif()
 set(REFERENCE_RENDERER_FORMATTER
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/snes_tooling_cli.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/commands/snes_quake/format_quake_bsp_reference.py"
 )
-if(REFERENCE_RENDERER_CLANG_FORMAT AND REFERENCE_RENDERER_PYTHON)
+if(EXISTS "${REFERENCE_RENDERER_FORMATTER}" AND REFERENCE_RENDERER_CLANG_FORMAT AND REFERENCE_RENDERER_PYTHON)
     add_custom_target(quake_bsp_reference_format
         COMMAND
             "${CMAKE_COMMAND}" -E time
             "${REFERENCE_RENDERER_PYTHON}"
             "${REFERENCE_RENDERER_FORMATTER}"
-            quake.format-quake-bsp-reference
             --clang-format "${REFERENCE_RENDERER_CLANG_FORMAT}"
             --style-file "${CMAKE_CURRENT_SOURCE_DIR}/.clang-format"
             -- ${REFERENCE_RENDERER_FORMAT_FILES}
@@ -190,7 +212,6 @@ if(REFERENCE_RENDERER_CLANG_FORMAT AND REFERENCE_RENDERER_PYTHON)
             "${CMAKE_COMMAND}" -E time
             "${REFERENCE_RENDERER_PYTHON}"
             "${REFERENCE_RENDERER_FORMATTER}"
-            quake.format-quake-bsp-reference
             --clang-format "${REFERENCE_RENDERER_CLANG_FORMAT}"
             --style-file "${CMAKE_CURRENT_SOURCE_DIR}/.clang-format"
             --check -- ${REFERENCE_RENDERER_FORMAT_FILES}
@@ -203,9 +224,39 @@ if(REFERENCE_RENDERER_CLANG_FORMAT AND REFERENCE_RENDERER_PYTHON)
         USES_TERMINAL
         VERBATIM
     )
-elseif(REFERENCE_RENDERER_CLANG_FORMAT)
+elseif(EXISTS "${REFERENCE_RENDERER_FORMATTER}" AND REFERENCE_RENDERER_CLANG_FORMAT)
     message(STATUS
         "Reference renderer formatter targets unavailable: Python 3 was not found"
+    )
+endif()
+
+set(REFERENCE_RENDERER_TIDY_RUNNER
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/commands/snes_quake/run_quake_bsp_reference_clang_tidy.py"
+)
+set(REFERENCE_RENDERER_TIDY_CONFIG
+    "${CMAKE_CURRENT_SOURCE_DIR}/.clang-tidy"
+)
+if(EXISTS "${REFERENCE_RENDERER_TIDY_RUNNER}" AND REFERENCE_RENDERER_CLANG_TIDY AND REFERENCE_RENDERER_PYTHON)
+    add_custom_target(quake_bsp_reference_tidy
+        COMMAND
+            "${CMAKE_COMMAND}" -E time
+            "${REFERENCE_RENDERER_PYTHON}"
+            "${REFERENCE_RENDERER_TIDY_RUNNER}"
+            --clang-tidy "${REFERENCE_RENDERER_CLANG_TIDY}"
+            --build-dir "${CMAKE_BINARY_DIR}"
+            --config-file "${REFERENCE_RENDERER_TIDY_CONFIG}"
+            --source-dir "${CMAKE_CURRENT_SOURCE_DIR}"
+        DEPENDS
+            "${REFERENCE_RENDERER_TIDY_RUNNER}"
+            "${REFERENCE_RENDERER_TIDY_CONFIG}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Checking owned reference-renderer C++ with Clang-Tidy"
+        USES_TERMINAL
+        VERBATIM
+    )
+elseif(EXISTS "${REFERENCE_RENDERER_TIDY_RUNNER}" AND REFERENCE_RENDERER_CLANG_TIDY)
+    message(STATUS
+        "Reference renderer Clang-Tidy target unavailable: Python 3 was not found"
     )
 endif()
 

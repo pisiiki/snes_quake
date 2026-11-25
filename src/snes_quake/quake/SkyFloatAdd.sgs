@@ -1,0 +1,132 @@
+; Signed binary32 add. Inputs normalized24 or zero, signs are 0/1.
+; Three retained low bits plus right-jam give exact RN-even, including
+; cancellation. Swapping by magnitude is internal and does not reassociate.
+.macro SF_SWAP lhs, rhs
+        move    R0, lhs
+        move    lhs, rhs
+        move    rhs, R0
+.endmacro
+SkyFloatAdd24:
+        lm      R4, (SF_A0)
+        lm      R5, (SF_A1)
+        lm      R6, (SF_B0)
+        lm      R7, (SF_B1)
+        lm      R8, (SF_AEXP)
+        lm      R9, (SF_BEXP)
+        lm      R10, (SF_ASIGN)
+        lm      R12, (SF_BSIGN)
+        move    R0, R4
+        with    R0
+        or      R5
+        bne     @ANonzero
+        nop
+        move    R4, R6
+        move    R5, R7
+        move    R8, R9
+        move    R10, R12
+        GSU_ABSOLUTE_GOTO @Publish
+@ANonzero:
+        move    R0, R6
+        with    R0
+        or      R7
+        bne     @BothNonzero
+        nop
+        GSU_ABSOLUTE_GOTO @Publish
+@BothNonzero:
+        move    R0, R8
+        with    R0
+        sub     R9
+        bmi     @Swap
+        nop
+        bne     @Ordered
+        nop
+        with    R5
+        cmp     R7
+        bcc     @Swap
+        nop
+        bne     @Ordered
+        nop
+        with    R4
+        cmp     R6
+        bcs     @Ordered
+        nop
+@Swap:
+        SF_SWAP R4, R6
+        SF_SWAP R5, R7
+        SF_SWAP R8, R9
+        SF_SWAP R10, R12
+@Ordered:
+        sm      (SF_SIGN), R10
+        with    R10
+        xor     R12
+        sm      (SF_SIGN_DIFFERENT), R10
+        move    R12, R8
+        with    R12
+        sub     R9
+        .repeat 3
+          with  R4
+          add   R4
+          with  R5
+          adc   R5
+          with  R6
+          add   R6
+          with  R7
+          adc   R7
+          dec   R8
+        .endrepeat
+        move    R13, #0
+        move    R0, #28
+        with    R12
+        cmp     R0
+        bcc     @AlignCheck
+        nop
+        move    R6, #1
+        move    R7, #0
+        bra     @Combine
+        nop
+@AlignCheck:
+        moves   R12, R12
+        beq     @Aligned
+        nop
+@Align:
+        with    R7
+        lsr
+        with    R6
+        ror
+        move    R1, #0
+        with    R1
+        adc     R1
+        with    R13
+        or      R1
+        dec     R12
+        bne     @Align
+        nop
+@Aligned:
+        with    R6
+        or      R13
+@Combine:
+        lm      R0, (SF_SIGN_DIFFERENT)
+        moves   R0, R0
+        bne     @Subtract
+        nop
+        with    R4
+        add     R6
+        with    R5
+        adc     R7
+        bra     @Normalize
+        nop
+@Subtract:
+        with    R4
+        sub     R6
+        with    R5
+        sbc     R7
+@Normalize:
+        sm      (SF_W0), R4
+        sm      (SF_W1), R5
+        sm      (SF_EXP), R8
+        move    R0, #0
+        sm      (SF_W2), R0
+        GSU_ABSOLUTE_GOTO SkyFloatNormalize48
+@Publish:
+        sm      (SF_SIGN), R10
+        GSU_ABSOLUTE_GOTO @Normalize

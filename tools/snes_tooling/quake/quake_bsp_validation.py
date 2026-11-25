@@ -17,6 +17,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from snes_tooling.shared.ld65_debug import parse_debug_int, parse_debug_record
+
 NATIVE_WIDTH = 256
 
 NATIVE_HEIGHT = 224
@@ -74,11 +76,11 @@ PACKET_FACE_BYTES = 5
 
 PACKET_FACE_PLANE_BYTES = 5
 
-PACKET_VERTEX_CAPACITY = 768
+PACKET_VERTEX_CAPACITY = 880
 
 PACKET_INDEX_CAPACITY = 2_048
 
-PACKET_FACE_CAPACITY = 405
+PACKET_FACE_CAPACITY = 409
 
 PACKET_SIDECARS_ADDRESS = 0x141B0
 
@@ -90,7 +92,7 @@ PACKET_INDICES_ADDRESS = 0x15200
 
 PACKET_FACES_ADDRESS = 0x16202
 
-PACKET_VERTICES_ADDRESS = 0x1B100
+PACKET_VERTICES_ADDRESS = 0x1AF40
 
 PACKET_STREAM_CONTRACT = {
     "vertices": {
@@ -195,6 +197,100 @@ def packet_guard_addresses(
 
 
 PACKET_GUARD_ADDRESSES = packet_guard_addresses()
+
+
+def linked_packet_guard_addresses(debug_info: Path) -> tuple[tuple[str, int], ...]:
+    """Read the guard locations assembled into an explicit playback ROM."""
+    names = {
+        "vertexRemap": "GSU_VERTEX_REMAP_GUARD_OFFSET",
+        "selectedFaces": "GSU_SELECTED_FACES_GUARD_OFFSET",
+        "admissionSidecars": "GSU_PACKET_SIDECARS_GUARD_OFFSET",
+        "vertices": "GSU_VERTICES_GUARD_OFFSET",
+        "indices": "GSU_INDICES_GUARD_OFFSET",
+        "painterNodes": "GSU_PAINTER_NODE_MASK_GUARD_OFFSET",
+        **PACKET_GUARD_LAYOUT_CONSTANTS,
+    }
+    values = {name: set() for name in names.values()}
+    with debug_info.open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.startswith("sym\t") and any(f'name="{name}"' in line for name in values):
+                _, record = parse_debug_record(line)
+                if record.get("type") == "equ" and record["name"] in values:
+                    values[record["name"]].add(parse_debug_int(record["val"]))
+    invalid = [name for name, found in values.items()
+               if len(found) != 1 or not 0 <= next(iter(found)) < 0xFFFF]
+    if invalid:
+        raise ValueError(f"missing, ambiguous or invalid linked packet guards: {', '.join(invalid)}")
+    return tuple((guard, 0x10000 + next(iter(values[name]))) for guard, name in names.items())
+
+
+PACKET_MEMORY_SYMBOLS = {
+    "vertices": "GSU_VERTICES_OFFSET",
+    "indices": "GSU_INDICES_OFFSET",
+    "faces": "GSU_FACES_OFFSET",
+    "facePlanes": "GSU_FACE_PLANES_OFFSET",
+    "sourceFaceIds": "GSU_SOURCE_FACE_IDS_OFFSET",
+}
+PACKET_CAPACITY_SYMBOLS = {
+    "vertexCapacity": ("GSU_VERTICES_CAPACITY", PACKET_VERTEX_BYTES),
+    "indexCapacity": ("GSU_INDICES_CAPACITY", PACKET_INDEX_BYTES),
+    "faceCapacity": ("GSU_FACES_CAPACITY", PACKET_FACE_BYTES),
+}
+
+
+def packet_memory_layout(symbols: Mapping[str, int]) -> dict[str, int]:
+    """Resolve packet addresses/capacities from one assembled ROM's constants."""
+    names = (*PACKET_MEMORY_SYMBOLS.values(),
+             *(name for name, _ in PACKET_CAPACITY_SYMBOLS.values()))
+    invalid = [name for name in names if type(symbols.get(name)) is not int
+               or not 0 <= symbols[name] < 0x10000]
+    if invalid:
+        raise ValueError("missing or invalid packet memory symbols: " + ", ".join(invalid))
+    result = {key: 0x10000 + symbols[name] for key, name in PACKET_MEMORY_SYMBOLS.items()}
+    for key, (name, record_bytes) in PACKET_CAPACITY_SYMBOLS.items():
+        capacity = symbols[name] // record_bytes
+        if capacity < 1:
+            raise ValueError(f"packet memory symbol {name} cannot hold one record")
+        result[key] = capacity
+    for stream, capacity, record_bytes in (("vertices", "vertexCapacity", PACKET_VERTEX_BYTES),
+            ("indices", "indexCapacity", PACKET_INDEX_BYTES), ("faces", "faceCapacity", PACKET_FACE_BYTES)):
+        if result[stream] + result[capacity] * record_bytes > 0x20000:
+            raise ValueError(f"packet {stream} escapes its GSU RAM bank")
+    return result
+
+
+def linked_packet_memory_layout(debug_info: Path) -> dict[str, int]:
+    """Use ld65 constants, including evaluated expressions, for an explicit ROM."""
+    names = (*PACKET_MEMORY_SYMBOLS.values(),
+             *(name for name, _ in PACKET_CAPACITY_SYMBOLS.values()))
+    values = {name: set() for name in names}
+    with debug_info.open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.startswith("sym\t") and any(f'name="{name}"' in line for name in values):
+                _, record = parse_debug_record(line)
+                if record.get("type") == "equ" and record["name"] in values:
+                    values[record["name"]].add(parse_debug_int(record["val"]))
+    invalid = [name for name, found in values.items() if len(found) != 1]
+    if invalid:
+        raise ValueError("missing or ambiguous linked packet memory: " + ", ".join(invalid))
+    return packet_memory_layout({name: next(iter(found)) for name, found in values.items()})
+
+
+def _packet_memory(layout: Mapping[str, int] | None) -> dict[str, int]:
+    if layout is None:
+        return dict(vertices=PACKET_VERTICES_ADDRESS, indices=PACKET_INDICES_ADDRESS,
+                    faces=PACKET_FACES_ADDRESS, facePlanes=PACKET_FACE_PLANES_ADDRESS,
+                    sourceFaceIds=PACKET_SOURCE_FACES_ADDRESS,
+                    vertexCapacity=PACKET_VERTEX_CAPACITY, indexCapacity=PACKET_INDEX_CAPACITY,
+                    faceCapacity=PACKET_FACE_CAPACITY)
+    names = (*PACKET_MEMORY_SYMBOLS,
+             *PACKET_CAPACITY_SYMBOLS)
+    missing = [name for name in names if name not in layout]
+    if missing:
+        raise ValueError("packet memory layout lacks " + ", ".join(missing))
+    return dict(layout)
+
+
 
 WAYPOINT_ORDER = ("spawn", "near", "far", "return-spawn")
 
@@ -365,6 +461,21 @@ ARRAY_SYMBOLS = {
 }
 
 REQUIRED_SYMBOLS = (*SCALAR_SYMBOLS, *ARRAY_SYMBOLS)
+# Older ROMs expose their .dem scheduler through this part of the telemetry ABI.
+LEGACY_SCHEDULER_SYMBOLS = frozenset((
+    "demo_coalesced_counter",
+    "demo_loop_counter",
+    "demo_next_pose",
+    "demo_offset",
+    "demo_ordered_pose_stride",
+    "demo_playback_rate_shift",
+    "demo_playhead_tick",
+    "demo_pose_counter",
+    "demo_pose_due_tick",
+    "demo_schedule",
+    "demo_source_due_counter",
+    "demo_timing_offset",
+))
 
 SYMBOL_SIZES = {**{name: 2 for name in SCALAR_SYMBOLS}, **ARRAY_SYMBOLS}
 
@@ -577,10 +688,13 @@ def parse_cpu_symbols(text: str) -> dict[str, int]:
 
 
 def require_symbols(symbols: dict[str, int]) -> dict[str, int]:
-    missing = [name for name in REQUIRED_SYMBOLS if name not in symbols]
+    names = REQUIRED_SYMBOLS
+    if LEGACY_SCHEDULER_SYMBOLS.isdisjoint(symbols):
+        names = tuple(name for name in names if name not in LEGACY_SCHEDULER_SYMBOLS)
+    missing = [name for name in names if name not in symbols]
     if missing:
         raise ValueError("symbol file lacks required labels: " + ", ".join(missing))
-    selected = {name: symbols[name] for name in REQUIRED_SYMBOLS}
+    selected = {name: symbols[name] for name in names}
     if "CAMERA_ANGLE_STEPS" in symbols:
         selected["CAMERA_ANGLE_STEPS"] = symbols["CAMERA_ANGLE_STEPS"]
     return selected
@@ -649,8 +763,10 @@ def decode_sky_pipeline_state(
 
 
 def symbol_memory_window(symbols: dict[str, int]) -> tuple[int, int]:
-    start = min(symbols[name] for name in REQUIRED_SYMBOLS)
-    end = max(symbols[name] + SYMBOL_SIZES[name] for name in REQUIRED_SYMBOLS)
+    names = (name for name in require_symbols(symbols) if name in SYMBOL_SIZES)
+    fields = tuple(names)
+    start = min(symbols[name] for name in fields)
+    end = max(symbols[name] + SYMBOL_SIZES[name] for name in fields)
     return start, end - start
 
 
@@ -660,6 +776,8 @@ def decode_telemetry(
     from snes_tooling.quake.quake_camera_angles import rom_angle_steps
 
     def word(name: str, index: int = 0) -> int:
+        if name in LEGACY_SCHEDULER_SYMBOLS and name not in symbols:
+            return 0
         offset = symbols[name] - memory_base + index * 2
         if offset < 0 or offset + 2 > len(memory):
             raise ValueError(f"symbol {name!r} escapes the telemetry memory window")
@@ -797,24 +915,33 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def packet_evidence(session: Any, telemetry: Any) -> dict[str, Any]:
-    """Hash every published packet stream under the canonical runtime layout."""
+def packet_evidence(session: Any, telemetry: Any, *,
+                    layout: Mapping[str, int] | None = None,
+                    symbols: Mapping[str, int] | None = None) -> dict[str, Any]:
+    """Hash a packet using explicit compiled layout or the legacy default."""
+    if symbols is not None:
+        if layout is not None:
+            raise ValueError("pass packet memory symbols or layout, not both")
+        layout = packet_memory_layout(symbols)
+    memory = _packet_memory(layout)
     packet = telemetry.packet
+    if layout is not None:
+        validate_packet_counts(packet, layout=layout)
     face_count = packet.face_count
     source_faces = session.read_memory(
-        "gsuRam", PACKET_SOURCE_FACES_ADDRESS, face_count * 2
+        "gsuRam", memory["sourceFaceIds"], face_count * 2
     )
     vertices = session.read_memory(
-        "gsuRam", PACKET_VERTICES_ADDRESS, packet.vertex_count * PACKET_VERTEX_BYTES
+        "gsuRam", memory["vertices"], packet.vertex_count * PACKET_VERTEX_BYTES
     )
     indices = session.read_memory(
-        "gsuRam", PACKET_INDICES_ADDRESS, packet.index_count * PACKET_INDEX_BYTES
+        "gsuRam", memory["indices"], packet.index_count * PACKET_INDEX_BYTES
     )
     faces = session.read_memory(
-        "gsuRam", PACKET_FACES_ADDRESS, face_count * PACKET_FACE_BYTES
+        "gsuRam", memory["faces"], face_count * PACKET_FACE_BYTES
     )
     face_planes = session.read_memory(
-        "gsuRam", PACKET_FACE_PLANES_ADDRESS, face_count * PACKET_FACE_PLANE_BYTES
+        "gsuRam", memory["facePlanes"], face_count * PACKET_FACE_PLANE_BYTES
     )
     return {
         "leaf": telemetry.active_leaf,
@@ -1027,16 +1154,18 @@ def load_packet_fixtures(
     return tuple(by_name[name] for name in order)
 
 
-def validate_packet_counts(packet: PacketTelemetry) -> None:
-    if not 0 <= packet.vertex_count <= PACKET_VERTEX_CAPACITY:
+def validate_packet_counts(packet: PacketTelemetry, *,
+                           layout: Mapping[str, int] | None = None) -> None:
+    memory = _packet_memory(layout)
+    if not 0 <= packet.vertex_count <= memory["vertexCapacity"]:
         raise VerificationError(
             f"packet vertex count is out of range: {packet.vertex_count}"
         )
-    if not 0 <= packet.index_count <= PACKET_INDEX_CAPACITY:
+    if not 0 <= packet.index_count <= memory["indexCapacity"]:
         raise VerificationError(
             f"packet index count is out of range: {packet.index_count}"
         )
-    if not 0 <= packet.face_count <= PACKET_FACE_CAPACITY:
+    if not 0 <= packet.face_count <= memory["faceCapacity"]:
         raise VerificationError(
             f"packet face count is out of range: {packet.face_count}"
         )
@@ -1067,7 +1196,7 @@ def manual_fixture_failures(telemetry: Telemetry, fixture: PacketFixture) -> lis
         signed_word(value)
         for value in (telemetry.controls.x, telemetry.controls.y, telemetry.controls.z)
     )
-    expected_camera_q8 = tuple(value << 8 for value in fixture.camera)
+    expected_camera_q8 = tuple(getattr(fixture, "camera_q8", tuple(value << 8 for value in fixture.camera)))
     failures: list[str] = []
     if telemetry.demo_mode != 0:
         failures.append(f"demo mode is {telemetry.demo_mode}, expected manual mode 0")

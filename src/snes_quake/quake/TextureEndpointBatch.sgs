@@ -17,9 +17,17 @@
 ; Clobbers R0-R14, flags, and ROMB. The caller's R11 is preserved in low RAM.
 
 .segment "GSU_AUX_CODE"
+.export TextureEndpointBatchMathCall, TextureEndpointBatchMath
+.export TextureEndpointLoadRowCall, TextureEndpointLoadRow, TextureEndpointLoadRowEnd, TextureEndpointLoadRowStoreEnd
 
 ; One row does not amortize switching to and from the private math cache.
 TEXTURE_ENDPOINT_BATCH_MIN_ROWS = 2
+
+; Projection has retired both view buffers before endpoint staging begins.
+; Keep exact signed {first,last} words for all staged rows, including empties.
+TEXTURE_REPLAY_BOUNDS = TEXTURE_VIEW_A
+TEXTURE_REPLAY_BOUNDS_CURSOR = CONVEX_OUTPUT_CURSOR
+.assert GSU_LIGHTMAP_ROW_STAGE_ROWS * 4 <= TEXTURE_SCREEN - TEXTURE_VIEW_A, error, "Replay bounds exceed retired view scratch"
 
 TexturePrepareFaceEndpointBatch:
         sm      (GSU_TEXTURE_ENDPOINT_RETURN_OFFSET), R11
@@ -27,6 +35,7 @@ TexturePrepareFaceEndpointBatch:
         ; every staged row has fit in the bounded arena.
         move    R0, #0
         sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+        sm      (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET), R0
         lm      R0, (TEXTURE_LIGHTMAP_FAST_ROUTINE)
         to      R1
         sub     #TEXTURE_ENDPOINT_BATCH_MIN_ROWS
@@ -42,7 +51,9 @@ TextureEndpointBatchEligible:
 
         ; Prime the private projective sampler once per face. Executing this
         ; cold controller outside its window does not change CBR or its lines.
+TextureEndpointBatchMathCall:
         jal     TextureEndpointBatchMath
+.assert * - TextureEndpointBatchMathCall = 5, error, "Endpoint math JAL operand contract changed"
         nop
 
 TextureEndpointBatchNextRow:
@@ -58,7 +69,9 @@ TextureEndpointBatchRowAvailable:
         ; TexturePerspectiveSampleSpan from one interleaved 16-byte record.
         ; The batch math window is still resident, so run this RAM load burst
         ; there instead of competing with controller instruction fetches.
+TextureEndpointLoadRowCall:
         jal     TextureEndpointLoadRow
+.assert * - TextureEndpointLoadRowCall = 5, error, "Endpoint loader JAL operand changed"
         nop
 
         ; Match ReplayRows' covered-interval conversion byte for byte.
@@ -124,6 +137,18 @@ TextureEndpointPrepareDivideQ12:
         iwt     R10, #TextureEndpointPrepareDivideReady
         GSU_ABSOLUTE_GOTO TextureEndpointDivideLookup
 TextureEndpointBatchComplete:
+  .ifdef BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+    .if BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+        ; Validate the actual reconstructed stream, including clipped edges.
+        ; Source-vertex bounds alone do not constrain every legacy endpoint.
+        move    R11, #BSP_LIGHTMAP_UNPACK_ROM_BANK
+        iwt     R0, #.loword(TextureEndpointValidateWorldROM)
+        from    R0
+        ljmp    R11
+        nop
+    .endif
+  .endif
+TextureEndpointBatchPublish:
         iwt     R0, #GSU_TEXTURE_ENDPOINT_STAGE_OFFSET
         sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
 TextureEndpointBatchReturn:
@@ -133,25 +158,28 @@ TextureEndpointBatchReturn:
 TextureEndpointBatchOverflow:
         move    R0, #0
         sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+        sm      (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET), R0
         bra     TextureEndpointBatchReturn
         nop
 
-; Drop-in sampler ABI for the two technique-4 endpoint calls. A successful
-; full-face batch returns the next buffered pair; overflow or any unstaged
-; caller tail-jumps to the established exact sampler with R11 untouched.
-TexturePerspectiveSampleSpanBuffered:
-        lm      R10, (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET)
-        moves   R10, R10
-        beq     TexturePerspectiveSampleSpanBufferedFallback
-        ; On fallback this benign read is discarded by the exact sampler. On
-        ; the buffered path it fills the otherwise idle branch delay.
-        movew   R5, (R10)
-        inc     R10
-        inc     R10
-        movew   R6, (R10)
-        inc     R10
-        inc     R10
-        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R10
+; Aligned Q15 reciprocals for widths1..8. Width1 has no remainder; its dummy
+; coefficient is harmless. ROMB/R14 stay untouched by the bank0 word lookup.
+TextureCoordinateFractionScale:
+        .assert (TextureCoordinateFractionScale & 1) = 0, lderror, "Coordinate fraction table must be word-aligned"
+        .word   $0001, $4000, $2AAB, $2000
+        .word   $199A, $1556, $124A, $1000
+
+; Both brush compositors advance a memory-backed cursor. The cached
+; builder supplies its own callback, and the ordinary fallback names its pixel entry.
+BrushArbiterSpanCoordinateCursor:
+        iwt     R11, #BrushArbiterSpanPixel
+        bra     BrushPublishCoordinateCursor
+        nop
+BrushCachedBuildCoordinateDone:
+        lm      R11, (TEXTURE_COORD_RETURN)
+BrushPublishCoordinateCursor:
+        iwt     R0, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        sm      (TEXTURE_COORD_PTR), R0
         ret
         nop
 TexturePerspectiveSampleSpanBufferedFallback:
@@ -214,11 +242,13 @@ TextureEndpointSampleScreenDivide:
 TextureEndpointSampleFactorReady:
         ; Convert the screen factor to the exact perspective world factor.
         lm      R5, (TEXTURE_BASE_DEPTH)
-        move    R6, R3
-  .repeat 3
-        with    R6
-        add     R6
-  .endrepeat
+        ; R0 is dead before either multiply/unity continuation. The final
+        ; ADD has the original 4*factor operands, including all16-bit flags.
+        from    R3
+        add     R3
+        add     R0
+        to      R6
+        add     R0
         bmi     TextureEndpointFactorUnityProducts
         nop
         BSP_SIGNED_MUL_SCALED8_SHIFT12 R5
@@ -228,6 +258,10 @@ TextureEndpointSampleFactorReady:
         move    R1, R0
         bra     TextureEndpointFactorProductsReady
         nop
+        ; Both paths already exited; retain every following public entry.
+  .repeat 3
+        nop
+  .endrepeat
 TextureEndpointFactorUnityProducts:
         move    R12, R5
         lm      R7, (TEXTURE_DELTA_DEPTH)
@@ -255,11 +289,13 @@ TextureEndpointFactorUnity:
 TextureEndpointCoordinates:
         lm      R5, (TEXTURE_BASE_S)
         lm      R7, (TEXTURE_DELTA_S)
-        move    R6, R3
-  .repeat 3
-        with    R6
-        add     R6
-  .endrepeat
+        ; R0 is dead before either multiply/unity continuation. The final
+        ; ADD has the original 4*factor operands, including all16-bit flags.
+        from    R3
+        add     R3
+        add     R0
+        to      R6
+        add     R0
         bmi     TextureEndpointCoordinatesUnity
         nop
         BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
@@ -273,6 +309,10 @@ TextureEndpointCoordinates:
         move    R5, R8
         bra     TextureEndpointSampleReturn
         nop
+        ; Both paths already exited; retain every following public entry.
+  .repeat 3
+        nop
+  .endrepeat
 TextureEndpointCoordinatesUnity:
         lm      R0, (TEXTURE_DELTA_S)
         with    R5
@@ -391,9 +431,14 @@ TextureEndpointLoadRow:
         sm      (TEXTURE_DELTA_DEPTH), R4
         inc     R10
         inc     R10
+TextureEndpointLoadRowStore:
         sm      (GSU_TEXTURE_ENDPOINT_ROW_PTR_OFFSET), R10
+TextureEndpointLoadRowStoreEnd:
+.assert TextureEndpointLoadRowStoreEnd - TextureEndpointLoadRowStore = 3, error, "Endpoint loader patch footprint changed"
         ret
         nop
+TextureEndpointLoadRowEnd:
+.assert TextureEndpointLoadRowEnd - TextureEndpointLoadRow = 68, error, "Original row loader extent changed"
 
 ; Once a row has produced its first endpoint, keep the capacity gate and the
 ; next projective dispatch in the same private window as the sampler. This is
@@ -478,6 +523,22 @@ GSU_CACHE_KERNEL_END TextureEndpointBatchMath
 
 .segment "GSU_TEXTURE_TAIL_CODE"
 TextureEndpointDivideCorrectionCold:
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+        ; q is exact or one high: signed low residual is within +/-32766.
+        move    R6, R9
+        from    R3
+        lmult
+        move    R12, R4
+        iwt     R6, #4096
+        from    R8
+        lmult
+        with    R12
+        sub     R4
+        bmi     TextureEndpointDivideCorrectionColdReady
+        nop
+        beq     TextureEndpointDivideCorrectionColdReady
+        nop
+.else
         move    R6, R9
         from    R3
         lmult
@@ -498,6 +559,7 @@ TextureEndpointDivideCorrectionCold:
         nop
         beq     TextureEndpointDivideCorrectionColdReady
         nop
+.endif
 TextureEndpointDivideCorrectionColdApply:
         dec     R3
 TextureEndpointDivideCorrectionColdReady:
@@ -510,80 +572,110 @@ TextureEndpointDivideCorrectionColdReady:
 ; caller's lightmap window remains live when they jump back to the cached DDA.
 TextureBuildCoordinateBlock:
         sm      (TEXTURE_COORD_RETURN), R11
-        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+2
-        lm      R5, (TEXTURE_SPAN_S)
-        lm      R6, (TEXTURE_SPAN_T)
         lm      R7, (TEXTURE_STEP_S)
         lm      R8, (TEXTURE_STEP_T)
         lm      R9, (TEXTURE_REM_S)
         lm      R13, (TEXTURE_REM_T)
-        move    R1, #0
-        move    R2, #0
-        lm      R3, (TEXTURE_SPAN_DEN)
-        move    R12, R3
-        ; Bias both DDA residuals into [-den, -1]. The cached loop can then
-        ; branch on the accumulator sign directly instead of subtracting the
-        ; denominator into a temporary for every coordinate.
-        with    R1
-        sub     R3
-        with    R2
-        sub     R3
         lm      R4, (TEXTURE_SIGN_S)
         lm      R11, (TEXTURE_SIGN_T)
-TextureBuildCoordinateStateReady:
-        moves   R4, R4
-        bpl     TextureBuildCoordinateSStepReady
-        nop
-        move    R0, #0
-        sub     R7
-        move    R7, R0
-TextureBuildCoordinateSStepReady:
-        moves   R11, R11
-        bpl     TextureBuildCoordinateTStepReady
-        nop
-        move    R0, #0
-        sub     R8
-        move    R8, R0
-TextureBuildCoordinateTStepReady:
-        lm      R0, (TEXTURE_WRAP_FLAGS)
-        moves   R0, R0
-        bpl     TextureBuildCoordinateOrdinary
-        nop
-        ; The composed loop keeps its original pointer contract during the
-        ; ordinary-loop scheduling qualification below.
-        inc     R10
-        inc     R10
-        GSU_ABSOLUTE_GOTO TextureComposedBuildCoordinateLoop
-TextureBuildCoordinateOrdinary:
-        GSU_ABSOLUTE_GOTO TextureBuildCoordinateLoop, shared_delay
-        with    R5
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateSetupCommon
 
+; Keep the frequent register-fed lightmap route contiguous with its
+; normalization tail. The uncommon classic/albedo paths use the jumps.
 TextureBuildCoordinateBlockAlbedoRegisters:
         iwt     R0, #TextureAlbedoCoordinateBlockReady
-TextureBuildCoordinateBlockRegisters:
-        sm      (TEXTURE_COORD_RETURN), R0
-        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+2
-        lm      R5, (TEXTURE_SPAN_S)
-        lm      R6, (TEXTURE_SPAN_T)
-        move    R1, #0
-        move    R2, #0
-        lm      R3, (TEXTURE_SPAN_DEN)
-        move    R12, R3
-        with    R1
-        sub     R3
-        with    R2
-        sub     R3
-        GSU_ABSOLUTE_GOTO TextureBuildCoordinateStateReady
-
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
 TextureBuildCoordinateBlockLightmapRegisters:
         iwt     R0, #TextureLightmapCoordinateBlockReady
-        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
+TextureBuildCoordinateBlockRegisters:
+        sm      (TEXTURE_COORD_RETURN), R0
+TextureBuildCoordinateSetupCommon:
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+.else
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        moves   R0, R0
+        bpl     TextureBuildCoordinateSetupOrdinary
+        nop
+        GSU_ABSOLUTE_GOTO TextureComposedCoordinateStateSetup
+.endif
+TextureBuildCoordinateSetupOrdinary:
+        lm      R3, (TEXTURE_SPAN_DEN)
+        move    R12, R3
+        from    R3
+        add     R3
+        iwt     R10, #TextureCoordinateFractionScale-2
+        with    R10
+        add     R0
+        move    R0, #0
+        ramb
+        movew   R6, (R10)
+        inc     R0
+        ramb
+        ; For d<=8, |signed remainder*ceil(32768/d)|<32768. Its high word
+        ; is0/-1 before and after doubling: integer correction and carry bias.
+        moves   R4, R4
+        bpl     TextureBuildCoordinateSPositive
+        nop
+        with    R7
+        not
+        inc     R7
+TextureBuildCoordinateSPositive:
+        with    R9
+        mult    R4
+        to      R1
+        from    R9
+        lmult
+        with    R7
+        add     R1
+        to      R9
+        from    R4
+        add     R4
+        moves   R11, R11
+        bpl     TextureBuildCoordinateTPositive
+        nop
+        with    R8
+        not
+        inc     R8
+TextureBuildCoordinateTPositive:
+        with    R13
+        mult    R11
+        to      R2
+        from    R13
+        lmult
+        with    R8
+        add     R2
+        to      R3
+        from    R4
+        add     R4
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+        GSU_COMPOSED_GOTO_IF_SELECTED TextureComposedCarryFinish
+.endif
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateOrdinaryFinish
+.assert * - TextureBuildCoordinateBlock <= 120, error, "Coordinate carry setup exceeds its pinned slot"
+        .res 120 - (* - TextureBuildCoordinateBlock)
+
 
 ; Complete exact correction for the cached Q12 divide. The cache-resident
 ; remainder test dispatches here only when it cannot prove the reciprocal
 ; estimate exact. Inputs and output match TextureDivideQ12LoadedCached:
 ; R8=numerator, R9=denominator, R3=estimate; returns exact quotient in R3.
 TextureDivideQ12CorrectionCold:
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+        ; q is exact or one high: signed low residual is within +/-32766.
+        move    R6, R9
+        from    R3
+        lmult
+        move    R12, R4
+        iwt     R6, #4096
+        from    R8
+        lmult
+        with    R12
+        sub     R4
+        bmi     TextureDivideQ12CorrectionColdReady
+        nop
+        beq     TextureDivideQ12CorrectionColdReady
+        nop
+.else
         move    R6, R9
         from    R3
         lmult
@@ -604,10 +696,147 @@ TextureDivideQ12CorrectionCold:
         nop
         beq     TextureDivideQ12CorrectionColdReady
         nop
+.endif
 TextureDivideQ12CorrectionColdApply:
         dec     R3
 TextureDivideQ12CorrectionColdReady:
         ret
         nop
 
+.if BSP_RENDER_SCALE = 2
+  .ifdef PLAYABLE_Q12_QUOTIENT_PROOF
+        .include "TextureDivideQ12CheckEstimate.sgs"
+  .endif
+  .if .defined(PLAYABLE_FLAT_BRUSH_FRAGMENT) && !.defined(PLAYABLE_FLAT_BRUSH_FRAGMENT_SELECTOR)
+        .include "FlatBrushFragmentPatch.sgs"
+  .endif
+.endif
+
 .assert * - TexturePrepareFaceEndpointBatch <= GSU_AUX_CODE_CAPACITY, error, "Endpoint batch helper exceeds auxiliary GSU code"
+
+.segment "GSU_LIGHTMAP_UNPACK_ROM_CODE"
+; A complete stream is checked before READ_PTR or the qualification word is
+; published. Bias signed coordinates into unsigned order; clamp a grid's upper
+; bound to INT16_MAX instead of wrapping it when the grid extends past Q4's
+; signed domain. Both axis diameters must be below 32768, so every subsequent
+; quotient/remainder DDA stays between its checked endpoints without wrapping.
+GSU_CACHE_KERNEL_BEGIN TextureEndpointValidateWorldROM
+        lm      R0, (TEXTURE_RASTER_RETURN)
+        iwt     R1, #WorldLightmapRasterReturn
+        cmp     R1
+        beq     TextureEndpointValidateWorldOwner
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointValidateWorldDone
+TextureEndpointValidateWorldOwner:
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bpl     TextureEndpointValidateWorldBank
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointValidateWorldDone
+TextureEndpointValidateWorldBank:
+        lm      R0, (LIGHTMAP_HEIGHT)
+        dec     R0
+        iwt     R1, #128
+        cmp     R1
+        bcc     TextureEndpointValidateWorldHeight
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointValidateWorldDone
+TextureEndpointValidateWorldHeight:
+        iwt     R13, #$8000
+        lm      R0, (LIGHTMAP_MIN_BLOCK_S)
+        lob
+        swap
+        xor     R13
+        move    R1, R0
+        lm      R0, (LIGHTMAP_WIDTH)
+        dec     R0
+        swap
+        add     R1
+        bcc     TextureEndpointValidateWorldSMax
+        nop
+        iwt     R0, #$FFFF
+TextureEndpointValidateWorldSMax:
+        move    R2, R0
+        lm      R0, (LIGHTMAP_MIN_BLOCK_T)
+        lob
+        swap
+        xor     R13
+        move    R3, R0
+        lm      R0, (LIGHTMAP_HEIGHT)
+        dec     R0
+        swap
+        add     R3
+        bcc     TextureEndpointValidateWorldTMax
+        nop
+        iwt     R0, #$FFFF
+TextureEndpointValidateWorldTMax:
+        move    R4, R0
+.if .defined(PLAYABLE_ENDPOINT_RANGE_CHECK) && (BSP_RENDER_SCALE = 2)
+        ; Keep the saturated bounds. Subtracting the raw signed minimum
+        ; wraps below-range values above the inclusive interval length.
+        with    R2
+        sub     R1
+        inc     R2
+        with    R4
+        sub     R3
+        inc     R4
+        with    R1
+        xor     R13
+        with    R3
+        xor     R13
+.endif
+        iwt     R10, #GSU_TEXTURE_ENDPOINT_STAGE_OFFSET
+        lm      R12, (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET)
+        with    R10
+        cmp     R12
+        beq     TextureEndpointValidateWorldDone
+        nop
+TextureEndpointValidateWorldLoop:
+.if .defined(PLAYABLE_ENDPOINT_RANGE_CHECK) && (BSP_RENDER_SCALE = 2)
+        movew   R0, (R10)
+        sub     R1
+        cmp     R2
+        bcs     TextureEndpointValidateWorldDone
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        sub     R3
+        cmp     R4
+        bcs     TextureEndpointValidateWorldDone
+        inc     R10
+        inc     R10
+.else
+        movew   R0, (R10)
+        xor     R13
+        cmp     R1
+        bcc     TextureEndpointValidateWorldDone
+        nop
+        with    R2
+        cmp     R0
+        bcc     TextureEndpointValidateWorldDone
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        xor     R13
+        cmp     R3
+        bcc     TextureEndpointValidateWorldDone
+        nop
+        with    R4
+        cmp     R0
+        bcc     TextureEndpointValidateWorldDone
+        inc     R10
+        inc     R10
+.endif
+        with    R10
+        cmp     R12
+        bne     TextureEndpointValidateWorldLoop
+        nop
+        iwt     R0, #$8000
+        sm      (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET), R0
+TextureEndpointValidateWorldDone:
+        move    R11, #$70
+        iwt     R0, #TextureEndpointBatchPublish
+        from    R0
+        ljmp    R11
+        nop
+GSU_CACHE_KERNEL_END TextureEndpointValidateWorldROM

@@ -5,9 +5,9 @@
 .assert BSP_TURBULENCE_PHASE_RECORD_BYTES = 3, error, "Turbulence staging requires packed LE24 Q16 phases"
 .assert BSP_TURBULENCE_PHASE_POSE_COUNT = BSP_DEMO_PRECISE_TRACK_POSE_COUNT, error, "Turbulence phase count must match the precise demo track"
 .assert BSP_TURBULENCE_FLY_CLOCK_FRACTION_BITS = 8, error, "Fly turbulence residual must remain Q8"
-.assert BSP_TURBULENCE_PHASE_GSU_ROM_BANK = $03, error, "Turbulence phase identity moved from GSU ROM bank $03"
-.assert BSP_TURBULENCE_PHASE_GSU_ROM_ADDRESS >= $8000, error, "Turbulence phase table escaped GSU ROM bank $03"
-.assert BSP_TURBULENCE_PHASE_GSU_ROM_END_ADDRESS <= $10000, error, "Turbulence phase table crosses GSU ROM bank $03"
+.assert BSP_TURBULENCE_PHASE_GSU_ROM_BANK = BSP_TURBULENCE_PHASE_EXPECTED_ROM_BANK, error, "Turbulence phase identity disagrees with its assigned bank"
+.assert ((BSP_TURBULENCE_PHASE_GSU_ROM_BANK < $40) .and (BSP_TURBULENCE_PHASE_GSU_ROM_ADDRESS >= $8000)) .or ((BSP_TURBULENCE_PHASE_GSU_ROM_BANK >= $40) .and (BSP_TURBULENCE_PHASE_GSU_ROM_BANK < $70) .and (BSP_TURBULENCE_PHASE_GSU_ROM_ADDRESS >= 0)), error, "Turbulence phase table escaped GSU ROM"
+.assert BSP_TURBULENCE_PHASE_GSU_ROM_END_ADDRESS <= $10000, error, "Turbulence phase table crosses its GSU ROM bank"
 
 .segment "CODE"
 InitTurbulenceClock:
@@ -33,11 +33,22 @@ InitTurbulenceClock:
 ; Advance the fly clock from unpaused NTSC VBlank. The generated residual
 ; schedule tracks Quake's 20-Hz phase without tying animation to render FPS.
 UpdateFlyTurbulenceClock:
-        RW_forced a16i16
+        RW_assume a16i16
+.ifndef PLAYABLE_MAP_ID
         lda     runtime_menu_open
         bne     @Return
-        lda     demo_mode
-        bne     @Return
+.endif
+.ifdef PLAYABLE_MAP_ID
+        lda     fly_turbulence_phase_fraction_q8
+        clc
+        adc     #BSP_TURBULENCE_FLY_CLOCK_FRACTION_STEP_Q8
+        cmp     #$0100
+        and     #$00FF
+        sta     fly_turbulence_phase_fraction_q8
+        ; The comparison's carry is the fractional phase rollover.
+        lda     fly_turbulence_phase_q16
+        adc     #BSP_TURBULENCE_FLY_CLOCK_PHASE_STEP_Q16
+.else
         lda     fly_turbulence_phase_fraction_q8
         clc
         adc     #BSP_TURBULENCE_FLY_CLOCK_FRACTION_STEP_Q8
@@ -53,6 +64,7 @@ UpdateFlyTurbulenceClock:
 @AddPhase:
         clc
         adc     fly_turbulence_phase_q16
+.endif
         sta     fly_turbulence_phase_q16
         lda     fly_turbulence_phase_q16+2
         adc     #0
@@ -60,61 +72,6 @@ UpdateFlyTurbulenceClock:
         sta     fly_turbulence_phase_q16+2
         inc     fly_turbulence_clock_revision
 @Return:
-        rts
-
-; Seed fly mode from the newest frame that can become visible. The Q16 value
-; comes from renderer server time, preserving the fractional phase at the
-; demo/fly boundary instead of restarting or using wall-clock render cadence.
-SeedFlyTurbulenceClockFromDemo:
-        RW_assume a16i16
-        lda     frame_ready
-        beq     @NoReadyFrame
-        ldx     #0
-        lda     ready_slot
-        beq     :+
-        ldx     #2
-:
-        lda     slot_demo_pose,x
-        bra     @SeedPoseReady
-@NoReadyFrame:
-        lda     upload_active
-        beq     @UsePresentedPose
-        ldx     #0
-        lda     upload_slot
-        beq     :+
-        ldx     #2
-:
-        lda     slot_demo_pose,x
-        bra     @SeedPoseReady
-@UsePresentedPose:
-        lda     presented_demo_pose
-@SeedPoseReady:
-        cmp     #BSP_TURBULENCE_PHASE_POSE_COUNT
-        bcs     @RenderedPhaseFallback
-        sta     fly_turbulence_phase_fraction_q8
-        asl
-        clc
-        adc     fly_turbulence_phase_fraction_q8
-        tax
-        RW      a8
-        lda     f:QuakeBSPTurbulencePhases+0,x
-        sta     fly_turbulence_phase_q16+0
-        lda     f:QuakeBSPTurbulencePhases+1,x
-        sta     fly_turbulence_phase_q16+1
-        lda     f:QuakeBSPTurbulencePhases+2,x
-        sta     fly_turbulence_phase_q16+2
-        stz     fly_turbulence_phase_q16+3
-        RW      a16
-        bra     @Ready
-@RenderedPhaseFallback:
-        lda     presented_turbulence_phase_q16+0
-        sta     fly_turbulence_phase_q16+0
-        lda     presented_turbulence_phase_q16+2
-        and     #$007F
-        sta     fly_turbulence_phase_q16+2
-@Ready:
-        stz     fly_turbulence_phase_fraction_q8
-SeedFlyTurbulenceClockFromDemoDone:
         rts
 
 ; Publish one coherent integer phase after the owning render command is

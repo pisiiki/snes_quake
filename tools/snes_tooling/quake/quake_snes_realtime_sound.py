@@ -138,13 +138,30 @@ def resample_wave_pcm(
     wave: QuakeWave,
     *,
     output_rate_hz: int = OUTPUT_RATE_HZ,
+    bandlimit: bool = False,
 ) -> tuple[int, ...]:
-    """Linearly resample one mono Quake wave with deterministic Q15 output."""
+    """Resample one mono Quake wave with deterministic Q15 output."""
 
     if output_rate_hz <= 0:
         raise ValueError("output sample rate must be positive")
     if not wave.samples:
         raise ValueError("cannot resample an empty Quake wave")
+
+    samples = wave.samples
+    if bandlimit and output_rate_hz < wave.sample_rate_hz:
+        import numpy as np
+
+        ratio = output_rate_hz / wave.sample_rate_hz
+        radius = int(32 / ratio + 0.5)
+        taps = np.sinc(0.86 * ratio * np.arange(-radius, radius + 1))
+        taps *= np.kaiser(len(taps), 8.0)
+        taps /= taps.sum()
+        if wave.loop_start is None:
+            samples = np.convolve(np.pad(samples, radius), taps, mode="valid")
+        else:
+            intro = np.convolve(np.pad(samples, radius), taps, mode="valid")[:wave.loop_start]
+            loop = np.pad(samples[wave.loop_start:], radius, mode="wrap")
+            samples = np.concatenate((intro, np.convolve(loop, taps, mode="valid")))
 
     def resample_segment(
         samples: Sequence[float], output_samples: int, *, exact_rate: bool
@@ -164,8 +181,8 @@ def resample_wave_pcm(
         return tuple(result)
 
     if wave.loop_start is not None:
-        before_loop = wave.samples[: wave.loop_start]
-        loop = wave.samples[wave.loop_start :]
+        before_loop = samples[: wave.loop_start]
+        loop = samples[wave.loop_start :]
         return resample_segment(
             before_loop,
             _block_aligned_sample_count(
@@ -179,9 +196,9 @@ def resample_wave_pcm(
         )
 
     output_samples = max(
-        1, round(len(wave.samples) * output_rate_hz / wave.sample_rate_hz)
+        1, round(len(samples) * output_rate_hz / wave.sample_rate_hz)
     )
-    return resample_segment(wave.samples, output_samples, exact_rate=True)
+    return resample_segment(samples, output_samples, exact_rate=True)
 
 
 def _encode_pcm_chunks(

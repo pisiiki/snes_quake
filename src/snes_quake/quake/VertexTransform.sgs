@@ -4,12 +4,10 @@
 ; to the much hotter packet-vertex entry.
 ClipTransformQ2Registers:
         cache
-        sm      (CLIP_TRANSFORM_RETURN), R11
         GSU_ABSOLUTE_GOTO ClipTransformQ2Coordinates
 
 ; Transform one raw compact packet vertex into signed Q6 view coordinates.
 GSU_CACHE_KERNEL_BEGIN ClipTransformVertex
-        sm      (CLIP_TRANSFORM_RETURN), R11
         lm      R0, (CLIP_VERTEX_INDEX)
         move    R1, R0
         with    R1
@@ -43,6 +41,9 @@ GSU_CACHE_KERNEL_BEGIN ClipTransformVertex
         move    R7, #0
         moveb   R7, (R10)
 
+; R1/R2/R3 are signed-byte bases; R7 holds their packed two-bit residuals.
+; The depth-only brush adapter enters here without another packet load.
+ClipTransformPackedQ2Coordinates:
         with    R1
         add     R1
         with    R1
@@ -80,72 +81,46 @@ GSU_CACHE_KERNEL_BEGIN ClipTransformVertex
         add     R0
 
 ClipTransformQ2Coordinates:
+.if BSP_QUAKEC_GAMEPLAY
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_X)
+.else
         lm      R0, (CAMERA_X)
-        with    R0
         add     R0
-        with    R0
         add     R0
+.endif
         with    R1
         sub     R0
         sm      (DX), R1
+.if BSP_QUAKEC_GAMEPLAY
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_Y)
+.else
         lm      R0, (CAMERA_Y)
-        with    R0
         add     R0
-        with    R0
         add     R0
+.endif
         with    R2
         sub     R0
         sm      (DY), R2
+.if BSP_QUAKEC_GAMEPLAY
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_Z)
+.else
         lm      R0, (CAMERA_Z)
-        with    R0
         add     R0
-        with    R0
         add     R0
+.endif
         with    R3
         sub     R0
         sm      (DZ), R3
 
-        lm      R5, (YAW_COS)
-        lm      R7, (DX)
-        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 2
-        lm      R5, (YAW_SIN)
-        lm      R7, (DY)
-        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 2
-        with    R12
-        add     R0
-        sm      (VIEW_FORWARD), R12
-
-        lm      R5, (YAW_COS)
-        lm      R7, (DY)
-        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 2
-        lm      R5, (YAW_SIN)
-        lm      R7, (DX)
-        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 2
-        with    R12
-        sub     R0
-        sm      (CLIP_RIGHT), R12
-
-        lm      R5, (PITCH_COS)
-        lm      R7, (DZ)
-        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 2
-        lm      R5, (PITCH_SIN)
-        lm      R7, (VIEW_FORWARD)
-        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 6
-        with    R12
-        sub     R0
-        sm      (CLIP_UP), R12
-
-        lm      R5, (PITCH_COS)
-        lm      R7, (VIEW_FORWARD)
-        BSP_SIGNED_MUL_SHIFT R12, R7, R5, 6
-        lm      R5, (PITCH_SIN)
-        lm      R7, (DZ)
-        BSP_SIGNED_MUL_SHIFT R0, R7, R5, 2
-        with    R12
-        add     R0
-        sm      (CLIP_DEPTH), R12
-
-        lm      R11, (CLIP_TRANSFORM_RETURN)
-        ret
-        nop
+; The selector enters here with signed-word deltas, after its own subtraction.
+; Never write the old return scratch: it aliases the selector's cached camera Y.
+; R11 is the leaf return; R12 retains depth for the Fly brush classifier.
+ClipTransformQ2Deltas:
+    BSP_VIEW_DOT_RIGHT CLIP_RIGHT
+    BSP_VIEW_DOT_AXIS3 GSU_VIEW_MATRIX_UX, GSU_VIEW_MATRIX_UY, GSU_VIEW_MATRIX_UZ, CLIP_UP
+ClipTransformQ2DepthOnly:
+    BSP_VIEW_DOT_AXIS3 GSU_VIEW_MATRIX_DX, GSU_VIEW_MATRIX_DY, GSU_VIEW_MATRIX_DZ, CLIP_DEPTH
+    move R12,R0
+    jmp R11
+    nop
 GSU_CACHE_KERNEL_END ClipTransformVertex

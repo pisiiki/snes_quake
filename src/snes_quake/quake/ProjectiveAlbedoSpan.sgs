@@ -1,6 +1,16 @@
+.macro TextureAlbedoEdgeX
+        BSP_SIGNED_MUL_SHIFT12 R0, R7, R3
+        with    R5
+        add     R0
+        move    R0, R5
+.endmacro
+
 ; Dedicated perspective-correct edge interpolation for technique 2. The
 ; lightmapped sibling retains its own mode handling; this path always carries
 ; raw Q6 geometric depth into the projective span contract.
+.if .defined(PLAYABLE_FLAT_BRUSH_PROJECTIVE_EDGE) && (BSP_RENDER_SCALE = 2)
+        .export TextureIntersectActiveEdgeProjective
+.endif
 TextureIntersectActiveEdgeProjective:
         sm      (TEXTURE_EDGE_RETURN), R11
         movew   R4, (R10)
@@ -46,45 +56,7 @@ TextureIntersectActiveEdgeProjective:
         sub     R1
         sm      (TEXTURE_DELTA_DEPTH), R0
 
-        lm      R0, (CONVEX_SAMPLE_Y)
-        move    R1, R0
-        with    R1
-        sub     R5
-        move    R0, R7
-        with    R0
-        sub     R5
-        move    R2, R0
-        sm      (CONVEX_BASE_RIGHT), R4
-        move    R0, R6
-        with    R0
-        sub     R4
-        sm      (CONVEX_DELTA_RIGHT), R0
-
-        move    R0, R1
-        move    R3, #0
-        move    R12, #10
-        iwt     R13, #TextureAlbedoEdgeDivideLoop
-TextureAlbedoEdgeDivideLoop:
-        with    R0
-        add     R0
-        with    R3
-        add     R3
-        move    R4, R0
-        with    R4
-        sub     R2
-        bcc     TextureAlbedoEdgeDivideNext
-        nop
-        move    R0, R4
-        inc     R3
-TextureAlbedoEdgeDivideNext:
-        loop
-        nop
-
-        ; Convert the Q10 screen factor to Q12, then to the world-edge factor.
-        with    R3
-        add     R3
-        with    R3
-        add     R3
+        TextureAlbedoEdgeFraction
         sm      (CONVEX_FACTOR), R3
         jal     TexturePerspectiveFactorQ12
         nop
@@ -101,6 +73,7 @@ TextureAlbedoEdgeDivideNext:
         with    R5
         add     R0
         sm      (TEXTURE_EDGE_T), R5
+TextureIntersectActiveEdgeProjectiveDepth:
         lm      R5, (TEXTURE_BASE_DEPTH)
         lm      R7, (TEXTURE_DELTA_DEPTH)
         BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
@@ -111,10 +84,7 @@ TextureAlbedoEdgeDivideNext:
         lm      R5, (CONVEX_BASE_RIGHT)
         lm      R7, (CONVEX_DELTA_RIGHT)
         lm      R3, (CONVEX_FACTOR)
-        BSP_SIGNED_MUL_SHIFT12 R0, R7, R3
-        with    R5
-        add     R0
-        move    R0, R5
+        TextureAlbedoEdgeX
         lm      R11, (TEXTURE_EDGE_RETURN)
         ret
         nop
@@ -123,9 +93,19 @@ TextureAlbedoEdgeDivideNext:
 ; endpoints and eight-pixel DDA blocks match technique 4 exactly, while this
 ; hot loop performs only texture sampling and opaque 8bpp PLOT writes.
 TextureDrawSpan:
+        ; T4 overlays this routine's body with sampler AUX code. Treat the
+        ; whole albedo span as T2-only when considering shared helpers.
+.assert .loword(TextureDrawSpan) <= GSU_T4_SAMPLE_AUX_OFFSET, lderror, "T2 span starts after T4 sampler overlay"
+.ifdef PLAYABLE_MAP_ID
+        GSU_ABSOLUTE_GOTO BakedOrTexturedSpan
+        .res    5, $01
+.else
         sm      (TEXTURE_SPAN_RETURN), R11
         sm      (TEXTURE_SPAN_X), R1
         sm      (TEXTURE_SPAN_END_X), R3
+.endif
+.assert * - TextureDrawSpan = 9, error, "Albedo span dispatch moved the pinned body"
+TextureDrawSpanTextured:
 
         ; Map the invariant logical row to its 2x presentation coordinate once.
         iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
@@ -267,7 +247,7 @@ TextureAlbedoSpanLoopPrepare:
         lm      R9, (TEXTURE_SPAN_END_X)
         lm      R12, (TEXTURE_PLOT_Y)
         lm      R13, (TEXTURE_SAMPLE_ROUTINE)
-        lm      R10, (TEXTURE_COORD_PTR)
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
         lm      R5, (TEXTURE_SPAN_S)
         lm      R6, (TEXTURE_SPAN_T)
         iwt     R3, #GSU_TEXTURE_COORD_MAP_OFFSET
@@ -322,6 +302,8 @@ TextureAlbedoSpanDone:
 ; R13 names one side-specific {denominator, reciprocal-high, reciprocal-low}
 ; record. Reuse the exact reciprocal while an active edge spans scanlines.
 TextureDivideQ12EdgeCached:
+.assert .loword(TextureDivideQ12EdgeCached) > GSU_T4_SAMPLE_AUX_OFFSET, lderror, "T4 sampler no longer overlaps T2 span"
+.assert .loword(TextureDivideQ12EdgeCached) <= GSU_T4_SAMPLE_AUX_OFFSET + GSU_T4_SAMPLE_AUX_CAPACITY, lderror, "T2-only span extends past T4 sampler overlay"
         move    R8, R0
         move    R9, R2
         move    R7, R13
@@ -375,10 +357,17 @@ TextureLightmapOneAxisSample:
         and     R1
         iwt     R2, #128
         lm      R4, (LIGHTMAP_BLOCK_UL)
+.if (.defined(QUAKE_MSU_WORLD_KEEP) || .defined(PLAYABLE_SIGNED_LIGHTMAP_INTERPOLATION)) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO LightmapSampleHorizontalInterpolated, shared_delay
+        with    R5
+.else
         GSU_ABSOLUTE_GOTO LightmapSampleHorizontalInterpolated
+.endif
 
 ; Classify four already-cached samples without moving the hot preparation
 ; suffix. Modes 3/4 select vertical/horizontal one-axis interpolation.
+; Horizontal mode 4 remains disabled after the T686 combination trial.
+; See docs/research/small-tested-optimizations.md before restoring that route.
 LightmapClassifyCachedCell:
         move    R2, #1
         lm      R0, (LIGHTMAP_BLOCK_UL)
@@ -423,57 +412,136 @@ LightmapClassifyDone:
         GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
         nop
 
-; The dominant projective block is exactly eight pixels wide. Build its two
-; signed quotient/remainder pairs directly, avoiding two trips through the
-; general width selector while retaining the coordinate builder's exact ABI.
+; Multiplication by8192 splits each signed delta into floor(delta/8) and its
+; fractional word. Bias negative deltas by7/8 to retain truncation toward zero.
 TextureLightmapBlock8Setup:
-        move    R0, R5
+        GSU_COMPOSED_GOTO_IF_SELECTED TextureComposedBlock8CoordinatesReady
+.if .defined(QUAKE_CACHED_LIGHTMAP_BLOCK8) && (BSP_RENDER_SCALE = 2)
+        iwt     R11, #TextureLightmapCoordinateBlockReady
+        GSU_ABSOLUTE_GOTO TextureLightmapBlock8SetupShared
+.else
+        iwt     R3, #TextureLightmapCoordinateBlockReady
+        bra     TextureLightmapBlock8SetupShared
+        nop
+.endif
+.if .defined(QUAKE_CACHED_LIGHTMAP_BLOCK8) && (BSP_RENDER_SCALE = 2)
+TextureDivideQ12Lookup:
+TextureDivideQ12HotMirrorStart:
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES+1
+        with    R2
+        cmp     R4
+        bcs     TextureDivideQ12HotMirrorMissCached
+  .if .defined(PLAYABLE_MAP_ID) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        ; The miss thunk's IWT resets the unused prefix.
+        with    R2
+  .else
+        nop
+        with    R2
+  .endif
+        add     R2
+        with    R2
+        add     R2
+        iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_OFFSET-GSU_DIVIDE_Q12_RECIPROCAL_ENTRY_BYTES
+        with    R4
+        add     R2
+  .if .defined(PLAYABLE_MAP_ID) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        sub     R0
+  .else
+        move    R0, #0
+  .endif
+        ramb
+        movew   R12, (R4)
+        inc     R4
+        inc     R4
+        movew   R13, (R4)
+  .if .defined(PLAYABLE_MAP_ID) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        ; The explicitly addressed loads leave R0 at zero.
+        inc     R0
+  .else
+        move    R0, #1
+  .endif
+        ramb
+        jmp     R10
+        nop
+TextureDivideQ12HotMirrorMissCached:
+        GSU_ABSOLUTE_GOTO TextureDivideQ12HotMirrorMissCold
+; Use the same reciprocal estimator for the generic prepared division.
+TextureDivideQ12LoadedCold:
+        ; The reciprocal estimate is exact or one high. Form its Q12 quotient
+        ; and full-width estimate product before the cold correction compare.
+        move    R6, R12
+        from    R8
+        lmult
+        move    R3, R4
+        move    R6, R13
+        from    R8
+        lmult
+        ; floor(product/32768) = high*2 + low bit 15.
+        with    R4
+        add     R4
+        adc     R0
+        with    R3
+        add     R0
+  .if .defined(PLAYABLE_MAP_ID) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        ; R4 holds twice the low-15-bit residual. If the recovered residual
+        ; covers the numerator, rounding the reciprocal up did not change q.
+        with    R4
+        lsr
+        with    R4
+        cmp     R8
+        bcs     ClassifyClipOutcodeReturn
+        nop
+        GSU_ABSOLUTE_GOTO TextureDivideQ12CorrectionCold
+  .elseif .defined(PLAYABLE_Q12_QUOTIENT_PROOF)
+        GSU_ABSOLUTE_GOTO TextureDivideQ12CheckEstimate
+  .else
+        GSU_ABSOLUTE_GOTO TextureDivideQ12CorrectionCold
+  .endif
+.else
+TextureLightmapBlock8SetupOrdinary:
+        ; The cached nonfinal caller has already excluded composed surfaces.
+        ; Return straight to preparation instead of checking that route twice.
+  .ifdef BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+    .if BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+        iwt     R3, #LightmapPrepareWorldClosedGrid
+    .else
+        iwt     R3, #LightmapPrepareBlock
+    .endif
+  .else
+        iwt     R3, #LightmapPrepareBlock
+  .endif
+TextureLightmapBlock8SetupShared:
+        sm      (TEXTURE_COORD_RETURN), R3
+        iwt     R6, #$2000
+        iwt     R11, #$E000
         lm      R1, (TEXTURE_SPAN_S)
-        with    R0
+        from    R5
         sub     R1
-        move    R4, #1
-        moves   R0, R0
-        bpl     TextureLightmapBlock8SPositive
-        nop
-        iwt     R4, #-1
-        move    R1, #0
-        with    R1
-        sub     R0
-        move    R0, R1
-TextureLightmapBlock8SPositive:
-        move    R8, R4
-        move    R9, R0
-        with    R9
-        and     #7
-  .repeat 3
-        with    R0
-        lsr
-  .endrepeat
+        move    R5, R1
+        lmult
         move    R7, R0
-
-        move    R0, R10
-        lm      R1, (TEXTURE_SPAN_T)
-        with    R0
-        sub     R1
-        move    R4, #1
-        moves   R0, R0
-        bpl     TextureLightmapBlock8TPositive
-        nop
-        iwt     R4, #-1
-        move    R1, #0
-        with    R1
-        sub     R0
-        move    R0, R1
-TextureLightmapBlock8TPositive:
-        move    R10, R8
-        move    R11, R4
-        move    R13, R0
-        with    R13
-        and     #7
-  .repeat 3
-        with    R0
-        lsr
-  .endrepeat
+        move    R9, R4
+        to      R1
+        and     R11
+        lm      R2, (TEXTURE_SPAN_T)
+        from    R10
+        sub     R2
+        lmult
+        move    R6, R2
         move    R8, R0
-        move    R4, R10
-        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockLightmapRegisters
+        move    R3, R4
+        to      R2
+        and     R11
+        move    R12, #8
+TextureBuildCoordinateOrdinaryStart:
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        iwt     R13, #TextureBuildCoordinateLoop
+        jmp     R13
+        with    R1
+TextureBuildCoordinateOrdinaryFinish:
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateOrdinaryStart
+.endif
+.assert * - TextureLightmapBlock8Setup <= 84, error, "Eight-pixel carry setup exceeds its pinned slot"
+        .res 84 - (* - TextureLightmapBlock8Setup)

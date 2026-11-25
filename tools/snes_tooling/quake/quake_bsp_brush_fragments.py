@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import snes_tooling.quake.generate_quake_bsp as bsp_tools
+from snes_tooling.quake import analyze_quake_bsp_packets as admission
 from snes_tooling.quake.quake_brush_replay import (
     BrushEntityState,
     CanonicalBrushReplay,
@@ -304,9 +305,9 @@ def audit_leaf_clipped_fragments(
         "cachedSourceFacePoseCount": len(cache),
         "separateFragmentPoolBytes": fragment_pool_bytes,
         "existingPacketCapacities": {
-            "vertices": 768,
-            "indices": 2048,
-            "faces": 405,
+            "vertices": admission.PACKET_VERTEX_CAPACITY,
+            "indices": admission.PACKET_INDEX_CAPACITY,
+            "faces": admission.PACKET_FACE_CAPACITY,
         },
     }
 
@@ -422,8 +423,22 @@ def _face_material_directory(
             )
         if local_face > 0xFF:
             raise ValueError(f"brush model *{inline_model} local face exceeds uint8")
-        s_axis = _axis_code(tuple(info[:3]), source_face, "S")
-        t_axis = _axis_code(tuple(info[4:7]), source_face, "T")
+        # A rotated YZ basis stores its Q14 coefficients in the offset
+        # words and the signed 16-unit offset blocks in axis codes 4..127.
+        sy, sz = map(float, info[1:3])
+        rotated_yz = (
+            info[0] == info[4] == 0 and sy and sz
+            and info[5] == sz and info[6] == -sy
+            and math.isclose(sy * sy + sz * sz, 1.0, abs_tol=1e-6)
+        )
+        if rotated_yz:
+            s_axis, t_axis = 64 + s_offset // 16, 64 + t_offset // 16
+            if s_offset % 16 or t_offset % 16 or not (4 <= s_axis < 128 and 4 <= t_axis < 128):
+                raise ValueError("rotated brush texture offset exceeds its packed blocks")
+            s_offset, t_offset = round(sy * 16384), round(sz * 16384)
+        else:
+            s_axis = _axis_code(tuple(info[:3]), source_face, "S")
+            t_axis = _axis_code(tuple(info[4:7]), source_face, "T")
         runtime_material_by_source[source_face] = (
             s_axis,
             t_axis,
@@ -546,6 +561,7 @@ def build_fragment_assets(
     *,
     first_bank: int,
     maximum_bank_count: int,
+    platform_bottoms: dict[int, int] | None = None,
 ) -> FragmentAssetBuild:
     """Pack the selected camera-independent sparse-leaf fragment design."""
 
@@ -569,6 +585,22 @@ def build_fragment_assets(
     ) = _face_material_directory(source, source_face_ids, source_to_packed)
     variants = _variant_sources(replay)
     variant_ids = fragment_variant_ids(replay)
+    platform_bottoms = platform_bottoms or {}
+    platform_levels = {}
+    for model, bottom in platform_bottoms.items():
+        if model not in (7, 22) or bottom % 32:
+            raise ValueError("unsupported relative-height platform directory")
+        first, count = source.models[model][14:16]
+        platform_levels[model] = {source.vertices[v][2] for face in source.faces[first:first + count]
+                                  for v in _face_vertex_ids(source, face)}
+    secret_axes = {}
+    if platform_bottoms:
+        from snes_tooling.quake.quake_e1m1_secret_doors import SECRET_DOOR_MODELS
+        for model in (*SECRET_DOOR_MODELS, 17, 19, 38):
+            first, count = source.models[model][14:16]
+            coords = [source.vertices[v] for face in source.faces[first:first + count]
+                      for v in _face_vertex_ids(source, face)]
+            secret_axes[model] = tuple({v[axis] for v in coords} for axis in (0, 1))
     variant_directory = bytearray()
     buckets = bytearray()
     descriptors = bytearray()
@@ -583,6 +615,8 @@ def build_fragment_assets(
     maximum_lightmapped_texcoord_span: dict[str, Any] | None = None
     for inline_model, x_q3, y_q3, z_q3 in variant_ids:
         flags = variants[(inline_model, x_q3, y_q3, z_q3)]
+        height = (z_q3 - platform_bottoms.get(inline_model, z_q3)) // 32
+        local_levels = platform_levels.get(inline_model, set()) if z_q3 % 32 == 0 else set()
         origin = (x_q3 / 8.0, y_q3 / 8.0, z_q3 / 8.0)
         state = BrushEntityState(
             1,
@@ -689,7 +723,16 @@ def build_fragment_assets(
                         for axis, coordinate in enumerate(vertex_q2):
                             bounds_min_q2[axis] = min(bounds_min_q2[axis], coordinate)
                             bounds_max_q2[axis] = max(bounds_max_q2[axis], coordinate)
-                    if lightmapped:
+                    if s_axis >= 4:
+                        y = vertex_q2[1] * 32 + world_origin_q0[1] * 8 - y_q3
+                        z = vertex_q2[2] * 32 + world_origin_q0[2] * 8 - z_q3
+                        s = ((y * s_offset + z * t_offset) >> 13) + (s_axis - 64) * 256
+                        t = ((y * t_offset - z * s_offset) >> 13) + (t_axis - 64) * 256
+                        if any(not -0x8000 <= value <= 0x7FFF for value in (y, z, s, t)):
+                            raise ValueError("rotated brush texture coordinate exceeds signed range")
+                        coordinates_q4[0].append(s)
+                        coordinates_q4[1].append(t)
+                    elif lightmapped:
                         for axis_index, (axis_label, axis_code, offset) in enumerate(
                             (("S", s_axis, s_offset), ("T", t_axis, t_offset))
                         ):
@@ -704,7 +747,24 @@ def build_fragment_assets(
                                     world_origin_q0,
                                 )
                             )
-                    vertices.extend(bsp_tools.pack_q2_world_vertex(vertex_q2))
+                    axes = secret_axes.get(inline_model)
+                    if axes and all(not shift or vertex[axis] - shift in axes[axis]
+                                    for axis, shift in enumerate(origin[:2])):
+                        # Keep panel corners in brush-local coordinates. BSP intersection
+                        # points which stay on the wall retain the existing world encoding.
+                        x, y, z = vertex_q2
+                        packed = bytearray(bsp_tools.pack_q2_world_vertex((x - x_q3 // 32, y - y_q3 // 32, z)))
+                        packed[3] |= 0xc0
+                        vertices.extend(packed)
+                    elif local_levels and vertex[2] - origin[2] in local_levels:
+                        # Moving top/bottom edges share one polygon across heights. BSP-cut
+                        # edges keep their absolute world positions and their exact leaf order.
+                        x, y, z = vertex_q2
+                        packed = bytearray(bsp_tools.pack_q2_world_vertex((x, y, z - height)))
+                        packed[3] |= 0x40 if inline_model == 7 else 0x80
+                        vertices.extend(packed)
+                    else:
+                        vertices.extend(bsp_tools.pack_q2_world_vertex(vertex_q2))
                 if lightmapped:
                     for axis_label, axis_coordinates in zip("ST", coordinates_q4):
                         span = _runtime_fragment_axis_span_q4(
@@ -782,6 +842,16 @@ def build_fragment_assets(
     buckets, descriptors, vertices, shared_indices = _share_fragment_payloads(
         bytes(buckets), bytes(descriptors), bytes(vertices)
     )
+    unshared_bucket_bytes = len(buckets)
+    if platform_bottoms:
+        from snes_tooling.quake.quake_bsp_brush_visual_states import _pack_record_streams
+        runs = tuple(buckets[r["firstBucket"] * BUCKET_RECORD.size:
+                             (r["firstBucket"] + r["bucketCount"]) * BUCKET_RECORD.size]
+                     for r in variant_metadata)
+        buckets, starts = _pack_record_streams(runs, BUCKET_RECORD.size)
+        for index, (record, run) in enumerate(zip(variant_metadata, runs, strict=True)):
+            record["firstBucket"] = starts[run]
+            struct.pack_into("<H", variant_directory, index * VARIANT_RECORD.size + 8, starts[run])
     maximum_lightmapped_texcoord_span["fragment"] = shared_indices[
         maximum_lightmapped_texcoord_span["fragment"]
     ]
@@ -879,13 +949,15 @@ def build_fragment_assets(
         "exactSharing": {
             "unsharedDescriptorBytes": unshared_descriptor_bytes,
             "unsharedVertexBytes": unshared_vertex_bytes,
-            "savedBytes": unshared_descriptor_bytes
+            "unsharedBucketBytes": unshared_bucket_bytes,
+            "savedBytes": unshared_bucket_bytes - len(buckets) + unshared_descriptor_bytes
             + unshared_vertex_bytes
             - len(descriptors)
             - len(vertices),
             "runtimeDecodeBytes": 0,
         },
         "faceMaterialCount": len(source_face_ids),
+        **({"rotatedYzMaterials": True} if any(row[0] >= 4 for row in runtime_material_by_source.values()) else {}),
         "lightmappedTexcoordAxisSpanQ4": {
             **maximum_lightmapped_texcoord_span,
             "exclusiveLimit": SIGNED_Q4_AXIS_SPAN_LIMIT,

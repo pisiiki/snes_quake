@@ -1,0 +1,93 @@
+; Correctly rounded reciprocal of a positive normalized24 significand.
+; Apart from the exact power of two, divide 2^47 by m in24 restoring digits.
+SkyFloatReciprocal24:
+        lm      R2, (SF_A0)
+        lm      R3, (SF_A1)
+        lm      R1, (SF_AEXP)
+        move    R10, #0
+        with    R10
+        sub     R1
+        move    R1, #47
+        with    R10
+        sub     R1
+        move    R4, #0
+        move    R5, #0
+        move    R8, #0
+        iwt     R9, #$0080
+        moves   R2, R2
+        bne     @Divide
+        nop
+        with    R3
+        cmp     R9
+        bne     @Divide
+        nop
+        move    R5, R9
+        inc     R10
+        GSU_ABSOLUTE_GOTO @Publish
+@Divide:
+        move    R7, #24
+@DigitLoop:
+        with    R4
+        add     R4
+        with    R5
+        adc     R5
+        with    R8
+        add     R8
+        with    R9
+        adc     R9
+        with    R8
+        sub     R2
+        with    R9
+        sbc     R3
+        bcc     @RestoreTrial
+        nop
+        inc     R4
+        bra     @DigitDone
+        nop
+@RestoreTrial:
+        with    R8
+        add     R2
+        with    R9
+        adc     R3
+@DigitDone:
+        dec     R7
+        bne     @DigitLoop
+        cache
+        ; Compare twice exact remainder to divisor, using quotient parity.
+        with    R8
+        add     R8
+        with    R9
+        adc     R9
+        with    R8
+        sub     R2
+        with    R9
+        sbc     R3
+        bcc     @Publish
+        nop
+        with    R8
+        or      R9
+        bne     @RoundUp
+        nop
+        move    R0, R4
+        with    R0
+        and     #1
+        beq     @Publish
+        nop
+@RoundUp:
+        move    R0, #1
+        with    R4
+        add     R0
+        move    R0, #0
+        with    R5
+        adc     R0
+@Publish:
+        sm      (SF_W0), R4
+        sm      (SF_W1), R5
+        sm      (SF_EXP), R10
+        move    R0, #0
+        sm      (SF_W2), R0
+        sm      (SF_SIGN), R0
+        ret
+        nop
+SkyFloatReciprocal24End:
+.assert SkyFloatReciprocal24End-(SkyFloatReciprocal24 & $FFFFF0)<=512, lderror, "Float reciprocal escaped one cache window"

@@ -1,0 +1,195 @@
+; X2-only cold finite-color proof. The caller's 72-Q16 fractional gate has
+; found a possible texel boundary. Every point in the closed +/-72 square
+; must sample the same final foreground/background color to keep the estimate.
+.macro SF_ENVELOPE_AXIS lowreg, highreg, minimum, maximum
+        .local MinReady, MaxReady
+        move    R0, lowreg
+        move    R1, highreg
+        iwt     R2, #72
+        with    R0
+        cmp     R2
+        bcs     MinReady
+        nop
+        dec     R1
+MinReady:
+        sm      (minimum), R1
+        move    R1, highreg
+        iwt     R2, #$10000-72
+        with    R0
+        cmp     R2
+        bcc     MaxReady
+        nop
+        inc     R1
+MaxReady:
+        sm      (maximum), R1
+.endmacro
+SkyCheckColorEnvelope:
+        cache
+        .repeat 11, reg
+          sm    (SF_GATE_REGS+reg*2), R3+reg
+        .endrepeat
+        SF_ENVELOPE_AXIS R3, R4, SF_GATE_SMIN, SF_GATE_SMAX
+        SF_ENVELOPE_AXIS R5, R6, SF_GATE_TMIN, SF_GATE_TMAX
+        lm      R8, (SF_GATE_SMIN)
+        lm      R9, (SF_GATE_TMIN)
+        jal     SkyGateSampleColor
+        nop
+        sm      (SF_GATE_BASE_COLOR), R0
+        lm      R8, (SF_GATE_SMAX)
+        lm      R0, (SF_GATE_SMIN)
+        with    R0
+        cmp     R8
+        beq     @UpperRow
+        nop
+        lm      R9, (SF_GATE_TMIN)
+        jal     SkyGateSampleColor
+        nop
+        lm      R1, (SF_GATE_BASE_COLOR)
+        with    R0
+        cmp     R1
+        bne     @Different
+        nop
+@UpperRow:
+        lm      R9, (SF_GATE_TMAX)
+        lm      R0, (SF_GATE_TMIN)
+        with    R0
+        cmp     R9
+        beq     @ProvedSame
+        nop
+        lm      R8, (SF_GATE_SMIN)
+        jal     SkyGateSampleColor
+        nop
+        lm      R1, (SF_GATE_BASE_COLOR)
+        with    R0
+        cmp     R1
+        bne     @Different
+        nop
+        lm      R8, (SF_GATE_SMAX)
+        lm      R0, (SF_GATE_SMIN)
+        with    R0
+        cmp     R8
+        beq     @ProvedSame
+        nop
+        lm      R9, (SF_GATE_TMAX)
+        jal     SkyGateSampleColor
+        nop
+        lm      R1, (SF_GATE_BASE_COLOR)
+        with    R0
+        cmp     R1
+        bne     @Different
+        nop
+@ProvedSame:
+        .repeat 11, reg
+          lm    R3+reg, (SF_GATE_REGS+reg*2)
+        .endrepeat
+        GSU_ABSOLUTE_GOTO SkyPlotSample, shared_delay
+        cache
+@Different:
+        GSU_ABSOLUTE_GOTO SkyExactRestartChunk
+
+; R8/R9 are any signed integer texel coordinates; wrap only at texture reads.
+; This is the same two-layer sampling rule as the pixel kernel, including
+; transparent foreground zero. No PLOT, RPIX, COLOR, RAMB or ROMB is issued.
+SkyGateSampleColor:
+        move    R2, #127
+        with    R8
+        and     R2
+        with    R9
+        and     R2
+        lm      R10, (SKY_PHASE_HI)
+        to      R5
+        from    R8
+        add     R10
+        with    R5
+        and     R2
+        to      R6
+        from    R9
+        add     R10
+        with    R6
+        and     R2
+        move    R4, R6
+        with    R4
+        swap
+        with    R4
+        add     R5
+        lm      R1, (SKY_TEXTURE_ADDRESS)
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+        moves   R0, R0
+        bne     @Ready
+        nop
+        move    R4, R9
+        with    R4
+        swap
+        with    R4
+        add     R8
+        iwt     R2, #128
+        with    R4
+        add     R2
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+@Ready:
+        ret
+        nop
+
+; A failed color proof restarts the entire current chunk with exact endpoints.
+; Preserve the approximate right endpoint for the next chunk and the outer
+; pixel call's return address, which SkyPrepareDdaStep temporarily borrows.
+SkyExactRestartChunk:
+        cache
+        lm      R0, (SKY_STEP_RETURN)
+        sm      (SF_CHUNK_CALL_RETURN), R0
+        .repeat 4, word
+          lm    R0, (SKY_ENDPOINT_S_LO+word*2)
+          sm    (SF_APPROX_ENDPOINT+word*2), R0
+        .endrepeat
+        lm      R0, (SF_CHUNK_START)
+        lm      R1, (SKY_SCAN_Y)
+        jal     SkyProjectExactEndpoint
+        nop
+        .repeat 4, word
+          lm    R0, (SKY_ENDPOINT_S_LO+word*2)
+          sm    (SKY_LEFT_S_LO+word*2), R0
+          sm    (SKY_DDA_S_LO+word*2), R0
+        .endrepeat
+        lm      R0, (SKY_CHUNK_ENDPOINT_X)
+        lm      R1, (SKY_SCAN_Y)
+        jal     SkyProjectExactEndpoint
+        nop
+        .repeat 4, word
+          lm    R0, (SKY_ENDPOINT_S_LO+word*2)
+          sm    (SKY_RIGHT_S_LO+word*2), R0
+          lm    R0, (SF_APPROX_ENDPOINT+word*2)
+          sm    (SKY_ENDPOINT_S_LO+word*2), R0
+        .endrepeat
+        .repeat 2, axis
+          lm    R0, (SKY_RIGHT_S_LO+axis*4)
+          lm    R1, (SKY_RIGHT_S_HI+axis*4)
+          lm    R2, (SKY_LEFT_S_LO+axis*4)
+          lm    R3, (SKY_LEFT_S_HI+axis*4)
+          with  R0
+          sub   R2
+          with  R1
+          sbc   R3
+          sm    (SKY_WORK_LO), R0
+          sm    (SKY_WORK_HI), R1
+          jal   SkyPrepareDdaStep
+          nop
+          lm    R0, (SKY_WORK_LO)
+          sm    (SKY_STEP_S_LO+axis*4), R0
+          lm    R0, (SKY_WORK_HI)
+          sm    (SKY_STEP_S_HI+axis*4), R0
+        .endrepeat
+        lm      R0, (SF_CHUNK_CALL_RETURN)
+        sm      (SKY_STEP_RETURN), R0
+        lm      R0, (SF_CHUNK_START)
+        sm      (SKY_CHUNK_X), R0
+        move    R0, #1
+        sm      (SF_CHUNK_EXACT), R0
+        GSU_ABSOLUTE_GOTO SkyReloadChunkPixels

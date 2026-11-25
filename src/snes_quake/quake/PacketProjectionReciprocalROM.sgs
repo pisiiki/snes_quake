@@ -1,0 +1,22 @@
+; Called only after the unsigned RAM-prefix check. R5 is twice the Q2 index.
+; Keep R11 and the cache base. The next packet ROM consumer sets its own bank.
+.import QuakeBSPReciprocal
+.ifndef BSP_PROJECTION_RECIPROCAL_ROM_BANK
+BSP_PROJECTION_RECIPROCAL_ROM_BANK = $01
+.endif
+.assert BSP_PROJECTION_RECIPROCAL_ROM_BANK < $70, error, "Projection reciprocal table must remain GSU-visible"
+.assert (^QuakeBSPReciprocal & $7F) = BSP_PROJECTION_RECIPROCAL_ROM_BANK, lderror, "Projection reciprocal bank disagrees with BSPDATA placement"
+PacketProjectionRomReciprocal:
+        iwt     R4, #.loword(QuakeBSPReciprocal)
+        with    R4
+        add     R5
+        move    R0, #BSP_PROJECTION_RECIPROCAL_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R9
+        GSU_ABSOLUTE_GOTO PacketProjectionReciprocalReady
+PacketProjectionRomReciprocalEnd:
+.assert PacketProjectionRomReciprocalEnd - PacketProjectionRomReciprocal <= 27, error, "Selector reciprocal fallback exceeds its slot"
+        .repeat 27 - (PacketProjectionRomReciprocalEnd - PacketProjectionRomReciprocal)
+        nop
+        .endrepeat

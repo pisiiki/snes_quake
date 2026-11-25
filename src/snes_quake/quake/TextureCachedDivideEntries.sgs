@@ -1,0 +1,62 @@
+        ; Prepare the register-fed Q12 reciprocal calculation.
+TextureDivideQ12Prepared:
+        move    R8, R0                  ; numerator
+        move    R9, R2                  ; denominator
+        lm      R12, (TEXTURE_RECIPROCAL_HIGH)
+        lm      R13, (TEXTURE_RECIPROCAL_LOW)
+TextureLightmapSpanWithinBlock:
+TextureDivideQ12LoadedCached:
+.if .defined(QUAKE_CACHED_LIGHTMAP_BLOCK8) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO TextureDivideQ12LoadedCold
+; Consume one prepared endpoint and advance the row cursor.
+TexturePerspectiveSampleSpanBuffered:
+        lm      R10, (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET)
+        moves   R10, R10
+        beq     TexturePerspectiveSampleSpanBufferedFallbackCached
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R10
+        ret
+        nop
+TexturePerspectiveSampleSpanBufferedFallbackCached:
+        GSU_ABSOLUTE_GOTO TexturePerspectiveSampleSpan
+        .res $21 - (* - TextureDivideQ12LoadedCached), $01
+.else
+        ; The reciprocal estimate is exact or one high. Form its Q12 quotient
+        ; and full-width estimate product before the cold correction compare.
+        move    R6, R12
+        from    R8
+        lmult
+        move    R3, R4
+        move    R6, R13
+        from    R8
+        lmult
+        ; floor(product/32768) = high*2 + low bit 15.
+        with    R4
+        add     R4
+        adc     R0
+        with    R3
+        add     R0
+        ; Let t be the low 15 bits of numerator*reciprocal. R4 already holds
+        ; 2*t after the quotient extraction above. With
+        ; delta=reciprocal*denominator-2^27 and 0<=delta<denominator, the
+        ; estimate can only be high when numerator*delta > t*denominator.
+        ; Therefore t>=numerator proves the estimate exact without either
+        ; correction product. Preserve the complete comparison in cold AUX
+        ; code for the remaining inputs.
+        ; Recover t from the doubled low product already left in R4.
+        with    R4
+        lsr
+        with    R4
+        cmp     R8
+        bcs     TextureDivideQ12Ready
+        nop
+        GSU_ABSOLUTE_GOTO TextureDivideQ12CorrectionCold
+TextureDivideQ12Ready:
+        ret
+        nop
+.endif

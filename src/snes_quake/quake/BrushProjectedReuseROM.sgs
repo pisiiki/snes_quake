@@ -1,0 +1,76 @@
+; Restore the only admitted brush face after the established direct material
+; setup. The collector owns the saved screen records until the leaf returns.
+.if .defined(PLAYABLE_BRUSH_PROJECTED_REUSE_CODE) && (BSP_RENDER_SCALE = 2)
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+BrushRestoreProjectedFragmentROM:
+        iwt     R10, #GSU_BRUSH_ARBITER_METADATA_OFFSET
+        movew   R7, (R10)               ; Saved screen start.
+        inc     R10
+        inc     R10
+        movew   R8, (R10)               ; Saved screen end.
+        inc     R10
+        inc     R10
+        movew   R5, (R10)               ; Initial forward edge.
+        inc     R10
+        inc     R10
+        movew   R6, (R10)               ; Initial reverse edge.
+        inc     R10
+        inc     R10
+        ldw     (R10)                   ; Last and first logical rows.
+        lob
+        sm      (CONVEX_RASTER_Y), R0
+        ldw     (R10)
+        hib
+        sm      (CONVEX_TOP_PTR), R0
+        inc     R10
+        inc     R10
+        ldw     (R10)                   ; Screen count occupies bits 10–15.
+        hib
+        lsr
+        lsr
+        sm      (CONVEX_SCREEN_COUNT), R0
+
+        iwt     R9, #TEXTURE_SCREEN
+        from    R9
+        sub     R7                      ; Saved-to-live relocation.
+        with    R5
+        add     R0
+        sm      (CONVEX_FORWARD_PTR), R5
+        with    R6
+        add     R0
+        sm      (CONVEX_REVERSE_PTR), R6
+        with    R8
+        add     R0
+        sm      (CONVEX_SCREEN_END_PTR), R8
+        sm      (CONVEX_SCREEN_PTR), R8
+
+        from    R8
+        sub     R9
+        to      R12
+        lsr
+        iwt     R13, #BrushRestoreProjectedCopy
+BrushRestoreProjectedCopy:
+        ldw     (R7)
+        stw     (R9)
+        inc     R7
+        inc     R7
+        inc     R9
+        loop
+        inc     R9
+
+        ; Both original brush projector continuations select monotone raster.
+        move    R0, #0
+        sm      (CONVEX_PLANE), R0
+        sm      (CONVEX_EDGE_COUNT), R0
+        iwt     R0, #.loword(BrushRenderFragmentDone)
+        sm      (BRUSH_POLYGON_RETURN), R0
+        lm      R0, (TEXTURE_RENDER_MODE)
+        iwt     R1, #.loword(BrushRasterPreparedLightmap)
+        ibt     R12, #$70
+        from    R1
+        ljmp    R12
+        nop
+.assert * - BrushRestoreProjectedFragmentROM <= $80, error, "Single-face restore exceeds its ROM3 allowance"
+.assert .bankbyte(BrushRestoreProjectedFragmentROM) = ($80+BSP_GSU_ROM3_BANK), lderror, "Single-face restore left ROM3"
+.assert .bankbyte(*-1) = ($80+BSP_GSU_ROM3_BANK), lderror, "Single-face restore crosses ROM3"
+.endif

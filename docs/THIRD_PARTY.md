@@ -2,68 +2,65 @@
 
 ## Project-license scope
 
-The MIT License in `LICENSE` applies only to the independently authored source
-code, build and validation tooling, and original prose documentation in this
-repository.
-
-It does not relicense Quake, the contents of `third_party/quake106/`, extracted or generated
-Quake game data, Quake-derived images or video, trademarks, the assembled ROM
-as a whole, or third-party dependencies. The MIT License continues to apply to
-the project's original code embodied in the ROM, while every third-party
-component and asset remains subject to its own terms.
-
-This is an unofficial project and is not affiliated with or endorsed by id
-Software.
+The [project MIT License](../LICENSE) applies to the independently authored
+source code, build and validation tooling, and original prose documentation.
+This includes the project's original code embodied in the cartridge. Quake
+content, screenshots, videos, trademarks, and third-party dependencies retain
+their respective terms. The assembled cartridge combines components under
+those separate terms. This is an unofficial Quake project.
 
 ## Quake shareware 1.06
 
-`third_party/quake106/quake106.zip` is the complete, unmodified shareware distribution
-(9094045 bytes; SHA-256 `ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239`). Its original
-`SLICNSE.TXT` and `README.TXT` remain inside the untouched archive.
-Quake game data remains copyrighted by id Software; those terms are not
-replaced by the source-code licenses in this repository.
-The linked replay video is rendered from those shareware game-data assets and
-is distributed subject to the same third-party terms.
+The bundled `third_party/quake106/quake106.zip` is the complete, unmodified
+Quake 1.06 shareware distribution. It is 9,094,045
+bytes and has SHA-256
+`ec6c9d34b1ae0252ac0066045b6611a7919c2a0d78a3a66d9387a8f597553239`.
+The original `SLICNSE.TXT` and `README.TXT` are inside the archive.
 
-## libSFX
+The original Quake game data is copyrighted by id Software. The shareware
+terms apply to that data. The release screenshots, videos, and generated
+runtime data use the original Quake content.
 
-`third_party/libSFX` is a Git submodule from `https://github.com/Optiroc/libSFX.git`, pinned to
-`61b3ea97e398333c1b7a6f62a53f1112fdfb6070`. Its own license and recursively pinned build dependencies
-remain in their upstream repositories. Only its cc65 submodule is initialized;
-that source is pinned to `cc3c40c54e51b2d9a22b63c85c418a2b11763377` from `https://github.com/cc65/cc65.git`.
+## libSFX and cc65
 
-`src/snes_quake/Map.cfg` and `src/snes_quake/libSFX.cfg` are adapted from
-libSFX configuration templates. Copyright (c) 2015-2017 David Lindecrantz;
-used under the MIT License in `third_party/libSFX/LICENSE`.
+The standalone build fetches [libSFX](https://github.com/Optiroc/libSFX/tree/61b3ea97e398333c1b7a6f62a53f1112fdfb6070)
+at `61b3ea97e398333c1b7a6f62a53f1112fdfb6070`. Its
+[cc65 build dependency](https://github.com/cc65/cc65/tree/cc3c40c54e51b2d9a22b63c85c418a2b11763377)
+is pinned to `cc3c40c54e51b2d9a22b63c85c418a2b11763377` and uses the
+[upstream zlib license](https://github.com/cc65/cc65/blob/cc3c40c54e51b2d9a22b63c85c418a2b11763377/LICENSE).
 
-## cc65
+[`Map.cfg`](../src/snes_quake/Map.cfg) and
+[`libSFX.cfg`](../src/snes_quake/libSFX.cfg) adapt libSFX configuration
+templates. The [upstream MIT notice](https://github.com/Optiroc/libSFX/blob/61b3ea97e398333c1b7a6f62a53f1112fdfb6070/LICENSE)
+is reproduced below.
 
-cc65 is used as build tooling through libSFX's pinned submodule and remains
-under its upstream zlib License, available in `third_party/libSFX/tools/cc65/LICENSE` after
-the recursive dependency is initialized.
+```text
+The MIT License (MIT)
 
-## MesenCE player download
+Copyright (c) 2015-2017 David Lindecrantz
 
-The separate Windows emulator download is the unmodified official MesenCE build
-at `4b8a196e299b3de297b204fd1208d2981562c89b`. It is not part of this project's MIT-licensed source or
-the Quake ROM. [Corresponding upstream source](https://github.com/pisiiki/snes_quake/releases/download/v0.0.3/MesenCE-4b8a196e-source.zip)
-includes the exact upstream `LICENSE` and pinned dependency references;
-[provenance](https://github.com/pisiiki/snes_quake/releases/download/v0.0.3/MesenCE-4b8a196e-PROVENANCE.json) records its binary,
-source and qualification hashes. MesenCE retains its upstream GPL-3.0 terms.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-## Modern BSP inputs
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-`third_party/quake-map-source` contains the official map-source archive used by
-the configured build. `third_party/ericw-tools` supplies QBSP, VIS, LIGHT, and
-BSP inspection tooling. `third_party/vcpkg` supplies their pinned native build
-dependencies. Each is a Git submodule whose repository URL and full commit are
-declared in `config/rom-config.json`; the release preflight rejects any
-checkout that differs from that config. Their own licenses and the Quake map
-source terms remain authoritative and are not replaced by this project's MIT
-License.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
-NumPy 2.3.5 and Pillow
-12.0.0 are build-time Python dependencies,
-installed separately from the hashes in `tools/requirements-build.txt`. They remain
-under their upstream BSD-3-Clause and MIT-CMU licenses respectively and are not
-copied into this repository.
+## Python build dependencies
+
+The standalone `requirements.txt` pins build-time
+[NumPy 2.3.5](https://pypi.org/project/numpy/2.3.5/) and
+[Pillow 12.0.0](https://pypi.org/project/pillow/12.0.0/) by hash. They retain
+their upstream BSD-3-Clause and MIT-CMU licenses respectively.

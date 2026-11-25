@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -12,7 +13,8 @@ FIELD_PATTERN = re.compile(
 )
 LABEL_PATTERN = re.compile(
     r"^\s*(?P<tag>[A-Za-z]+)\s+"
-    r"(?P<address>[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})\s+"
+    # ld65 prints the exclusive end of a bank ending at $FFFFFF without padding.
+    r"(?P<address>[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8}|1000000(?=\s+\.__\S+_LAST__\s*$))\s+"
     r"\.(?P<name>\S+)\s*$"
 )
 LABEL_RECORD_TAG = "al"
@@ -139,8 +141,14 @@ def load_debug_records(path: Path) -> dict[str, list[dict[str, str]]]:
     if not path.is_file():
         raise FileNotFoundError(path)
 
+    if path.suffix.lower() == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as debug_file:
+            contents = debug_file.read()
+    else:
+        contents = path.read_text(encoding="utf-8", errors="replace")
+
     records: dict[str, list[dict[str, str]]] = {}
-    for text in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for text in contents.splitlines():
         record = parse_debug_record(text)
         if record is None:
             continue

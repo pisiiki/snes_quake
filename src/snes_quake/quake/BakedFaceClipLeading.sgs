@@ -1,0 +1,20 @@
+.ifdef BAKED_FACE_CLIP_OUTCODES
+; R7 has a nonzero four-plane mask. Shift away its leading clear planes;
+; the existing clipper owns every plane from the first touched one onward.
+BakedClipFaceLeading:
+        moves   R7, R7
+        bne     @Touched
+        nop
+        GSU_ABSOLUTE_GOTO TextureClipFaceProject
+@Touched:
+        iwt     R0, #TEXTURE_VIEW_B
+        sm      (CONVEX_OUTPUT_PTR), R0
+        ibt     R0, #$FF
+@FindPlane:
+        with    R7
+        lsr
+        bcc     @FindPlane
+        inc     R0
+        sm      (CONVEX_PLANE), R0
+        GSU_ABSOLUTE_GOTO TexturePlaneLoop
+.endif

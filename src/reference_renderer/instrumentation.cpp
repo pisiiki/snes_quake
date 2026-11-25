@@ -105,6 +105,8 @@ class ReferenceControlLayout::Impl
         }
         return Json{
             {"clientWidth", client_width},
+            {"clientHeight", static_cast<int>(origin_.y) + controls_height},
+            {"viewportHeight", static_cast<int>(origin_.y)},
             {"controlsHeight", controls_height},
             {"withinBounds", within_bounds},
             {"rows", rows_}
@@ -334,11 +336,13 @@ class ReferenceInstrumentationServer::Impl
             {"sessionId", config_.session_id},
             {"pipeName", config_.pipe_name},
             {"capabilities",
-             Json::array({"status",        "captureFrame",   "captureDisplay", "setRenderScale",
-                          "setWarp",       "setViewPose",    "setScenePose",   "setCaptureCamera",
-                          "captureWindow", "inspectAliases", "pause",          "resume",
-                          "seek",          "setPace",        "setRate",        "setExternalBspModels",
-                          "setParticles",  "setSound",       "setVolume",      "shutdown"})},
+             Json::array({"gameplayState",  "runGameplay",      "status",     "captureFrame",
+                          "captureDisplay", "setRenderScale",
+                          "setScenePose",   "setCaptureCamera", "setFlyMode", "queueInputEvents",
+                          "captureWindow",  "inspectAliases",   "pause",      "resume",
+                          "seek",           "setPace",          "setRate",    "setExternalBspModels",
+                          "setParticles",   "setFullPrecision", "setWeapon",  "setSound",
+                          "setVolume",      "shutdown"})},
             {"ready", ready_},
             {"windowCapture", window_capture_},
             {"serverError", server_error_.empty() ? Json(nullptr) : Json(server_error_)}
@@ -448,6 +452,29 @@ class ReferenceInstrumentationServer::Impl
             throw std::runtime_error("JSON-RPC params must be an object");
         }
         std::lock_guard lock(mutex_);
+        if (method == "gameplayState")
+        {
+            if (!ready_ || !presentation_.value("gameplayMode", false))
+                throw std::runtime_error("gameplayState requires live gameplay");
+            return Json{
+                {"state", presentation_.at("gameplay")},
+                {"completedCommandId", presentation_.value("gameplayLastCommandId", std::uint64_t{})},
+                {"lastResult", presentation_.value("gameplayLastResult", Json::object())},
+                {"frameGeneration", frame_generation_}
+            };
+        }
+        if (method == "runGameplay")
+        {
+            if (!ready_ || !presentation_.value("gameplayMode", false))
+                throw std::runtime_error("runGameplay requires live gameplay");
+            const auto& script = params.at("script");
+            if (!script.is_object() || !script.contains("steps") || !script.at("steps").is_array() ||
+                script.at("steps").size() > 64 || pending_commands_.gameplay_requests.size() >= 16)
+                throw std::runtime_error("runGameplay requires at most64script steps within16pending requests");
+            const auto id = ++gameplay_command_sequence_;
+            pending_commands_.gameplay_requests.push_back({{"id", id}, {"script", script}});
+            return Json{{"accepted", true}, {"commandId", id}};
+        }
         if (method == "status")
         {
             return status_locked();
@@ -475,23 +502,6 @@ class ReferenceInstrumentationServer::Impl
             const auto scale = parse_render_scale(params.value("scale", ""));
             pending_commands_.render_scale = scale;
             return Json{{"accepted", true}, {"scale", render_scale_name(scale)}};
-        }
-        if (method == "setWarp")
-        {
-            const auto settings = parse_warp_settings(
-                params.value("model", "projective"),
-                params.value("depth", 192.0),
-                params.value("bands", 16),
-                params.value("inverseDepthProfileQ16", std::vector<int>{})
-            );
-            pending_commands_.warp_settings = settings;
-            return Json{
-                {"accepted", true},
-                {"model", warp_model_name(settings)},
-                {"depth", settings.depth},
-                {"bands", settings.bands},
-                {"inverseDepthProfileQ16", settings.inverse_depth_profile}
-            };
         }
         if (method == "setScenePose")
         {
@@ -537,18 +547,6 @@ class ReferenceInstrumentationServer::Impl
             }
             return Json{{"accepted", true}};
         }
-        if (method == "setViewPose")
-        {
-            if (!ready_ || !paused_ || presentation_.value("scale", "") != "x3-warp")
-                throw std::runtime_error("setViewPose requires paused X3 WARP playback");
-            if (!params.contains("pose") || !params.at("pose").is_number_integer())
-                throw std::runtime_error("view pose must be an integer");
-            const auto pose = params.at("pose").get<std::int64_t>();
-            if (pose < 0 || static_cast<std::uint64_t>(pose) >= pose_count_)
-                throw std::runtime_error("view pose is out of range");
-            pending_commands_.view_pose = static_cast<std::size_t>(pose);
-            return Json{{"accepted", true}, {"pose", pose}};
-        }
         if (method == "captureWindow")
         {
             const auto path = params.at("path").get<std::string>();
@@ -569,6 +567,72 @@ class ReferenceInstrumentationServer::Impl
         if (method == "inspectAliases")
         {
             return alias_inspection_locked();
+        }
+        if (method == "queueInputEvents")
+        {
+            if (!ready_ ||
+                !(presentation_.value("flyCameraControl", false) || presentation_.value("gameplayMode", false)))
+                throw std::runtime_error("diagnostic input requires initialized source playback or gameplay");
+            const auto& values = params.at("events");
+            if (!values.is_array() || values.empty() || values.size() > 64 ||
+                pending_commands_.input_events.size() + values.size() > 128)
+                throw std::runtime_error("diagnostic input requires 1..64 events within the 128-event queue");
+            std::vector<SDL_Event> events;
+            for (const auto& value : values)
+            {
+                SDL_Event event{};
+                const auto type = value.at("type").get<std::string>();
+                const auto coordinate = [&](const char* key) {
+                    const double number = value.at(key).get<double>();
+                    if (!std::isfinite(number) || std::abs(number) > 16384.0)
+                        throw std::runtime_error("diagnostic mouse coordinate is out of range");
+                    return static_cast<float>(number);
+                };
+                if (type == "key")
+                {
+                    const int scan = value.at("scancode").get<int>();
+                    const int modifiers = value.value("modifiers", 0);
+                    if (scan <= SDL_SCANCODE_UNKNOWN || scan >= SDL_SCANCODE_COUNT || modifiers < 0 ||
+                        modifiers > 65535)
+                        throw std::runtime_error("diagnostic key code is out of range");
+                    event.type = value.at("down").get<bool>() ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+                    event.key.scancode = static_cast<SDL_Scancode>(scan);
+                    event.key.mod = static_cast<SDL_Keymod>(modifiers);
+                    event.key.down = event.type == SDL_EVENT_KEY_DOWN;
+                }
+                else if (type == "motion")
+                {
+                    event.type = SDL_EVENT_MOUSE_MOTION;
+                    event.motion.x = coordinate("x");
+                    event.motion.y = coordinate("y");
+                    event.motion.xrel = coordinate("dx");
+                    event.motion.yrel = coordinate("dy");
+                }
+                else if (type == "button")
+                {
+                    event.type = value.at("down").get<bool>() ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+                    event.button.button = SDL_BUTTON_LEFT;
+                    event.button.down = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+                    event.button.clicks = 1;
+                    event.button.x = coordinate("x");
+                    event.button.y = coordinate("y");
+                }
+                else if (type == "focus")
+                    event.type =
+                        value.at("focused").get<bool>() ? SDL_EVENT_WINDOW_FOCUS_GAINED : SDL_EVENT_WINDOW_FOCUS_LOST;
+                else
+                    throw std::runtime_error("diagnostic input type must be key, motion, button, or focus");
+                events.push_back(event);
+            }
+            pending_commands_.input_events.insert(pending_commands_.input_events.end(), events.begin(), events.end());
+            return Json{{"accepted", true}, {"events", events.size()}};
+        }
+        if (method == "setFlyMode")
+        {
+            if (!ready_ || !presentation_.value("flyCameraControl", false))
+                throw std::runtime_error("Fly mode requires source playback");
+            pending_commands_.fly_camera = params.at("enabled").get<bool>();
+            return Json{{"accepted", true}};
         }
         if (method == "pause" || method == "resume")
         {
@@ -644,6 +708,26 @@ class ReferenceInstrumentationServer::Impl
             }
             const bool enabled = params.at("enabled").get<bool>();
             pending_commands_.external_bsp_models = enabled;
+            return Json{{"accepted", true}, {"enabled", enabled}};
+        }
+        if (method == "setFullPrecision")
+        {
+            if (!ready_ || !presentation_.value("fullPrecisionControl", false))
+                throw std::runtime_error("setFullPrecision requires source transform data");
+            if (!params.contains("enabled") || !params.at("enabled").is_boolean())
+                throw std::runtime_error("setFullPrecision requires boolean enabled");
+            const bool enabled = params.at("enabled").get<bool>();
+            pending_commands_.full_precision = enabled;
+            return Json{{"accepted", true}, {"enabled", enabled}};
+        }
+        if (method == "setWeapon")
+        {
+            if (!ready_ || !presentation_.value("weaponControl", false))
+                throw std::runtime_error("setWeapon requires X2 playback with weapon sprites");
+            if (!params.contains("enabled") || !params.at("enabled").is_boolean())
+                throw std::runtime_error("setWeapon requires boolean enabled");
+            const bool enabled = params.at("enabled").get<bool>();
+            pending_commands_.weapon_enabled = enabled;
             return Json{{"accepted", true}, {"enabled", enabled}};
         }
         if (method == "setParticles")
@@ -973,6 +1057,7 @@ class ReferenceInstrumentationServer::Impl
     std::atomic<bool> stopping_{};
     std::thread server_thread_;
     ReferenceInstrumentationCommands pending_commands_;
+    std::uint64_t gameplay_command_sequence_{};
     bool ready_{};
     std::size_t pose_{};
     std::size_t pose_count_{};

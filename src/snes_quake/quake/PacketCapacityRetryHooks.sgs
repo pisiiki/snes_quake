@@ -1,0 +1,33 @@
+; Cold admission retry. Included in the retired $D2CA face-walker pad.
+.if BSP_RENDER_SCALE = 2 || BSP_QUAKEC_GAMEPLAY
+PacketCapacityEnter:
+        ; R7 is the original face/vertex/index rejection counter address.
+        ; The scan pointer is one past its current byte, including the tail.
+        lm      R0, (PACKET_VIS_POINTER)
+        iwt     R1, #WORLD_VISIBILITY+BSP_WORLD_FACE_BITSET_BYTES+1
+        with    R0
+        cmp     R1
+        bcs     PacketCapacityCountDrop
+        nop
+        iwt     R1, #WORLD_VISIBILITY+1
+        with    R0
+        cmp     R1
+        bcc     PacketCapacityCountDrop
+        nop
+        lm      R0, (GSU_TELEMETRY_ERROR)
+        moves   R0, R0
+        bne     PacketCapacityCountDrop
+        nop
+        iwt     R11, #.loword(PacketCapacityBeginCommon)
+        iwt     R8, #.loword(PacketCapacityFilterROM)
+        move    R9, #BSP_GSU_ROM3_BANK
+        from    R8
+        ljmp    R9
+        nop
+PacketCapacityCountDrop:
+        movew   R0, (R7)
+        inc     R0
+        movew   (R7), R0
+        GSU_ABSOLUTE_GOTO PacketScanNextBit
+
+.endif

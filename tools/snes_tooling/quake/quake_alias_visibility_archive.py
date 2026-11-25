@@ -1,6 +1,6 @@
 """Shared QAV3 rows: direct pose addresses, compact tokens and optional RLE.
 
-The six CPU directories select an address in one GSU 64 KiB ROM bank. Rows
+The four CPU directories select an address in one GSU 64 KiB ROM bank. Rows
 never cross that bank, but may cross its physical 32 KiB halfbank boundary.
 Token order and partial-mask candidate order are unchanged from the reference.
 Hidden candidate counts have no runtime meaning and are deliberately omitted.
@@ -173,8 +173,8 @@ def decode_row(payload: bytes, address: int, *, maximum_decoded: int) -> tuple[t
 
 
 def pack(corpora: Sequence[Sequence[bytes]], *, codec: str = "auto") -> tuple[bytes, bytes, dict]:
-    if len(corpora) != 6 or not corpora[0] or len({len(rows) for rows in corpora}) != 1:
-        raise ValueError("archive requires six matching full-rate corpora")
+    if len(corpora) != 4 or not corpora[0] or len({len(rows) for rows in corpora}) != 1:
+        raise ValueError("archive requires four matching full-rate corpora")
     payload = bytearray(b"\x00")  # Shared empty/fully-visible row.
     addresses = {b"\x00": 0}
     directory = bytearray()
@@ -210,7 +210,7 @@ def pack(corpora: Sequence[Sequence[bytes]], *, codec: str = "auto") -> tuple[by
     for (address,), expected in zip(struct.iter_unpack("<H", directory), expected_rows, strict=True):
         if decode_row(payload, address, maximum_decoded=maximum_decoded)[0] != expected:
             raise ValueError("archive reconstruction differs from reference tokens")
-    metadata = dict(codec=codec, sourceRows=len(corpora[0]), projectionBrushStreams=6,
+    metadata = dict(codec=codec, sourceRows=len(corpora[0]), projectionBrushStreams=len(corpora),
         uniqueRows=len(addresses), compressedRows=compressed_rows, directoryBytes=len(directory),
         payloadBytes=len(payload), paddingBytes=CAPACITY-len(payload), allocatedPayloadBytes=CAPACITY,
         uncompressedSharedBytes=sum(map(len, unique_raw)), maximumDecodedBytes=maximum_decoded,

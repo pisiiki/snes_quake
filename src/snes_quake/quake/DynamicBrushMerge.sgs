@@ -1,5 +1,15 @@
-; Camera-independent brush snapshot expansion and far/node/near token merge.
+; Brush snapshot expansion, lazy command-local facing, and far/node/near token merge.
 ; All storage is phase-separated from the completed static-world packet.
+
+.if BSP_QUAKEC_GAMEPLAY
+  .ifdef QC_EXIT_MOVER_COUNT
+BRUSH_ENTRANCE_VARIANTS = 1
+  .else
+BRUSH_ENTRANCE_VARIANTS = QC_ENTRANCE_COUNT
+  .endif
+.else
+BRUSH_ENTRANCE_VARIANTS = 0
+.endif
 
 BRUSH_STATE                   = GSU_FACE_PLANES_OFFSET
 BRUSH_BUILD_RETURN            = BRUSH_STATE + $00
@@ -73,7 +83,24 @@ BRUSH_SLOT_ORIGIN_Z_Q3        = 4
 BRUSH_SLOT_ENTITY             = 6
 
 BRUSH_LEAF_HEADS              = GSU_BRUSH_LEAF_HEADS_OFFSET
+BRUSH_LEAF_ALIAS_PRESENT       = $8000
+.assert GSU_BRUSH_LINK_CAPACITY < BRUSH_LEAF_ALIAS_PRESENT, error, "Alias marker overlaps brush heads"
 BRUSH_LINKS                   = GSU_BRUSH_LINKS_OFFSET
+; Word0 starts as a raw descriptor ID. Facing is memoized only when queried.
+BRUSH_LINK_KNOWN_TAG           = $8000
+BRUSH_LINK_BACKFACING_TAG      = $4000
+.if BSP_BRUSH_TEN_BIT_LINKS
+; Word0: memo[15:14], next[9] at bit13, thirteen-bit descriptor identity.
+; Word1 retains the original seven-bit slot and the low nine next bits.
+BRUSH_LINK_FRAGMENT_MASK       = $1FFF
+BRUSH_LINK_PAYLOAD_MASK        = $3FFF
+BRUSH_LINK_INDEX_MASK          = $03FF
+.assert BSP_BRUSH_FRAGMENT_COUNT <= $2000, error, "Basic fragment IDs overlap next-link bit 9"
+.else
+BRUSH_LINK_FRAGMENT_MASK       = $3FFF
+BRUSH_LINK_INDEX_MASK          = $01FF
+.assert BSP_BRUSH_FRAGMENT_COUNT <= $4000, error, "Brush fragment IDs overlap the lazy facing bits"
+.endif
 BRUSH_TOKENS                  = GSU_BRUSH_MIXED_TOKENS_OFFSET
 BRUSH_TRAVERSAL_STACK         = PACKET_PAINTER_STACK
 BRUSH_TRAVERSAL_STACK_END     = PACKET_PAINTER_STACK_END
@@ -115,29 +142,93 @@ FLY_MASK_LAST_X               = ALIAS_STATE + $80
 FLY_MASK_DEPTH                = ALIAS_STATE + $82
 FLY_MASK_FIRST_Y              = ALIAS_STATE + $84
 FLY_MASK_DEPTH_RETURN         = ALIAS_STATE + $86
+FLY_MASK_WORLD_ROW_MODE       = ALIAS_STATE + $88 ; 0=brush,1=world,3=world behind
+FLY_MASK_WORLD_REMAINING      = ALIAS_STATE + $8A
+FLY_MASK_BATCH_WORLD_CLAIMS   = .defined(PLAYABLE_PAIRED_WORLD_CODE) && .defined(QC_NAIL_COUNT) && (BSP_RENDER_SCALE = 2)
+FLY_MASK_CURSOR_SAVED_OFFSET  = ALIAS_STATE + $8C
+FLY_MASK_CURSOR_SAVED_BIT     = ALIAS_STATE + $8E
+.if BSP_START_LARGE_PACKET
+; The alias pass follows all opaque brush raster work and can reuse its
+; retired projected polygons. Alias reentry uses its own FLY_MASK_SCREEN.
+FLY_MASK_BITS                 = GSU_BRUSH_ARBITER_SCREEN_OFFSET
+.else
 FLY_MASK_BITS                 = GSU_PROJECTION_CACHE_OFFSET
+.endif
+.ifdef PLAYABLE_MAP_ID
+; Billboard bounds clip every mask lookup to the active raster rows.
+; Keep the 128-pixel stride used by FLY_MASK_BIT in both scales.
+FLY_MASK_BYTES                = BSP_LOGICAL_WIDTH * BSP_VIEW_HEIGHT / 8
+.else
 FLY_MASK_BYTES                = BSP_LOGICAL_WIDTH * BSP_LOGICAL_HEIGHT / 8
+.endif
 FLY_MASK_SCREEN               = FLY_MASK_BITS + FLY_MASK_BYTES
+.if .defined(E1M1_FLY_LARGE_PACKET) .or .defined(PLAYABLE_LARGE_VERTEX_PACKET)
+; The enlarged E1M1 packets leave too little row staging for a state backup.
+; Packet views end before the retired remap space used during alias draws.
+FLY_MASK_BACKUP               = GSU_VERTEX_REMAP_OFFSET + GSU_VALID_CAPACITY * 8
+.elseif .defined(QC_KNIGHT_ROSTER)
+; Reserve the final $300 bytes above the staged poses and mover variants.
+FLY_MASK_BACKUP               = GSU_RASTER_SCRATCH_OFFSET - $300
+.assert GSU_ENTRANCE_VARIANTS_OFFSET <= FLY_MASK_BACKUP, error, "Knight poses overlap the fly mask backup"
+.ifdef GSU_ENTRANCE_VARIANTS_BYTES
+.assert GSU_ENTRANCE_VARIANTS_OFFSET + GSU_ENTRANCE_VARIANTS_BYTES <= FLY_MASK_BACKUP, error, "Mover variants overlap the fly mask backup"
+.endif
+.elseif BSP_BRUSH_REMAP_SCRATCH
+; The opaque brush rows have retired before this alias-only geometry/depth
+; reentry. It never stages materials/rows, so its state backup survives.
+FLY_MASK_BACKUP               = GSU_BRUSH_ROW_STAGE_OFFSET
+.else
 FLY_MASK_BACKUP               = GSU_LIGHTMAP_ROW_STAGE_OFFSET
+.endif
 ; Alias ordering has retired before any billboard sample asks for visibility.
 FLY_MASK_REMAINING            = ALIAS_STATE + $6E
 FLY_MASK_CEILING              = ALIAS_STATE + $70
-; Per-frame bounds only: four clamped screen bytes and a conservative minimum
-; Q6 depth. Exact per-pixel coverage still comes from the shared rasterizer.
+; Per-frame XY bounds reject disjoint polygons. Reverse painter ownership
+; must still claim covered pixels whose final world depth is behind the alias.
 FLY_MASK_BOUNDS               = FLY_MASK_SCREEN + CONVEX_VERTEX_CAPACITY * TEXTURE_SHADE_SCREEN_RECORD_BYTES
-FLY_MASK_BOUNDS_BYTES         = GSU_PACKET_FACE_CAPACITY * 6
+FLY_MASK_BOUNDS_BYTES         = GSU_PACKET_FACE_CAPACITY * 4
 FLY_MASK_RECT_FIRST_X         = FLY_MASK_BOUNDS + FLY_MASK_BOUNDS_BYTES
 FLY_MASK_RECT_LAST_X          = FLY_MASK_RECT_FIRST_X + 2
 FLY_MASK_RECT_LAST_Y          = FLY_MASK_RECT_LAST_X + 2
 .assert FLY_MASK_RECT_LAST_Y + 2 <= GSU_PROJECTION_CACHE_GUARD_OFFSET, error, "Fly world bounds exceed retired projection cache"
+.if .defined(E1M1_FLY_LARGE_PACKET) || .defined(QC_DOG_FIRST)
+; Alias drawing can reuse the leaf heads after mixed-token construction.
+FLY_MASK_WORLD_BITS           = GSU_BRUSH_LEAF_HEADS_OFFSET
+.assert FLY_MASK_WORLD_BITS + FLY_MASK_BYTES <= GSU_BRUSH_LEAF_HEADS_END, error, "Fly ownership plane exceeds retired leaf heads"
+.else
+FLY_MASK_WORLD_BITS           = FLY_MASK_RECT_LAST_Y + 2
+.assert FLY_MASK_WORLD_BITS + FLY_MASK_BYTES <= GSU_PROJECTION_CACHE_GUARD_OFFSET, error, "World ownership plane exceeds retired projection cache"
+.endif
+.if BSP_BRUSH_REMAP_SCRATCH
+; The material pool moved below persistent alias state. Screen storage now
+; occupies its former upper boundary; both active ranges remain disjoint.
+.assert BRUSH_ARB_POOL_LIMIT <= ALIAS_STATE, error, "Cold material pool overlaps persistent alias state"
+.assert FLY_MASK_CURSOR_SAVED_BIT + 2 <= GSU_BRUSH_ARBITER_SCREEN_OFFSET, error, "Persistent fly mask state overlaps brush screen storage"
+.else
+.assert FLY_MASK_WORLD_ROW_MODE + 2 <= BRUSH_ARB_POOL_BASE, error, "World row mode overlaps material pool"
+.assert FLY_MASK_WORLD_REMAINING + 2 <= BRUSH_ARB_POOL_BASE, error, "World claim count overlaps material pool"
+.assert FLY_MASK_CURSOR_SAVED_BIT + 2 <= BRUSH_ARB_POOL_BASE, error, "Mask cursor backup overlaps material pool"
+.endif
 .assert BSP_LOGICAL_WIDTH = 128, error, "Fly mask bit addressing requires 16-byte rows"
 .assert FLY_MASK_SCREEN + CONVEX_VERTEX_CAPACITY * TEXTURE_SHADE_SCREEN_RECORD_BYTES <= GSU_PROJECTION_CACHE_GUARD_OFFSET, error, "Fly mask and polygon escape the retired projection cache"
+.if .defined(E1M1_FLY_LARGE_PACKET) .or .defined(PLAYABLE_LARGE_VERTEX_PACKET)
+.assert !BSP_BRUSH_REMAP_SCRATCH, error, "Fly mask backup overlaps brush scratch"
+.assert !.defined(PLAYABLE_PACKET_SCREEN_REUSE_CODE), error, "Fly mask backup overlaps packet screen cache"
+.assert FLY_MASK_BACKUP + $300 <= GSU_BRUSH_LEAF_HEADS_OFFSET, error, "Fly mask backup overlaps ownership plane"
+.elseif .defined(QC_KNIGHT_ROSTER)
+.assert FLY_MASK_BACKUP + $300 <= GSU_RASTER_SCRATCH_OFFSET, error, "Fly mask backup overlaps raster scratch"
+.elseif BSP_ALIAS_ENTITY_SUPPORTED .and BSP_BRUSH_REMAP_SCRATCH
+.assert FLY_MASK_BACKUP + $300 <= GSU_BRUSH_ROW_STAGE_OFFSET + GSU_BRUSH_ROW_STAGE_BYTES, error, "Fly mask backup escapes retired brush row staging"
+.elseif BSP_ALIAS_ENTITY_SUPPORTED
 .assert FLY_MASK_BACKUP + $300 <= GSU_LIGHTMAP_ROW_STAGE_OFFSET + GSU_LIGHTMAP_ROW_STAGE_BYTES, error, "Fly mask backup escapes retired row staging"
+.endif
 .assert GSU_RENDER_STATE_OFFSET + GSU_RENDER_STATE_BYTES <= $200, error, "Fly mask backup omits live renderer state"
+.if !BSP_BRUSH_REMAP_SCRATCH
 .assert FLY_MASK_DEPTH_RETURN + 2 <= BRUSH_ARB_POOL_BASE, error, "Fly mask state overlaps the opaque lightmap pool"
+.endif
 
 ; Return mask address in R10 and bit in R1, for logical R2=x and R0=y.
-.macro FLY_MASK_BIT
+.macro FLY_MASK_BIT base
   .repeat 4
         with    R0
         add     R0
@@ -151,7 +242,11 @@ FLY_MASK_RECT_LAST_Y          = FLY_MASK_RECT_LAST_X + 2
   .endrepeat
         with    R0
         add     R2
+  .ifblank base
         iwt     R10, #FLY_MASK_BITS
+  .else
+        iwt     R10, #base
+  .endif
         with    R10
         add     R0
         move    R1, #1
@@ -168,7 +263,6 @@ FLY_MASK_RECT_LAST_Y          = FLY_MASK_RECT_LAST_X + 2
 .endmacro
 
 ALIAS_BUILD_RETURN             = ALIAS_STATE + $00
-ALIAS_FIND_RETURN              = ALIAS_STATE + $02
 ALIAS_APPEND_RETURN            = ALIAS_STATE + $04
 ALIAS_DYNAMIC_BANK             = ALIAS_STATE + $06
 ALIAS_DYNAMIC_COUNT            = ALIAS_STATE + $08
@@ -180,8 +274,6 @@ ALIAS_GROUP_CURSOR             = ALIAS_STATE + $12
 ALIAS_GROUP_STREAM             = ALIAS_STATE + $14
 ALIAS_TOKEN_COUNT              = ALIAS_STATE + $16
 ALIAS_CURRENT_PARENT           = ALIAS_STATE + $18
-ALIAS_CURRENT_COUNT            = ALIAS_STATE + $1A
-ALIAS_CURRENT_FIRST            = ALIAS_STATE + $1C
 ALIAS_CURRENT_CURSOR           = ALIAS_STATE + $1E
 BRUSH_DIRECT_SAFE              = ALIAS_STATE + $20
 .assert ALIAS_CURRENT_CURSOR + 2 <= GSU_FACE_PLANES_OFFSET + GSU_FACE_PLANES_CAPACITY, error, "Alias state escapes face-plane phase"
@@ -378,6 +470,17 @@ BrushTransformPresent:
         move    R0, #BSP_BRUSH_REPLAY_BANK
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
+.if BRUSH_ENTRANCE_VARIANTS
+        ; Keep the fixed technique-4 windows at their original offsets.
+        ; The leaf helper consumes this same descriptor ROM stream.
+BrushEntranceDescriptorStart:
+        jal     BrushLoadEntranceTransform
+        nop
+        ; ca65's original descriptor sequence is exactly38 bytes (the cold
+        ; call is6). Preserve both T4 anchors and their loop branch distances.
+        .assert * - BrushEntranceDescriptorStart <= 38, error, "Entrance descriptor call exceeds its original envelope"
+        .res 38 - (* - BrushEntranceDescriptorStart), $01
+.else
         BSP_ROM_LOAD_WORD R0
         sm      (BRUSH_CURRENT_ENTITY), R0
         BSP_ROM_LOAD_BYTE R0
@@ -393,6 +496,7 @@ BrushTransformPresent:
         with    R1
         add     R0
         sm      (BRUSH_CURRENT_GLOBAL_VARIANT), R1
+.endif
 
         ; External BSP slots form the final compact-replay suffix. Preserve
         ; independent BRUSHES and ENTITY menu behavior while sharing QBSF.
@@ -608,34 +712,40 @@ BrushBuildActiveLinksDone:
 ; R3 names a node. Return its painter-mask byte in R0, bit in R2, and byte
 ; address in R10. Both the marker and traversal use this exact lookup.
 BrushPainterNodeBit:
-        sm      (BRUSH_BIT_RETURN), R11
+        ; The masked ordinal selects one of eight entries in a two-byte
+        ; doubling chain. R10 is dead until the final painter-mask address;
+        ; R11 can retain the caller link because this helper has no calls.
         move    R0, R3
-        move    R1, R0
-        with    R1
         and     #7
-  .repeat 3
-        with    R0
-        lsr
+        add     R0
+        iwt     R10, #BrushPainterNodeBitShiftEnd
+        with    R10
+        sub     R0
+        move    R2, #1
+        jmp     R10
+        nop
+BrushPainterNodeBitLoop:
+  .repeat 7
+        with    R2
+        add     R2
   .endrepeat
+BrushPainterNodeBitShiftEnd:
+        ; Every chain entry ends in arithmetic with default register prefixes.
+        ; Three unsigned shifts retain the exact word-wrapped byte address.
+        from    R3
+        lsr
+        lsr
+        lsr
         iwt     R10, #PAINTER_NODE_BITS
         with    R10
         add     R0
-        move    R0, #0
         moveb   R0, (R10)
-        move    R2, #1
-BrushPainterNodeBitLoop:
-        moves   R1, R1
-        beq     BrushPainterNodeBitReady
-        nop
-        with    R2
-        add     R2
-        dec     R1
-        bra     BrushPainterNodeBitLoop
-        nop
+        move    R1, #0
 BrushPainterNodeBitReady:
-        lm      R11, (BRUSH_BIT_RETURN)
         ret
         nop
+.assert * - BrushPainterNodeBit <= $2E, error, "Painter bit helper exceeds its original envelope"
+        .res $2E - (* - BrushPainterNodeBit), $01
 
 .segment "GSUCODE"
 
@@ -660,7 +770,7 @@ BrushMarkPainterNode:
         move    R0, R3
         with    R0
         add     R0
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_NODE_PARENTS_ROM_ADDRESS
         with    R4
         add     R0
         move    R0, #WORLD_NODE_PARENTS_ROM_BANK
@@ -954,6 +1064,29 @@ AliasBuildRowTables:
         nop
         GSU_ABSOLUTE_GOTO AliasBuildRowDone
 AliasRowValid:
+.if BSP_ALIAS_LIVE_POSES
+.ifdef QC_CAMPAIGN_ITEMS
+        lm      R0, (GSU_CAMPAIGN_POSE_COUNT)
+.elseif !.defined(QC_BACKPACK_COUNT)
+        iwt     R0, #GSU_ALIAS_LIVE_COUNT
+.else
+        lm      R0, (GSU_BACKPACK_TOKEN_COUNT)
+.endif
+        sm      (ALIAS_TOKEN_COUNT), R0
+        GSU_ABSOLUTE_GOTO AliasBuildRowDone
+  .if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2)
+        .include "BrushLiveResidentWorld.sgs"
+  .endif
+.ifdef QC_NAIL_COUNT
+        .include "quake/NailPoseReads.sgs"
+.endif
+.ifdef QC_SECRET_DOOR_COUNT
+        ; The live alias branch jumps over this reserved code window.
+        .include "BrushResolveMoverVertex.sgs"
+.endif
+        ; Preserve the fixed technique window in the adjacent arbiter.
+        .res $F8 - (* - AliasRowValid), $01
+.else
   .repeat 3
         with    R0
         add     R0
@@ -981,6 +1114,93 @@ AliasRowValid:
         nop
         GSU_ABSOLUTE_GOTO AliasBuildRowDone
 AliasBuildGroupsPresent:
+.if .defined(PLAYABLE_PACKET_VIEW_REUSE) && (BSP_RENDER_SCALE = 2) && !BSP_ALIAS_LIVE_POSES
+  .ifdef QC_E1M2_GROUP_COUNT
+.assert BSP_ALIAS_MAX_VISIBLE_STATES = 1 && BSP_ALIAS_MAX_GROUPS = 1 && BSP_ALIAS_MAX_DYNAMIC_STATES = 1, error, "E1M2 mixed build reuse supports its one fixed alias"
+  .else
+.assert BSP_ALIAS_MAX_VISIBLE_STATES = 0 && BSP_ALIAS_MAX_GROUPS = 0 && BSP_ALIAS_MAX_DYNAMIC_STATES = 0, error, "Mixed build reuse requires empty alias rows"
+  .endif
+  .if BRUSH_ENTRANCE_VARIANTS
+    .assert QC_ENTRANCE_COUNT = 0 .and .defined(QC_EXIT_MOVER_COUNT), error, "Mixed brush reuse requires explicit mover invalidation"
+  .endif
+  .ifdef QC_E1M2_GROUP_COUNT
+        ; The single pickup alias is drawn after the opaque traversal.
+        ; Its BSP occlusion still uses the same Fly visibility test.
+        move    R0, #0
+        iwt     R10, #GSU_ALIAS_TOKENS_OFFSET
+        moveb   (R10), R0
+        inc     R0
+        sm      (ALIAS_TOKEN_COUNT), R0
+        GSU_ABSOLUTE_GOTO AliasBuildRowDone
+  .else
+        GSU_ABSOLUTE_GOTO AliasBuildRowDone
+  .endif
+
+; The guarded packet pins the exact camera and world selection. With
+; identical brush state, feature flags and pickup mask, the built slots, heads
+; and token stream remain live. Link memo bits are exact for that same camera.
+BrushReuseMixedBuild:
+        lm      R3, (GSU_BRUSH_MERGE_CACHE_COUNT)
+        moves   R3, R3
+        beq     BrushRebuildMixed
+        nop
+        iwt     R10, #COMMAND+11
+        move    R1, #0
+        moveb   R1, (R10)
+        lm      R2, (GSU_BRUSH_MERGE_CACHE_FLAGS)
+        with    R1
+        cmp     R2
+        bne     BrushRebuildMixed
+        nop
+        sm      (BRUSH_OVERLAY_FLAGS), R1
+        lm      R1, (GSU_TELEMETRY_BRUSH_VISUAL_STATE)
+        lm      R2, (GSU_BRUSH_MERGE_CACHE_VISUAL)
+        with    R1
+        cmp     R2
+        bne     BrushRebuildMixed
+        nop
+        lm      R1, (COMMAND+14)
+        lm      R2, (GSU_BRUSH_MERGE_CACHE_ACTIVE)
+        with    R1
+        cmp     R2
+        bne     BrushRebuildMixed
+        nop
+        sm      (BRUSH_TOKEN_COUNT), R3
+        sm      (BRUSH_BUILD_RETURN), R11
+        ; Row arbitration can overwrite this bit. Recompute its row-specific
+        ; value exactly as the cold builder would before painting.
+        jal     BrushLoadDirectSafety
+        nop
+        GSU_ABSOLUTE_GOTO BrushBuildPublish
+BrushRebuildMixed:
+        sm      (GSU_BRUSH_MERGE_CACHE_RETURN), R11
+        move    R0, #0
+        sm      (GSU_BRUSH_MERGE_CACHE_COUNT), R0
+.if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2)
+        jal     BrushRebuildMixedAfterResidentWorld
+.else
+        jal     BrushBuildMixedTokens
+.endif
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        bne     BrushReuseMixedDone
+        nop
+        lm      R0, (BRUSH_OVERLAY_FLAGS)
+        sm      (GSU_BRUSH_MERGE_CACHE_FLAGS), R0
+        lm      R0, (GSU_TELEMETRY_BRUSH_VISUAL_STATE)
+        sm      (GSU_BRUSH_MERGE_CACHE_VISUAL), R0
+        lm      R0, (COMMAND+14)
+        sm      (GSU_BRUSH_MERGE_CACHE_ACTIVE), R0
+        lm      R0, (BRUSH_TOKEN_COUNT)
+        sm      (GSU_BRUSH_MERGE_CACHE_COUNT), R0
+BrushReuseMixedDone:
+        lm      R11, (GSU_BRUSH_MERGE_CACHE_RETURN)
+        ret
+        nop
+.assert * - AliasBuildGroupsPresent <= $AC, error, "Mixed build reuse exceeds empty alias group window"
+        .res $AC - (* - AliasBuildGroupsPresent), $01
+.else
         lm      R0, (ALIAS_GROUP_BANK)
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
@@ -995,34 +1215,22 @@ AliasBuildGroupLoop:
         nop
         GSU_ABSOLUTE_GOTO AliasBuildRowDone
 AliasBuildGroupPresent:
-        ; Six-byte RAM group: leaf, first token ordinal, token count.
-        move    R1, R0
-        with    R1
-        add     R1
-        with    R0
-        add     R0
-        with    R0
-        add     R0
-        with    R0
-        add     R1
-        iwt     R10, #GSU_ALIAS_GROUPS_OFFSET
-        with    R10
-        add     R0
+        ; The original group order still defines flattened alias ordinals.
         BSP_ROM_LOAD_WORD R0
-        movew   (R10), R0
         sm      (BRUSH_CURRENT_LEAF), R0
-        inc     R10
-        inc     R10
         BSP_ROM_LOAD_WORD R3
         sm      (ALIAS_CURRENT_PARENT), R3
-        lm      R0, (ALIAS_TOKEN_COUNT)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
         BSP_ROM_LOAD_BYTE R0
-        movew   (R10), R0
-        sm      (ALIAS_CURRENT_COUNT), R0
         sm      (ALIAS_CURRENT_CURSOR), R0
+        moves   R0, R0
+        beq     AliasBuildGroupReady
+        nop
+        jal     AliasMarkLeafHead
+        nop
+AliasBuildGroupReady:
+        bra     AliasBuildTokenLoop
+        nop
+        .res $3B - (* - AliasBuildGroupPresent), $01
 AliasBuildTokenLoop:
         lm      R0, (ALIAS_CURRENT_CURSOR)
         moves   R0, R0
@@ -1055,61 +1263,40 @@ AliasBuildGroupMarked:
         inc     R0
         sm      (ALIAS_GROUP_CURSOR), R0
         GSU_ABSOLUTE_GOTO AliasBuildGroupLoop
+.endif
+.endif
 AliasBuildRowDone:
         GSU_ABSOLUTE_GOTO AliasBuildVisibilityRow
 
 .include "quake/AliasVisibilityArchive.sgs"
 
-; Locate the current traversal leaf in the generated bounded compact table.
-; Keep the leaf, remaining count and record pointer in registers: this lookup
-; runs once per visited leaf, including leaves without an alias group. Empty
-; scans keep the painter traversal's cache. A longer scan caches its loop only
-; after the first nonmatch, so the common empty/first-match returns do not evict
-; that window. Both CACHE changes replace NOP bytes, retaining the overlay ABI.
-; Return the alias count in R0 and retain first/count for the append pass.
+; Brush links are already built. Mark an alias-only leaf without changing
+; its nine-bit brush link. The head array was cleared for this render.
 .segment "GSU_TEXTURE_TAIL_CODE"
         .align  GSU_CACHE_LINE_BYTES
-AliasFindCurrentLeaf:
-        .assert .loword(AliasFindCurrentLeaf) = $3810, lderror, "Alias leaf entry moved"
+AliasMarkLeafHead:
+        .assert .loword(AliasMarkLeafHead) = $3810, lderror, "Alias marker entry moved"
+        lm      R0, (BRUSH_CURRENT_LEAF)
+        iwt     R1, #BSP_BRUSH_LEAF_HEAD_COUNT
+        with    R0
+        cmp     R1
+        bcs     AliasMarkLeafHeadDone
         nop
-        sm      (ALIAS_FIND_RETURN), R11
-        move    R0, #0
-        sm      (ALIAS_CURRENT_COUNT), R0
-        lm      R2, (ALIAS_GROUP_COUNT)
-        lm      R4, (BRUSH_CURRENT_LEAF)
-        iwt     R10, #GSU_ALIAS_GROUPS_OFFSET
-AliasFindLeafLoop:
-        .assert .loword(AliasFindLeafLoop) = $3826, lderror, "Alias delayed-cache target moved"
-        moves   R2, R2
-        beq     AliasFindLeafDone
-        nop
-        movew   R1, (R10)
-        with    R1
-        cmp     R4
-        beq     AliasFindLeafMatch
-        nop
+        add     R0
+        iwt     R10, #BRUSH_LEAF_HEADS
         with    R10
-        add     #6
-        dec     R2
-        bra     AliasFindLeafLoop
-        cache                           ; Target R15 selects CBR $3820.
-AliasFindLeafMatch:
-        inc     R10
-        inc     R10
+        add     R0
         movew   R0, (R10)
-        sm      (ALIAS_CURRENT_FIRST), R0
-        inc     R10
-        inc     R10
-        movew   R0, (R10)
-        sm      (ALIAS_CURRENT_COUNT), R0
-AliasFindLeafDone:
-        lm      R0, (ALIAS_CURRENT_COUNT)
-        lm      R11, (ALIAS_FIND_RETURN)
+        iwt     R1, #BRUSH_LEAF_ALIAS_PRESENT
+        or      R1
+        movew   (R10), R0
+AliasMarkLeafHeadDone:
         ret
         nop
-AliasFindCurrentLeafEnd:
-        .assert .loword(AliasFindCurrentLeafEnd) = $3853, lderror, "Alias leaf helper footprint changed"
-        .assert AliasFindCurrentLeafEnd - (AliasFindLeafLoop & $FFFFF0) <= GSU_CACHE_BYTES, lderror, "Alias loop escapes its delayed cache window"
+        .include "quake/FlyBrushMaskLoadFacing.sgs"
+        .res $43 - (* - AliasMarkLeafHead), $01
+AliasMarkLeafHeadEnd:
+        .assert .loword(AliasMarkLeafHeadEnd) = $3853, lderror, "Alias marker footprint changed"
 
 .segment "GSU_BRUSH_CODE"
 
@@ -1128,17 +1315,27 @@ BrushAppendActiveLink:
         GSU_ABSOLUTE_GOTO BrushAppendActiveLinkDone
 BrushLinkCapacityReady:
         move    R3, R0                   ; Zero-based link index.
+.if BSP_BRUSH_TEN_BIT_LINKS
+        ; MOVE resets the source/destination prefixes to R0.
+        add     R0
+        add     R0
+.else
         with    R0
         add     R0
         with    R0
         add     R0
+.endif
         iwt     R10, #BRUSH_LINKS
         with    R10
         add     R0
         lm      R0, (BRUSH_CURRENT_FRAGMENT)
+.if BSP_BRUSH_TEN_BIT_LINKS
+        move    R2, R0                  ; Raw descriptor ID, before memo flags.
+.else
         movew   (R10), R0
         inc     R10
         inc     R10
+.endif
 
         lm      R0, (BRUSH_CURRENT_LEAF)
         with    R0
@@ -1146,12 +1343,35 @@ BrushLinkCapacityReady:
         iwt     R4, #BRUSH_LEAF_HEADS
         with    R4
         add     R0
-        movew   R1, (R4)                ; Prior one-based head (9 bits).
+        movew   R1, (R4)                ; Prior one-based head.
+.if BSP_BRUSH_TEN_BIT_LINKS
+        iwt     R0, #$0200
+        with    R0
+        and     R1
+  .repeat 4
+        add     R0                      ; Previous ALU resets both prefixes.
+  .endrepeat                            ; next bit9 becomes word0 bit13.
+        or      R2
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        iwt     R2, #$01FF
+        with    R1
+        and     R2                      ; Never contaminate slot bit0.
+.endif
         lm      R0, (BRUSH_CURRENT_SLOT)
+.if BSP_BRUSH_TEN_BIT_LINKS
+        ; Slots are 0..127: byte-swap reaches exactly the old eighth shift.
+        ; Keep the final WITH/ADD pair so the complete writer stays size-neutral.
+        swap
+        with    R0
+        add     R0
+.else
   .repeat 9
         with    R0
         add     R0
   .endrepeat
+.endif
         with    R0
         or      R1
         movew   (R10), R0
@@ -1163,6 +1383,8 @@ BrushAppendActiveLinkDone:
         ret
         nop
 
+; One fixed traversal window retains node loading, side selection, and
+; child pushes. Mostly-empty leaf handling and final aliases stay cold.
 BrushMergePainterTokens:
         .assert .loword(BrushMergePainterTokens) = $9183, lderror, "Painter traversal cache target moved"
         sm      (BRUSH_MERGE_RETURN), R11
@@ -1175,8 +1397,7 @@ BrushMergePainterTokens:
 BrushTraversalNext:
         lm      R10, (BRUSH_TRAVERSAL_SP)
         iwt     R0, #BRUSH_TRAVERSAL_STACK
-        move    R1, R10
-        with    R1
+        with    R10
         cmp     R0
         bne     BrushTraversalPresent
         nop
@@ -1207,7 +1428,6 @@ BrushTraversalVisitNode:
         GSU_ABSOLUTE_GOTO BrushTraversalNext
 BrushTraversalVisitNodeActive:
         move    R0, R3
-        sm      (BRUSH_CURRENT_NODE), R0
         jal     BrushLoadCurrentNode
         nop
         jal     BrushPushPainterNode
@@ -1215,71 +1435,7 @@ BrushTraversalVisitNodeActive:
         GSU_ABSOLUTE_GOTO BrushTraversalNext
 
 BrushTraversalLeaf:
-        ; Quake child encoding is -1-leaf, exactly bitwise complement.
-        iwt     R1, #$FFFF
-        with    R0
-        xor     R1
-        sm      (BRUSH_CURRENT_LEAF), R0
-        with    R0
-        add     R0
-        iwt     R4, #BRUSH_LEAF_HEADS
-        with    R4
-        add     R0
-        movew   R3, (R4)
-        sm      (BRUSH_CURRENT_FRAGMENT_COUNT), R3
-        jal     AliasFindCurrentLeaf
-        nop
-        lm      R3, (BRUSH_CURRENT_FRAGMENT_COUNT)
-        with    R0
-        or      R3
-        beq     BrushTraversalNext
-        nop
-        ; Explicit group markers prevent two adjacent nonempty leaves from
-        ; collapsing when neither has an intervening selected world face.
-        lm      R1, (BRUSH_CURRENT_LEAF)
-        iwt     R2, #BRUSH_TOKEN_LEAF_TAG
-        with    R1
-        or      R2
-        move    R0, R1
-        jal     BrushAppendMixedToken
-        nop
-        lm      R3, (BRUSH_CURRENT_FRAGMENT_COUNT)
-BrushTraversalLeafLink:
-        moves   R3, R3
-        bne     BrushTraversalLeafLinkPresent
-        nop
-        GSU_ABSOLUTE_GOTO BrushTraversalNext
-BrushTraversalLeafLinkPresent:
-        dec     R3
-        move    R0, R3
-        iwt     R1, #BRUSH_TOKEN_FRAGMENT_TAG
-        with    R0
-        or      R1
-        jal     BrushAppendMixedToken
-        nop
-        lm      R0, (BRUSH_OVERFLOW)
-        moves   R0, R0
-        beq     BrushTraversalLeafContinue
-        nop
-        GSU_ABSOLUTE_GOTO BrushMergePainterDone
-BrushTraversalLeafContinue:
-        ; The packed link word retains a seven-bit slot above its nine-bit next.
-        move    R0, R3
-        with    R0
-        add     R0
-        with    R0
-        add     R0
-        with    R0
-        add     #2
-        iwt     R10, #BRUSH_LINKS
-        with    R10
-        add     R0
-        movew   R2, (R10)
-        iwt     R1, #$01FF
-        move    R3, R2
-        with    R3
-        and     R1
-        GSU_ABSOLUTE_GOTO BrushTraversalLeafLink
+        GSU_ABSOLUTE_GOTO BrushTraversalLeafCold
 
 BrushTraversalEmitNode:
         ; The visit push stores this node's range immediately below its emit
@@ -1341,8 +1497,9 @@ BrushTraversalWorldFacePresent:
         nop
         lm      R0, (BRUSH_OVERFLOW)
         moves   R0, R0
-        bne     BrushMergePainterDone
+        beq     BrushTraversalWorldFaceAdvance
         nop
+        GSU_ABSOLUTE_GOTO BrushMergePainterDone
 BrushTraversalWorldFaceAdvance:
         inc     R3
         with    R2
@@ -1354,6 +1511,265 @@ BrushTraversalWorldFaceAdvance:
         move    R4, #8
         inc     R9
         GSU_ABSOLUTE_GOTO BrushTraversalWorldFace
+
+BrushLoadCurrentNode:
+        move    R1, R0
+        with    R1
+        add     R1
+        move    R2, R1
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R2                       ; 10n
+        iwt     R4, #WORLD_NODES_ROM_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #WORLD_NODES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        BSP_ROM_LOAD_WORD R2
+        sm      (BRUSH_NODE_PLANE), R2
+.else
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_NODE_PLANE), R0
+.endif
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_NODE_FRONT), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_NODE_BACK), R0
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_NODE_FIRST_FACE), R0
+        BSP_ROM_LOAD_WORD R1
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        iwt     R3, #$C000
+        with    R2
+        and     R3
+        beq     BrushPainterNodeCountReady
+        nop
+        ibt     R3, #31
+        with    R1
+        and     R3
+BrushPainterNodeCountReady:
+.endif
+        with    R1
+        add     R0
+        sm      (BRUSH_NODE_FACE_END), R1
+        ret
+        nop
+
+BrushPushPainterNode:
+        lm      R0, (BRUSH_NODE_PLANE)
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        move    R5, R11
+        jal     PlayableCameraNodePlaneSide
+        nop
+        move    R11, R5
+        moves   R0, R0
+.else
+        move    R1, R0
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R0                       ; 5p
+        iwt     R4, #WORLD_PLANES_ROM_ADDRESS
+        with    R4
+        add     R1
+        move    R0, #WORLD_PLANES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_SIGNED_BYTE R7
+        BSP_ROM_LOAD_SIGNED_BYTE R8
+        BSP_ROM_LOAD_SIGNED_BYTE R9
+        BSP_ROM_LOAD_WORD R10
+.if BSP_QUAKEC_GAMEPLAY
+        move    R5, R11
+        jal     PlayableCameraPlaneSide
+        nop
+        move    R11, R5
+        moves   R0, R0
+.else
+        lm      R0, (CAMERA_X)
+        move    R6, R0
+        with    R6
+        mult    R7
+        lm      R0, (CAMERA_Y)
+        move    R1, R0
+        with    R1
+        mult    R8
+        with    R6
+        add     R1
+        lm      R0, (CAMERA_Z)
+        move    R1, R0
+        with    R1
+        mult    R9
+        with    R6
+        add     R1
+        with    R6
+        sub     R10
+.endif
+.endif
+        bmi     BrushPainterCameraBack
+        nop
+        lm      R7, (BRUSH_NODE_FRONT)   ; Near.
+        lm      R8, (BRUSH_NODE_BACK)    ; Far.
+        bra     BrushPainterChildrenReady
+        nop
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        .res $97 - (* - BrushLoadCurrentNode), $01
+.endif
+BrushPainterCameraBack:
+        lm      R7, (BRUSH_NODE_BACK)
+        lm      R8, (BRUSH_NODE_FRONT)
+BrushPainterChildrenReady:
+        lm      R10, (BRUSH_TRAVERSAL_SP)
+        movew   (R10), R7                ; Near, processed last.
+        inc     R10
+        inc     R10
+        lm      R0, (BRUSH_NODE_FIRST_FACE)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        lm      R0, (BRUSH_NODE_FACE_END)
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        iwt     R0, #BRUSH_TRAVERSAL_EMIT_TAG
+        movew   (R10), R0
+        inc     R10
+        inc     R10
+        movew   (R10), R8                ; Far, processed next.
+        inc     R10
+        inc     R10
+        sm      (BRUSH_TRAVERSAL_SP), R10
+        iwt     R0, #BRUSH_TRAVERSAL_STACK_END+1
+        move    R1, R10
+        with    R1
+        cmp     R0
+        bcc     BrushPushPainterDone
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        with    R0
+        or      #BRUSH_OVERFLOW_STACK
+        sm      (BRUSH_OVERFLOW), R0
+BrushPushPainterDone:
+        ret
+        nop
+
+; R0 supplies one world source-face ID or one bit15-tagged link index.
+BrushAppendMixedToken:
+        sm      (BRUSH_LOAD_RETURN), R11
+        move    R3, R0
+        lm      R0, (BRUSH_TOKEN_COUNT)
+        iwt     R1, #GSU_BRUSH_MIXED_TOKEN_CAPACITY
+        with    R0
+        cmp     R1
+        bcc     BrushTokenCapacityReady
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        with    R0
+        or      #BRUSH_OVERFLOW_TOKENS
+        sm      (BRUSH_OVERFLOW), R0
+        GSU_ABSOLUTE_GOTO BrushAppendMixedTokenDone
+BrushTokenCapacityReady:
+        move    R1, R0
+        with    R1
+        add     R1
+        iwt     R10, #BRUSH_TOKENS
+        with    R10
+        add     R1
+        movew   (R10), R3
+        inc     R0
+        sm      (BRUSH_TOKEN_COUNT), R0
+BrushAppendMixedTokenDone:
+        lm      R11, (BRUSH_LOAD_RETURN)
+        ret
+        nop
+BrushTraversalLeafCold:
+        ; Quake child encoding is -1-leaf, exactly bitwise complement.
+        iwt     R1, #$FFFF
+        with    R0
+        xor     R1
+        sm      (BRUSH_CURRENT_LEAF), R0
+        with    R0
+        add     R0
+        iwt     R4, #BRUSH_LEAF_HEADS
+        with    R4
+        add     R0
+        movew   R3, (R4)
+        moves   R3, R3
+        bne     BrushTraversalLeafNonempty
+        nop
+        GSU_ABSOLUTE_GOTO BrushTraversalNext
+BrushTraversalLeafNonempty:
+        iwt     R1, #BRUSH_LINK_INDEX_MASK
+        with    R3
+        and     R1
+        sm      (BRUSH_CURRENT_FRAGMENT_COUNT), R3
+        ; Explicit group markers prevent two adjacent nonempty leaves from
+        ; collapsing when neither has an intervening selected world face.
+        lm      R1, (BRUSH_CURRENT_LEAF)
+        iwt     R2, #BRUSH_TOKEN_LEAF_TAG
+        with    R1
+        or      R2
+        move    R0, R1
+        jal     BrushAppendMixedToken
+        nop
+        lm      R3, (BRUSH_CURRENT_FRAGMENT_COUNT)
+BrushTraversalLeafLink:
+        moves   R3, R3
+        bne     BrushTraversalLeafLinkPresent
+        nop
+        GSU_ABSOLUTE_GOTO BrushTraversalNext
+BrushTraversalLeafLinkPresent:
+        dec     R3
+        move    R0, R3
+        iwt     R1, #BRUSH_TOKEN_FRAGMENT_TAG
+        with    R0
+        or      R1
+        jal     BrushAppendMixedToken
+        nop
+        lm      R0, (BRUSH_OVERFLOW)
+        moves   R0, R0
+        beq     BrushTraversalLeafContinue
+        nop
+        GSU_ABSOLUTE_GOTO BrushMergePainterDone
+BrushTraversalLeafContinue:
+        ; The packed link word retains a seven-bit slot above its nine-bit next.
+        move    R0, R3
+        with    R0
+        add     R0
+        with    R0
+        add     R0
+        with    R0
+        add     #2
+        iwt     R10, #BRUSH_LINKS
+        with    R10
+        add     R0
+        movew   R2, (R10)
+        iwt     R1, #$01FF
+        move    R3, R2
+        with    R3
+        and     R1
+.if BSP_BRUSH_TEN_BIT_LINKS
+        dec     R10
+        dec     R10
+        movew   R2, (R10)
+        iwt     R1, #$2000
+        with    R2
+        and     R1
+  .repeat 4
+        with    R2
+        lsr
+  .endrepeat                            ; word0 bit13 becomes next bit9.
+        with    R3
+        or      R2
+.endif
+        GSU_ABSOLUTE_GOTO BrushTraversalLeafLink
 
 BrushMergePainterAppendAliases:
         ; Fully BSP-occluded demo tokens were removed offline. Append each
@@ -1387,6 +1803,9 @@ BrushMergePainterDone:
         ret
         nop
 
+; Preserve all subsequent brush-overlay addresses.
+.assert * - BrushMergePainterTokens <= $02C3, error, "Packed painter traversal exceeds its fixed slot"
+        .res $02C3 - (* - BrushMergePainterTokens), $01
 .segment "GSU_TEXTURE_TAIL_CODE"
 
 ; Preserve the established brush-overlay layout by wrapping its historical
@@ -1426,7 +1845,10 @@ AliasRenderDepthCollectLoop:
         with    R5
         cmp     R1
         beq     AliasRenderDepthSort
-        nop
+        ; The sort and rewrite have no calls. The taken branch's R15 selects
+        ; their complete cache window; collecting the next token re-enters
+        ; the transform's own window before any transform instruction runs.
+        cache
         jal     AliasLoadTokenDepthQ6
         nop
         lm      R5, (ALIAS_CURRENT_CURSOR)
@@ -1543,6 +1965,30 @@ AliasRenderDepthDone:
 ; ranks reverse-copy those records instead of recomputing them.
 AliasLoadTokenDepthQ6:
         sm      (ALIAS_RENDER_DEPTH_RETURN), R11
+.if BSP_ALIAS_LIVE_POSES
+        move    R2, #GSU_GRUNT_POSE_BYTES
+        move    R0, R5
+        with    R0
+        umult   R2
+.ifdef QC_NAIL_COUNT
+        iwt     R10, #GSU_LIVE_POSE_OFFSET+2
+        with    R10
+        add     R0
+        jal     NailReadOrigin
+        nop
+.else
+        iwt     R10, #GSU_GRUNT_ORIGIN_OFFSET
+        with    R10
+        add     R0
+        movew   R1, (R10)
+        inc     R10
+        inc     R10
+        movew   R2, (R10)
+        inc     R10
+        inc     R10
+        movew   R3, (R10)
+.endif
+.else
         iwt     R10, #GSU_ALIAS_TOKENS_OFFSET
         with    R10
         add     R5
@@ -1578,6 +2024,7 @@ AliasRenderDepthStateReady:
         BSP_ROM_LOAD_WORD R1
         BSP_ROM_LOAD_WORD R2
         BSP_ROM_LOAD_WORD R3
+.endif
         jal     ClipTransformQ2Registers
         nop
         lm      R4, (CLIP_DEPTH)
@@ -1591,151 +2038,3 @@ AliasRenderDepthReady:
         nop
 
 .segment "GSU_BRUSH_CODE"
-
-BrushLoadCurrentNode:
-        sm      (BRUSH_LOAD_RETURN), R11
-        lm      R0, (BRUSH_CURRENT_NODE)
-        move    R1, R0
-        with    R1
-        add     R1
-        move    R2, R1
-        with    R1
-        add     R1
-        with    R1
-        add     R1
-        with    R1
-        add     R2                       ; 10n
-        iwt     R4, #$8000
-        with    R4
-        add     R1
-        move    R0, #WORLD_NODES_ROM_BANK
-        romb
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_WORD R0
-        sm      (BRUSH_NODE_PLANE), R0
-        BSP_ROM_LOAD_WORD R0
-        sm      (BRUSH_NODE_FRONT), R0
-        BSP_ROM_LOAD_WORD R0
-        sm      (BRUSH_NODE_BACK), R0
-        BSP_ROM_LOAD_WORD R0
-        sm      (BRUSH_NODE_FIRST_FACE), R0
-        BSP_ROM_LOAD_WORD R1
-        with    R1
-        add     R0
-        sm      (BRUSH_NODE_FACE_END), R1
-        lm      R11, (BRUSH_LOAD_RETURN)
-        ret
-        nop
-
-BrushPushPainterNode:
-        sm      (BRUSH_LINK_RETURN), R11
-        lm      R0, (BRUSH_NODE_PLANE)
-        move    R1, R0
-        with    R1
-        add     R1
-        with    R1
-        add     R1
-        with    R1
-        add     R0                       ; 5p
-        iwt     R4, #$8000
-        with    R4
-        add     R1
-        move    R0, #WORLD_PLANES_ROM_BANK
-        romb
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_SIGNED_BYTE R7
-        BSP_ROM_LOAD_SIGNED_BYTE R8
-        BSP_ROM_LOAD_SIGNED_BYTE R9
-        BSP_ROM_LOAD_WORD R10
-        lm      R0, (CAMERA_X)
-        move    R6, R0
-        with    R6
-        mult    R7
-        lm      R0, (CAMERA_Y)
-        move    R1, R0
-        with    R1
-        mult    R8
-        with    R6
-        add     R1
-        lm      R0, (CAMERA_Z)
-        move    R1, R0
-        with    R1
-        mult    R9
-        with    R6
-        add     R1
-        with    R6
-        sub     R10
-        bmi     BrushPainterCameraBack
-        nop
-        lm      R7, (BRUSH_NODE_FRONT)   ; Near.
-        lm      R8, (BRUSH_NODE_BACK)    ; Far.
-        bra     BrushPainterChildrenReady
-        nop
-BrushPainterCameraBack:
-        lm      R7, (BRUSH_NODE_BACK)
-        lm      R8, (BRUSH_NODE_FRONT)
-BrushPainterChildrenReady:
-        lm      R10, (BRUSH_TRAVERSAL_SP)
-        movew   (R10), R7                ; Near, processed last.
-        inc     R10
-        inc     R10
-        lm      R0, (BRUSH_NODE_FIRST_FACE)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (BRUSH_NODE_FACE_END)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        iwt     R0, #BRUSH_TRAVERSAL_EMIT_TAG
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        movew   (R10), R8                ; Far, processed next.
-        inc     R10
-        inc     R10
-        sm      (BRUSH_TRAVERSAL_SP), R10
-        iwt     R0, #BRUSH_TRAVERSAL_STACK_END+1
-        move    R1, R10
-        with    R1
-        cmp     R0
-        bcc     BrushPushPainterDone
-        nop
-        lm      R0, (BRUSH_OVERFLOW)
-        with    R0
-        or      #BRUSH_OVERFLOW_STACK
-        sm      (BRUSH_OVERFLOW), R0
-BrushPushPainterDone:
-        lm      R11, (BRUSH_LINK_RETURN)
-        ret
-        nop
-
-; R0 supplies one world source-face ID or one bit15-tagged link index.
-BrushAppendMixedToken:
-        sm      (BRUSH_LOAD_RETURN), R11
-        move    R3, R0
-        lm      R0, (BRUSH_TOKEN_COUNT)
-        iwt     R1, #GSU_BRUSH_MIXED_TOKEN_CAPACITY
-        with    R0
-        cmp     R1
-        bcc     BrushTokenCapacityReady
-        nop
-        lm      R0, (BRUSH_OVERFLOW)
-        with    R0
-        or      #BRUSH_OVERFLOW_TOKENS
-        sm      (BRUSH_OVERFLOW), R0
-        GSU_ABSOLUTE_GOTO BrushAppendMixedTokenDone
-BrushTokenCapacityReady:
-        move    R1, R0
-        with    R1
-        add     R1
-        iwt     R10, #BRUSH_TOKENS
-        with    R10
-        add     R1
-        movew   (R10), R3
-        inc     R0
-        sm      (BRUSH_TOKEN_COUNT), R0
-BrushAppendMixedTokenDone:
-        lm      R11, (BRUSH_LOAD_RETURN)
-        ret
-        nop

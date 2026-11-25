@@ -1,0 +1,207 @@
+; Shared numeric mailbox/restore ABI; one code copy serves X2 and F3.
+.ifndef __PLAYABLE_SPRITE_STREAM_COMMON__
+__PLAYABLE_SPRITE_STREAM_COMMON__ = 1
+.assert F3_SpriteStreamRequestBank = SpriteStreamRequestBank, lderror, "X2/F3 sprite stream state must share addresses"
+.assert F3_AliasSpriteStreamPause = AliasSpriteStreamPause, lderror, "X2/F3 sprite pause entry must share its RAM address"
+.assert F3_AliasSpriteStreamFinish = AliasSpriteStreamFinish, lderror, "X2/F3 sprite restore entry must share its RAM address"
+.ifdef PLAYABLE_E1M1_CULL_STREAMED_ALIAS
+.assert F3_AliasSpriteStreamVisibilityReturn = AliasSpriteStreamVisibilityReturn, lderror, "X2/F3 sprite visibility return must share its RAM address"
+.assert F3_AliasSpriteStreamOccluded = AliasSpriteStreamOccluded, lderror, "X2/F3 sprite cull entry must share its RAM address"
+.endif
+.pushseg
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+SpriteStreamResolveCommon:
+        sm      (AliasSpriteStreamRegisters+2), R1
+        sm      (AliasSpriteStreamRegisters+4), R2
+        sm      (AliasSpriteStreamRegisters+6), R3
+        sm      (AliasSpriteStreamRegisters+8), R4
+        sm      (AliasSpriteStreamRegisters+10), R5
+        sm      (AliasSpriteStreamRegisters+12), R6
+        sm      (AliasSpriteStreamRegisters+14), R7
+        sm      (AliasSpriteStreamRegisters+20), R10
+        sm      (AliasSpriteStreamRegisters+22), R11
+        sm      (AliasSpriteStreamRegisters+24), R12
+        sm      (AliasSpriteStreamRegisters+26), R13
+        sm      (AliasSpriteStreamRegisters+28), R14
+        move    R0, #0
+        sm      (AliasSpriteStreamPixelRam), R0
+        lm      R0, (ALIAS_PIXEL_BANK)
+        iwt     R1, #$0080
+        with    R0
+        and     R1
+        bne     AliasSpriteStreamTagged
+        nop
+        GSU_ABSOLUTE_GOTO AliasSpriteStreamReturnROM
+AliasSpriteStreamTagged:
+        lm      R0, (ALIAS_PIXEL_BANK)
+        iwt     R1, #$0081
+        with    R0
+        cmp     R1
+        bcs     AliasSpriteStreamTagAtLeastOne
+        nop
+        GSU_ABSOLUTE_GOTO AliasSpriteStreamInvalid
+AliasSpriteStreamTagAtLeastOne:
+        iwt     R1, #$0080+SPRITE_STREAM_BANK_COUNT
+        with    R0
+        cmp     R1
+        bcc     AliasSpriteStreamTagInRange
+        nop
+        GSU_ABSOLUTE_GOTO AliasSpriteStreamInvalid
+AliasSpriteStreamTagInRange:
+        lm      R4, (ALIAS_WIDTH)
+        lm      R1, (ALIAS_HEIGHT)
+        with    R4
+        umult   R1
+        lm      R0, (.loword(SpriteStreamRequestReady))
+        dec     R0
+        bne     AliasSpriteStreamMiss
+        nop
+        lm      R0, (.loword(SpriteStreamCacheBank))
+        lm      R1, (ALIAS_PIXEL_BANK)
+        with    R0
+        cmp     R1
+        bne     AliasSpriteStreamMiss
+        nop
+        lm      R0, (.loword(SpriteStreamCacheAddress))
+        lm      R1, (ALIAS_PIXEL_ADDRESS)
+        with    R0
+        cmp     R1
+        bne     AliasSpriteStreamMiss
+        nop
+        lm      R0, (.loword(SpriteStreamCacheBytes))
+        with    R0
+        cmp     R4
+        beq     AliasSpriteStreamReady
+        nop
+AliasSpriteStreamMiss:
+.ifdef PLAYABLE_E1M1_CULL_STREAMED_ALIAS
+        GSU_ABSOLUTE_GOTO SpriteStreamPrecheckVisibility
+AliasSpriteStreamCommitMiss:
+.endif
+        move    R0, #0
+        sm      (.loword(SpriteStreamRequestReady)), R0
+        lm      R0, (ALIAS_PIXEL_ADDRESS)
+        sm      (.loword(SpriteStreamRequestAddress)), R0
+        sm      (.loword(SpriteStreamRequestBytes)), R4
+        lm      R0, (ALIAS_PIXEL_BANK)
+        sm      (.loword(SpriteStreamRequestBank)), R0 ; Commit last.
+        GSU_ABSOLUTE_GOTO AliasSpriteStreamPauseROM
+SpriteStreamResumeCommon:
+        lm      R0, (.loword(SpriteStreamRequestReady))
+        dec     R0
+        bne     AliasSpriteStreamInvalid
+        nop
+        lm      R0, (.loword(SpriteStreamCacheBank))
+        lm      R1, (.loword(SpriteStreamRequestBank))
+        with    R0
+        cmp     R1
+        bne     AliasSpriteStreamInvalid
+        nop
+        lm      R0, (.loword(SpriteStreamCacheAddress))
+        lm      R1, (.loword(SpriteStreamRequestAddress))
+        with    R0
+        cmp     R1
+        bne     AliasSpriteStreamInvalid
+        nop
+        lm      R0, (.loword(SpriteStreamCacheBytes))
+        lm      R1, (.loword(SpriteStreamRequestBytes))
+        with    R0
+        cmp     R1
+        bne     AliasSpriteStreamInvalid
+        nop
+AliasSpriteStreamReady:
+        move    R0, #1
+        sm      (AliasSpriteStreamPixelRam), R0
+        iwt     R0, #SPRITE_STREAM_CACHE_OFFSET
+        sm      (ALIAS_PIXEL_ADDRESS), R0
+        move    R0, #0
+        sm      (.loword(SpriteStreamRequestBank)), R0
+AliasSpriteStreamReturnROM:
+        lm      R1, (AliasSpriteStreamRegisters+2)
+        lm      R2, (AliasSpriteStreamRegisters+4)
+        lm      R3, (AliasSpriteStreamRegisters+6)
+        lm      R4, (AliasSpriteStreamRegisters+8)
+        lm      R5, (AliasSpriteStreamRegisters+10)
+        lm      R6, (AliasSpriteStreamRegisters+12)
+        lm      R7, (AliasSpriteStreamRegisters+14)
+        lm      R10, (AliasSpriteStreamRegisters+20)
+        lm      R12, (AliasSpriteStreamRegisters+24)
+        lm      R13, (AliasSpriteStreamRegisters+26)
+        lm      R0, (AliasSpriteStreamRegisters+28)
+        GSU_SET_ROM_BUFFER_ADDRESS R0
+        lm      R0, (AliasSpriteStreamRegisters+0)
+        move    R9, #$70
+        iwt     R8, #.loword(AliasSpriteStreamFinish)
+        from    R8
+        ljmp    R9
+        nop
+AliasSpriteStreamInvalid:
+        ; Invalid virtual pointers or incomplete replies are fatal to the
+        ; mandatory sidecar protocol. The CPU rejects this committed tag.
+        move    R0, #0
+        sm      (.loword(SpriteStreamRequestReady)), R0
+        iwt     R0, #$FFFF
+        sm      (.loword(SpriteStreamRequestBank)), R0
+AliasSpriteStreamPauseROM:
+        move    R9, #$70
+        iwt     R8, #.loword(AliasSpriteStreamPause)
+        from    R8
+        ljmp    R9
+        nop
+.ifdef PLAYABLE_E1M1_CULL_STREAMED_ALIAS
+; Build the ordinary Fly occlusion mask before committing a missing raster.
+; Start at the clipped top row so every possibly sampled pixel is covered
+; by the test. A partial rectangle keeps its exact mask for the raster loop.
+SpriteStreamPrecheckVisibility:
+        lm      R8, (ALIAS_VISIBILITY_ROUTINE)
+        iwt     R0, #.loword(FlyAliasTestVisibility)
+        with    R8
+        cmp     R0
+        beq     @Build
+        nop
+        iwt     R0, #.loword(F3_FlyAliasTestVisibility)
+        with    R8
+        cmp     R0
+        beq     @Build
+        nop
+        GSU_ABSOLUTE_GOTO AliasSpriteStreamCommitMiss
+@Build:
+        lm      R12, (ALIAS_FIRST_X)
+        moves   R12, R12
+        bpl     :+
+        nop
+        move    R12, #0
+:
+        lm      R0, (ALIAS_FIRST_Y)
+        moves   R0, R0
+        bpl     :+
+        nop
+        move    R0, #0
+:
+        sm      (ALIAS_DEST_Y), R0
+        ; The mask return must skip restoring the virtual tag as a ROM bank.
+        move    R0, #1
+        sm      (AliasSpriteStreamPixelRam), R0
+        move    R9, #$70
+        iwt     R11, #.loword(AliasSpriteStreamVisibilityReturn)
+        from    R8
+        ljmp    R9
+        nop
+
+SpriteStreamVisibilityComplete:
+        move    R0, #0
+        sm      (AliasSpriteStreamPixelRam), R0
+        lm      R0, (FLY_MASK_REMAINING)
+        moves   R0, R0
+        beq     @Covered
+        nop
+        GSU_ABSOLUTE_GOTO AliasSpriteStreamCommitMiss
+@Covered:
+        move    R9, #$70
+        iwt     R8, #.loword(AliasSpriteStreamOccluded)
+        from    R8
+        ljmp    R9
+        nop
+.endif
+.popseg
+.endif

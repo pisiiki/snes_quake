@@ -1,0 +1,8 @@
+[tool.snes.workspace.libsfx]
+path = "third_party/libSFX"
+header = "include/libSFX.i"
+cc65_submodule = "tools/cc65"
+assembler_windows = "tools/cc65/bin/ca65.exe"
+linker_windows = "tools/cc65/bin/ld65.exe"
+assembler_linux = "tools/cc65/bin/ca65"
+linker_linux = "tools/cc65/bin/ld65"

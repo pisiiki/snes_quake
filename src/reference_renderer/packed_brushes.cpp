@@ -199,6 +199,12 @@ PackedBrushAssets load_packed_brush_assets(const fs::path& data_dir)
              {read_u16(variants, offset + 18), read_u16(variants, offset + 20), read_u16(variants, offset + 22)}}
         );
     }
+    std::array<int, 256> minimum_z{};
+    for (const auto& variant : assets.variants)
+        minimum_z[variant.inline_model] = std::min(minimum_z[variant.inline_model], int(variant.origin_z_q3));
+    for (auto& variant : assets.variants)
+        variant.rise_from_bottom_q2 = static_cast<std::int16_t>(
+            (variant.origin_z_q3 - minimum_z[variant.inline_model]) / 32);
     assets.faces.reserve(face_count);
     for (std::size_t index = 0; index < face_count; ++index)
     {
@@ -240,6 +246,8 @@ PackedBrushAssets load_packed_brush_assets(const fs::path& data_dir)
     assets.vertices.reserve(vertex_count);
     for (std::size_t index = 0; index < vertex_count; ++index)
     {
+        const auto tag = vertices[index * 4 + 3] >> 6;
+        assets.relative_vertex_model.push_back(tag == 3 ? 255 : tag == 1 ? 7 : tag == 2 ? 22 : 0);
         assets.vertices.push_back(decode_brush_q2_vertex(vertices, index * 4));
     }
     const auto& replay = packed_brush_section(assets, "REPLAY");
@@ -408,6 +416,37 @@ std::uint16_t packed_brush_visual_state_at_pose(const PackedBrushAssets& assets,
     return state;
 }
 
+PackedBrushInlineVariant
+packed_brush_inline_variant_at_pose(const PackedBrushAssets& assets, std::size_t pose, std::uint16_t entity)
+{
+    const auto descriptor = std::ranges::find(assets.entities, entity, &PackedBrushEntity::entity);
+    if (descriptor == assets.entities.end())
+        fail("live inline entity is absent from the packed directory");
+    const auto slot = static_cast<std::size_t>(descriptor - assets.entities.begin());
+    if (slot >= assets.external_entity_slot_first)
+        fail("live inline override names an external entity");
+    const auto platform = std::ranges::find(assets.sections, "PLATPOSE", &PackedBrushSection::name);
+    if (platform != assets.sections.end())
+    {
+        require_range(platform->bytes, 0, 2, "platform pose slots");
+        for (std::size_t lane = 0; lane < 2; ++lane)
+            if (platform->bytes[lane] == slot)
+            {
+                const auto address = 2 + pose * 2 + lane;
+                require_range(platform->bytes, address, 1, "platform pose row");
+                const auto variant = platform->bytes[address];
+                if (variant >= descriptor->variant_count)
+                    fail("live platform pose exceeds the local variant directory");
+                return {entity, variant};
+            }
+    }
+    const auto visual = decode_packed_brush_visual_state(assets, packed_brush_visual_state_at_pose(assets, pose));
+    const auto transform = std::ranges::find(visual.transforms, slot, [](const auto& value) { return value.first; });
+    if (transform == visual.transforms.end() || transform->second >= descriptor->variant_count)
+        fail("live inline pose has no valid local variant");
+    return {entity, transform->second};
+}
+
 namespace {
 bool packed_external_static_active(const PackedBrushAssets& assets, std::size_t pose, std::size_t static_index)
 {
@@ -553,9 +592,10 @@ std::vector<PackedBrushToken> build_packed_brush_tokens(
         const auto plane = read_u16(nodes, node_offset);
         require_range(planes, static_cast<std::size_t>(plane) * 5, 5, "world BSP plane");
         const auto plane_offset = static_cast<std::size_t>(plane) * 5;
+        const auto position = camera.position_q2();
         const int distance =
-            camera.x * decode_i8(planes[plane_offset]) + camera.y * decode_i8(planes[plane_offset + 1]) +
-            camera.z * decode_i8(planes[plane_offset + 2]) - read_i16(planes, plane_offset + 3);
+            position[0] * decode_i8(planes[plane_offset]) + position[1] * decode_i8(planes[plane_offset + 1]) +
+            position[2] * decode_i8(planes[plane_offset + 2]) - 4 * read_i16(planes, plane_offset + 3);
         const auto front = read_i16(nodes, node_offset + 2);
         const auto back = read_i16(nodes, node_offset + 4);
         const auto near_child = distance < 0 ? back : front;
@@ -738,17 +778,22 @@ std::uint16_t append_packed_brush_lightmaps(SourceWorld& world, const PackedBrus
         lightmap.texture_min_t = decode_i8(directory.bytes[offset + 6]) * 16;
         lightmap.width = width;
         lightmap.height = height;
+        if (const auto source = assets.switched_light_sources.find(static_cast<std::uint16_t>(face));
+            source != assets.switched_light_sources.end())
+        {
+            lightmap.light_offset = source->second.light_offset;
+            lightmap.styles = source->second.light_styles;
+            lightmap.style_count = static_cast<int>(std::ranges::find(lightmap.styles, 255) - lightmap.styles.begin());
+            world.face_lightmaps.push_back(lightmap);
+            continue;
+        }
         lightmap.light_offset = static_cast<int>(world.lighting.size());
         lightmap.styles = {0, 255, 255, 255};
         lightmap.style_count = 1;
         lightmap.precombined_compact_levels = true;
         for (const auto level : decoded_samples)
         {
-            if (level == 0 || level > 63)
-            {
-                fail("QBSA brush lightmap level escapes 1..63");
-            }
-            world.lighting.push_back(level);
+            world.lighting.push_back(checked_packed_brush_lightmap_level(level));
         }
         world.face_lightmaps.push_back(lightmap);
     }
@@ -757,6 +802,21 @@ std::uint16_t append_packed_brush_lightmaps(SourceWorld& world, const PackedBrus
 } // namespace
 
 namespace {
+int packed_brush_world_origin_q0(double value)
+{
+    // Match Python round() in the QBSF producer and BSP_WORLD_ORIGIN equates.
+    // Explicit half-to-even handling avoids dependence on the process FPU mode.
+    if (!std::isfinite(value))
+        fail("packed brush world origin must be finite");
+    const double lower = std::floor(value);
+    const double fraction = value - lower;
+    const double rounded = lower + ((fraction > 0.5 ||
+        (fraction == 0.5 && std::fmod(lower, 2.0) != 0.0)) ? 1.0 : 0.0);
+    if (rounded < std::numeric_limits<int>::min() || rounded > std::numeric_limits<int>::max())
+        fail("packed brush world origin exceeds the integer range");
+    return static_cast<int>(rounded);
+}
+
 std::int16_t packed_brush_coordinate(
     const SourceWorld& world,
     const PackedBrushVariant& variant,
@@ -773,19 +833,53 @@ std::int16_t packed_brush_coordinate(
     const std::array<int, 3> packed{vertex.x, vertex.y, vertex.z};
     const std::array<int, 3> origin_q3{variant.origin_x_q3, variant.origin_y_q3, variant.origin_z_q3};
     const std::array<double, 3> world_origin{world.origin.x, world.origin.y, world.origin.z};
-    const auto rounded_world_origin = static_cast<int>(std::lround(world_origin[axis]));
-    if (world_origin[axis] != rounded_world_origin)
-    {
-        fail("packed brush texture coordinates require integer world origin");
-    }
-    int value = packed[axis] * 64 + rounded_world_origin * 16 - origin_q3[axis] * 2;
+    const auto rounded_world_origin = packed_brush_world_origin_q0(world_origin[axis]);
+    std::int64_t value = std::int64_t(packed[axis]) * 64 + std::int64_t(rounded_world_origin) * 16 -
+                         std::int64_t(origin_q3[axis]) * 2;
     if (axis_code < 0)
     {
         value = -value;
     }
-    return wrap_i16(value + offset * 16);
+    return std::bit_cast<std::int16_t>(static_cast<std::uint16_t>(value + std::int64_t(offset) * 16));
 }
 } // namespace
+
+bool run_packed_brush_coordinate_self_test()
+{
+    SourceWorld world;
+    PackedBrushVariant variant;
+    variant.origin_x_q3 = 8;
+    variant.origin_y_q3 = -12;
+    variant.origin_z_q3 = 20;
+    const PackedVertex vertex{3, -2, 5};
+    for (const auto& [origin, expected] : std::array{
+             std::pair{0.0, 224}, std::pair{10.0, 384}, std::pair{-10.0, 64},
+             std::pair{0.5, 224}, std::pair{1.5, 256}, std::pair{2.5, 256},
+             std::pair{-0.5, 224}, std::pair{-1.5, 192}, std::pair{-2.5, 192}})
+    {
+        world.origin.x = origin;
+        if (packed_brush_coordinate(world, variant, vertex, 1, 3) != expected)
+            return false;
+    }
+    // START's fractional Z origin must use the same authored native Q0=-87.
+    world.origin = {0.5, -1.5, -86.54544};
+    if (packed_brush_coordinate(world, variant, vertex, -1, 3) != -128 ||
+        packed_brush_coordinate(world, variant, vertex, 2, 2) != -104 ||
+        packed_brush_coordinate(world, variant, vertex, -2, 2) != 168 ||
+        packed_brush_coordinate(world, variant, vertex, 3, 1) != -1096 ||
+        packed_brush_coordinate(world, variant, vertex, -3, 1) != 1128)
+        return false;
+    for (const double invalid : {std::numeric_limits<double>::infinity(),
+             -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(),
+             double(std::numeric_limits<int>::max()) + 1.0, double(std::numeric_limits<int>::min()) - 1.0})
+    {
+        world.origin.x = invalid;
+        try { packed_brush_coordinate(world, variant, vertex, 1, 0); }
+        catch (const std::exception&) { continue; }
+        return false;
+    }
+    return true;
+}
 
 namespace {
 std::uint8_t
@@ -813,10 +907,11 @@ bool packed_brush_face_is_visible(
 )
 {
     const auto& plane = assets.face_planes.at(face.packed_face);
+    const auto position = camera.position_q2();
     const std::array<double, 3> local_camera_q2{
-        camera.x * 4.0 - variant.origin_x_q3 / 32.0,
-        camera.y * 4.0 - variant.origin_y_q3 / 32.0,
-        camera.z * 4.0 - variant.origin_z_q3 / 32.0,
+        position[0] - variant.origin_x_q3 / 32.0,
+        position[1] - variant.origin_y_q3 / 32.0,
+        position[2] - variant.origin_z_q3 / 32.0,
     };
     const double value =
         plane.x * local_camera_q2[0] + plane.y * local_camera_q2[1] + plane.z * local_camera_q2[2] - plane.distance;
@@ -867,6 +962,9 @@ void raster_packed_brush_world_face(
     {
         return;
     }
+    ++result.stats.input_faces;
+    if (hidden_packed_opaque_contact(world, camera, face, result.authored_visibility))
+        return;
     result.current_depth_arbitration = false;
     result.current_source_face = face;
     result.current_entity = 0;
@@ -881,8 +979,7 @@ void raster_packed_brush_world_face(
              coordinates[index].t_q4}
         );
     }
-    ++result.stats.input_faces;
-    raster_packed_texture_polygon(result, world, polygon, world.packed_textures.at(texture_id), face, mode);
+    raster_packed_texture_polygon(result, world, polygon, world.packed_textures.at(texture_id), face, mode, true);
 }
 } // namespace
 
@@ -928,12 +1025,42 @@ void raster_packed_brush_fragment(
          index < static_cast<std::size_t>(fragment.first_vertex) + fragment.vertex_count;
          ++index)
     {
-        const auto& vertex = assets.vertices[index];
-        polygon.push_back(
-            {transform_packed_vertex(world, vertex, camera),
-             packed_brush_coordinate(world, variant, vertex, face.s_axis, face.s_offset),
-             packed_brush_coordinate(world, variant, vertex, face.t_axis, face.t_offset)}
-        );
+        auto vertex = assets.vertices[index];
+        if (const auto model = assets.relative_vertex_model.at(index))
+        {
+            if (model == 255)
+            {
+                if (variant.origin_x_q3 % 32 || variant.origin_y_q3 % 32)
+                    fail("horizontal QBSF corner requires an integral Q2 displacement");
+                vertex.x = static_cast<std::int16_t>(vertex.x + variant.origin_x_q3 / 32);
+                vertex.y = static_cast<std::int16_t>(vertex.y + variant.origin_y_q3 / 32);
+            }
+            else
+            {
+                if (model != variant.inline_model)
+                    fail("QBSF relative vertex names a different platform");
+                vertex.z = static_cast<std::int16_t>(vertex.z + variant.rise_from_bottom_q2);
+            }
+        }
+        if (face.s_axis >= 4 && face.t_axis >= 4)
+        {
+            const auto y = vertex.y * 32 + packed_brush_world_origin_q0(world.origin.y) * 8 - variant.origin_y_q3;
+            const auto z = vertex.z * 32 + packed_brush_world_origin_q0(world.origin.z) * 8 - variant.origin_z_q3;
+            const auto s = ((std::int64_t(y) * face.s_offset + std::int64_t(z) * face.t_offset) >> 13) +
+                           (face.s_axis - 64) * 256;
+            const auto t = ((std::int64_t(y) * face.t_offset - std::int64_t(z) * face.s_offset) >> 13) +
+                           (face.t_axis - 64) * 256;
+            polygon.push_back({transform_packed_vertex(world, vertex, camera),
+                               static_cast<std::int16_t>(s), static_cast<std::int16_t>(t)});
+        }
+        else
+        {
+            polygon.push_back(
+                {transform_packed_vertex(world, vertex, camera),
+                 packed_brush_coordinate(world, variant, vertex, face.s_axis, face.s_offset),
+                 packed_brush_coordinate(world, variant, vertex, face.t_axis, face.t_offset)}
+            );
+        }
     }
     ++result.current_candidate_serial;
     ++result.stats.input_faces;
@@ -943,7 +1070,8 @@ void raster_packed_brush_fragment(
         polygon,
         world.packed_textures.at(texture_id),
         static_cast<std::uint16_t>(lightmap_face_base + fragment.packed_face),
-        mode
+        mode,
+        false
     );
 }
 } // namespace
@@ -1261,10 +1389,34 @@ PackedTextureRaster render_packed_brush_pipeline(
     double surface_time,
     bool external_bsp_enabled,
     std::optional<std::size_t> fly_source_pose,
-    bool fly_static_brushes
+    bool fly_static_brushes,
+    std::optional<std::span<const std::uint16_t>> live_external_entities,
+    std::span<const PackedBrushInlineVariant> live_inline_variants,
+    std::span<const std::uint8_t> authored_visibility,
+    std::span<const std::uint8_t> face_colors
 )
 {
+    if (!face_colors.empty() && mode != TextureRasterMode::projective_block8)
+        fail("baked face colors require the projective gameplay raster");
     auto visual = decode_packed_brush_visual_state(assets, visual_state);
+    for (std::size_t index = 0; index < live_inline_variants.size(); ++index)
+    {
+        const auto& override = live_inline_variants[index];
+        for (std::size_t prior = 0; prior < index; ++prior)
+            if (live_inline_variants[prior].entity == override.entity)
+                fail("live inline overrides repeat an entity");
+        const auto descriptor = std::ranges::find(assets.entities, override.entity, &PackedBrushEntity::entity);
+        if (descriptor == assets.entities.end())
+            fail("live inline override is absent from the packed directory");
+        const auto slot = static_cast<std::size_t>(descriptor - assets.entities.begin());
+        if (slot >= assets.external_entity_slot_first || override.local_variant >= descriptor->variant_count)
+            fail("live inline override exceeds its packed entity variants");
+        const auto transform =
+            std::ranges::find(visual.transforms, slot, [](const auto& value) { return value.first; });
+        if (transform == visual.transforms.end())
+            fail("live inline override is absent from the base visual state");
+        transform->second = override.local_variant;
+    }
     std::vector<PackedBrushActiveGeometry> fly_geometry;
     if (fly_source_pose.has_value())
     {
@@ -1302,11 +1454,15 @@ PackedTextureRaster render_packed_brush_pipeline(
                 }
                 for (std::size_t index = 0; index < assets.external_static_variants.size(); ++index)
                 {
-                    if (!packed_external_static_active(assets, *fly_source_pose, index))
+                    const auto& record = assets.external_static_variants[index];
+                    const bool active =
+                        live_external_entities.has_value()
+                            ? std::ranges::find(*live_external_entities, record.entity) != live_external_entities->end()
+                            : packed_external_static_active(assets, *fly_source_pose, index);
+                    if (!active)
                     {
                         continue;
                     }
-                    const auto& record = assets.external_static_variants[index];
                     fly_geometry.push_back({record.slot, record.geometry_variant});
                 }
             }
@@ -1335,6 +1491,8 @@ PackedTextureRaster render_packed_brush_pipeline(
     build_packed_brush_tokens(assets, packet, camera, visual, data_dir, fly_geometry);
 
     auto result = make_packed_brush_raster();
+    result.authored_visibility = authored_visibility;
+    result.face_colors = face_colors;
     result.turbulence_phase = quake_turbulence_phase(surface_time);
     bool brush_group_active = false;
     for (const auto& token : assets.tokens)
@@ -1380,6 +1538,8 @@ PackedTextureRaster render_packed_brush_pipeline(
             );
         }
     }
+    result.authored_visibility = {};
+    result.face_colors = {};
     auto finished = finish_packed_brush_raster(std::move(result));
     if (mode == TextureRasterMode::projective_block8)
     {
@@ -1510,9 +1670,10 @@ PackedTextureRaster render_direct_qbsf_brush_authority(
         const auto plane = read_u16(nodes, offset);
         require_range(planes, static_cast<std::size_t>(plane) * 5, 5, "direct QBSF world plane");
         const auto plane_offset = static_cast<std::size_t>(plane) * 5;
+        const auto position = camera.position_q2();
         const int distance =
-            camera.x * decode_i8(planes[plane_offset]) + camera.y * decode_i8(planes[plane_offset + 1]) +
-            camera.z * decode_i8(planes[plane_offset + 2]) - read_i16(planes, plane_offset + 3);
+            position[0] * decode_i8(planes[plane_offset]) + position[1] * decode_i8(planes[plane_offset + 1]) +
+            position[2] * decode_i8(planes[plane_offset + 2]) - 4 * read_i16(planes, plane_offset + 3);
         const auto front = read_i16(nodes, offset + 2);
         const auto back = read_i16(nodes, offset + 4);
         const auto near_child = distance < 0 ? back : front;

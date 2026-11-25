@@ -1,0 +1,11 @@
+; Full-eight cached setup retains its callback in R11. Generic setup loads the
+; same register before entering the loop; keep the following cache slots fixed.
+.if .defined(QUAKE_CACHED_LIGHTMAP_BLOCK8) && (BSP_RENDER_SCALE = 2)
+        ret
+        nop
+        .res 3, $01
+.else
+        lm      R11, (TEXTURE_COORD_RETURN)
+        ret
+        nop
+.endif

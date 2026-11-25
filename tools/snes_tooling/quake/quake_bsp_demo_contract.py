@@ -15,7 +15,12 @@ import snes_tooling.quake.quake_bsp_validation as validation
 from snes_tooling.quake.quake_camera_sampling import CAMERA_SAMPLING_CONTRACT
 from snes_tooling.quake.quake_scene_sampling import SCENE_SAMPLING_CONTRACT
 
-DATA_DIR = Workspace.discover().root / "src/snes_quake/Data"
+DATA_DIR = Workspace.discover().generated_data
+
+# Historical demo1 schedule used by tooling that can inspect archived ROMs.
+E1M3_STEP_POSES = 223
+E1M3_SOURCE_POSES = 2226
+E1M3_LAST_DUE_TICK = 4457
 
 TRACK_RECORD = struct.Struct("<bbbBb")
 

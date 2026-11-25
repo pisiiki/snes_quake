@@ -1,0 +1,395 @@
+; Baked monotone rows share an instruction-cache window with their edges and pixels.
+.pushseg
+.segment "GSU_FLAT_MONOTONE_CODE"
+.export FlatMonotoneDispatch, FlatMonotoneDispatchEnd
+
+; Replace the initial link store and plane load in both address layouts.
+FlatMonotoneDispatch:
+        GSU_ABSOLUTE_GOTO FlatMonotoneRaster
+        .res FlatMonotoneLegacy - TextureRasterPolygon - 4, $01
+FlatMonotoneDispatchEnd:
+FlatMonotoneRaster:
+        sm      (TEXTURE_RASTER_RETURN), R11
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #BakedFaceSampler
+        cmp     R1
+        bne     FlatMonotoneGeneral
+        nop
+        lm      R0, (CONVEX_PLANE)
+        moves   R0, R0
+        beq     FlatMonotoneRowLoop
+        nop
+FlatMonotoneGeneral:
+        lm      R0, (CONVEX_PLANE)
+        GSU_ABSOLUTE_GOTO FlatMonotoneLegacy
+
+FlatMonotoneRowLoop:
+        lm      R0, (CONVEX_RASTER_Y)
+        swap
+        lsr
+        iwt     R1, #64
+        with    R0
+        add     R1
+        sm      (CONVEX_SAMPLE_Y), R0
+
+        lm      R10, (CONVEX_FORWARD_PTR)
+        lm      R12, (CONVEX_SCREEN_COUNT)
+FlatMonotoneForwardAdvance:
+        to      R9
+        from    R10
+        add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
+        lm      R0, (CONVEX_SCREEN_END_PTR)
+        with    R9
+        cmp     R0
+        bne     FlatMonotoneForwardNextReady
+        nop
+        iwt     R9, #TEXTURE_SCREEN
+FlatMonotoneForwardNextReady:
+        move    R8, R9
+        inc     R8
+        inc     R8
+        movew   R1, (R8)
+        lm      R0, (CONVEX_SAMPLE_Y)
+        inc     R0
+        to      R2
+        from    R1
+        sub     R0
+        ; Clamped screen coordinates keep this strict comparison in signed range.
+        bmi     FlatMonotoneForwardStep
+        inc     R2                      ; Restore the original edge delta.
+  .if PLAYABLE_MAP_ID <> PLAYABLE_E1M1_MAP_ID
+        sm      (CONVEX_FORWARD_PTR), R10
+  .endif
+        jal     BakedIntersectEdge
+        nop
+        sm      (CONVEX_MIN_X), R0
+        bra     FlatMonotoneReverseBegin
+        nop
+FlatMonotoneForwardStep:
+  .if PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID
+        ; Save the upper vertex only when the walker moves.
+        sm      (CONVEX_FORWARD_PTR), R9
+  .endif
+        move    R10, R9
+        dec     R12
+        bne     FlatMonotoneForwardAdvance
+        nop
+        GSU_ABSOLUTE_GOTO FlatMonotoneDone
+
+FlatMonotoneReverseBegin:
+        lm      R10, (CONVEX_REVERSE_PTR)
+        lm      R12, (CONVEX_SCREEN_COUNT)
+FlatMonotoneReverseAdvance:
+        iwt     R0, #TEXTURE_SCREEN
+        with    R10
+        cmp     R0
+        bne     FlatMonotoneReverseNoWrap
+        nop
+        lm      R9, (CONVEX_SCREEN_END_PTR)
+        with    R9
+        sub     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
+        bra     FlatMonotoneReverseNextReady
+        nop
+FlatMonotoneReverseNoWrap:
+        to      R9
+        from    R10
+        sub     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
+FlatMonotoneReverseNextReady:
+        move    R8, R9
+        inc     R8
+        inc     R8
+        movew   R1, (R8)
+        lm      R0, (CONVEX_SAMPLE_Y)
+        inc     R0
+        to      R2
+        from    R1
+        sub     R0
+        bpl     FlatMonotoneReverseIntersect
+        inc     R2
+FlatMonotoneReverseStep:
+  .if PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID
+        ; Save the upper vertex only when the walker moves.
+        sm      (CONVEX_REVERSE_PTR), R9
+  .endif
+        move    R10, R9
+        dec     R12
+        bne     FlatMonotoneReverseAdvance
+        nop
+        GSU_ABSOLUTE_GOTO FlatMonotoneDone
+FlatMonotoneReverseIntersect:
+  .if PLAYABLE_MAP_ID <> PLAYABLE_E1M1_MAP_ID
+        sm      (CONVEX_REVERSE_PTR), R10
+  .endif
+        jal     BakedIntersectEdge
+        nop
+        lm      R1, (CONVEX_MIN_X)
+        move    R3, R0
+        with    R0
+        cmp     R1
+        bpl     FlatMonotoneXOrderReady
+        nop
+        move    R3, R1
+        move    R1, R0
+FlatMonotoneXOrderReady:
+        iwt     R0, #59
+        with    R1
+        add     R0
+        BSP_ARITH_SHIFT7_R0 R1
+        moves   R1, R1
+        bpl     FlatMonotoneFirstReady
+        nop
+        move    R1, #0
+FlatMonotoneFirstReady:
+        iwt     R0, #60
+        with    R3
+        sub     R0
+        BSP_ARITH_SHIFT7_R0 R3
+        move    R0, #BSP_VIEW_WIDTH-1
+        to      R4
+        sub     R3
+        bpl     FlatMonotoneLastReady
+        nop
+        move    R3, R0
+FlatMonotoneLastReady:
+        move    R0, R3
+        with    R0
+        sub     R1
+        bmi     FlatMonotoneNextRow
+        nop
+        lm      R2, (CONVEX_RASTER_Y)
+  .if .defined(PLAYABLE_WEAPON_OBJ) && (BSP_RENDER_SCALE = 2) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+        jal     BakedDrawSpanCached
+  .else
+        jal     BakedDrawSpan
+  .endif
+        nop
+FlatMonotoneNextRow:
+        lm      R0, (CONVEX_RASTER_Y)
+        lm      R1, (CONVEX_TOP_PTR)
+        with    R0
+        cmp     R1
+        beq     FlatMonotoneDone
+        inc     R0
+        sm      (CONVEX_RASTER_Y), R0
+        GSU_ABSOLUTE_GOTO FlatMonotoneRowLoop
+FlatMonotoneDone:
+        lm      R11, (TEXTURE_RASTER_RETURN)
+        ret
+        nop
+FlatMonotoneEnd:
+.assert .loword(FlatMonotoneEnd) <= ((.loword(BakedIntersectEdge) & $FFF0) + $0200), lderror, "Baked monotone row exceeds the edge CACHE window"
+.if PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID
+
+; Write the original ten-byte clip records from the packet-local view cache.
+; Keep the outcode union and publish the same final scratch cursor and ID.
+BakedLoadE1M1FlatContour:
+        cache
+        iwt     R8, #TEXTURE_VIEW_A
+        lm      R10, (CONVEX_INDEX_PTR)
+        lm      R12, (CONVEX_FACE_VERTICES)
+        sm      (CONVEX_OUTPUT_COUNT), R12
+        move    R7, #0
+        move    R9, #0
+        sm      (TEXTURE_CUR_S), R9
+        sm      (TEXTURE_CUR_T), R9
+        iwt     R5, #PACKET_VIEW_CACHE
+        iwt     R13, #BakedLoadE1M1FlatVertex
+BakedLoadE1M1FlatVertex:
+        movew   R6, (R10)
+        inc     R10
+        from    R6
+        add     R6
+        add     R0
+        add     R0
+        to      R4
+        add     R5
+  .repeat 3
+        ldw     (R4)
+        stw     (R8)
+        inc     R4
+        inc     R4
+        inc     R8
+        inc     R8
+  .endrepeat
+        movew   R2, (R4)
+        with    R7
+        or      R2
+  .repeat 2
+        movew   (R8), R9
+        inc     R8
+        inc     R8
+  .endrepeat
+        loop
+        inc     R10
+        sm      (CLIP_VERTEX_INDEX), R6
+        sm      (CONVEX_OUTPUT_CURSOR), R8
+        GSU_ABSOLUTE_GOTO BakedClipFaceBegin
+BakedLoadE1M1FlatContourEnd:
+
+.export FlatPrepareProjectionDivide
+; The Flat X2 projector uses each reciprocal limb twice before either expires.
+FlatPrepareProjectionDivide:
+        iwt     R10, #@Ready
+        lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
+        jmp     R13
+        nop
+@Ready:
+        ret
+        nop
+
+; R8=numerator, R9=positive denominator. Pass three times the exact quotient
+; to the caller's sign stage without changing its original return link.
+; Keep both reciprocal limbs, the output cursor, and the component sign live.
+FlatDivideProjectionQ12:
+        move    R6, R12
+        from    R8
+        lmult
+        move    R3, R4
+        move    R6, R13
+        from    R8
+        lmult
+        with    R4
+        add     R4
+        adc     R0
+        with    R3
+        add     R0
+        with    R4
+        lsr
+        with    R4
+        cmp     R8
+        bcs     @Return
+        nop
+
+        ; The estimate is exact or one high. The true residual fits s16.
+        ; Its low word gives the same comparison as both full products.
+        move    R6, R9
+        from    R3
+        lmult
+        move    R1, R4
+        iwt     R6, #4096
+        from    R8
+        lmult
+        with    R4
+        sub     R1
+        bpl     @Return
+        nop
+        dec     R3
+@Return:
+        move    R0, R3
+        add     R0
+        GSU_ABSOLUTE_GOTO FlatProjectionSign, shared_delay
+        add     R3
+FlatProjectionDivideEnd:
+.if FLY_MASK_BATCH_WORLD_CLAIMS
+        ; The Flat and Full overlays each install the same alias helper.
+        .res FLY_MASK_CLAIM_BYTES_OFFSET - (*-FlatMonotoneDispatch), $01
+FlatFlyWorldMaskClaimBytes:
+        FLY_WORLD_MASK_CLAIM_BYTES
+        .assert .loword(FlatFlyWorldMaskClaimBytes) = .loword(FlyWorldMaskClaimBytes), lderror, "Flat and Full alias claim addresses differ"
+        .assert * - FlatMonotoneDispatch <= $0200, error, "Flat alias claim exceeds its overlay"
+.endif
+.assert .loword(FlatProjectionDivideEnd) <= .loword(FlatMonotoneDispatch) + $0200, lderror, "E1M1 Flat divider exceeds its overlay"
+.assert .loword(BakedLoadE1M1FlatContourEnd) <= .loword(FlatMonotoneDispatch) + $0200, lderror, "E1M1 baked contour exceeds the Flat overlay"
+.else
+
+; The packet selector admits only drawable geometry. Asset generation requires
+; a packed texture for each drawable face. Flat uses its authored color and
+; does not need the texture coordinates, material directory or sampler state.
+.export FlatMixedWorldFace
+FlatMixedWorldFace:
+        sm      (BRUSH_TOKEN_RETURN), R11
+        lm      R3, (BRUSH_CURRENT_TOKEN)
+        sm      (PACKET_SOURCE_INDEX), R3
+        BrushPrepareWorldGeometry
+        lm      R11, (BRUSH_TOKEN_RETURN)
+        GSU_ABSOLUTE_GOTO BakedRenderFlatWorldFace
+
+; The compact clip records carry only the three camera-space coordinates.
+BakedLoadFlatContour:
+        cache
+        lm      R12, (CONVEX_FACE_VERTICES)
+        from    R12
+        sub     #3
+        bcs     :+
+        nop
+        GSU_ABSOLUTE_GOTO TextureFaceDone
+:
+        lm      R10, (CONVEX_INDEX_PTR)
+        sm      (CONVEX_COUNT), R12
+        iwt     R8, #TEXTURE_VIEW_A
+        iwt     R5, #PACKET_VIEW_CACHE
+        move    R7, #0
+        iwt     R13, #BakedLoadFlatVertex
+BakedLoadFlatVertex:
+        movew   R6, (R10)
+        inc     R10
+        move    R0, R6
+        add     R0
+        add     R0
+        add     R0
+        to      R4
+        add     R5
+  .repeat 3
+        ldw     (R4)
+        stw     (R8)
+        inc     R4
+        inc     R4
+        inc     R8
+        inc     R8
+  .endrepeat
+        movew   R2, (R4)
+        with    R7
+        or      R2
+        loop
+        inc     R10
+        sm      (CLIP_VERTEX_INDEX), R6
+        GSU_ABSOLUTE_GOTO BakedClipFlatContour
+
+; Clip XYZ in six-byte records. Preserve the textured clipper's plane order
+; and use its exact distance and intersection routines through ConvexClipPlane.
+BakedClipFlatPlane:
+        jal     ConvexClipPlane
+        nop
+        lm      R12, (CONVEX_OUTPUT_COUNT)
+        from    R12
+        sub     #3
+        bcs     @HasPolygon
+        nop
+        GSU_ABSOLUTE_GOTO TextureFaceDone
+@HasPolygon:
+        sm      (CONVEX_COUNT), R12
+        lm      R10, (CONVEX_OUTPUT_PTR)
+        lm      R8, (CONVEX_INPUT_PTR)
+        sm      (CONVEX_INPUT_PTR), R10
+        sm      (CONVEX_OUTPUT_PTR), R8
+        lm      R0, (CONVEX_PLANE)
+        inc     R0
+        sm      (CONVEX_PLANE), R0
+        sub     #4
+        bne     BakedClipFlatPlane
+        nop
+
+; Restore ten-byte XYZ/S/T records in the opposite buffer for the projector.
+BakedExpandFlatContour:
+        sm      (CONVEX_INPUT_PTR), R8
+        move    R1, #0
+        iwt     R13, #BakedExpandFlatVertex
+BakedExpandFlatVertex:
+  .repeat 3
+        ldw     (R10)
+        stw     (R8)
+        inc     R10
+        inc     R10
+        inc     R8
+        inc     R8
+  .endrepeat
+        movew   (R8), R1
+        inc     R8
+        inc     R8
+        movew   (R8), R1
+        inc     R8
+        loop
+        inc     R8
+        GSU_ABSOLUTE_GOTO TextureClipFaceProject
+.endif
+.popseg

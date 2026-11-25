@@ -69,6 +69,10 @@ class QuakeAudioSession
 {
   public:
     explicit QuakeAudioSession(const QuakeSoundAssets* assets);
+    explicit QuakeAudioSession(std::span<const std::uint8_t> gameplay_pak);
+    void play_live(std::string_view sound, std::uint16_t entity, std::uint8_t channel,
+                   std::uint8_t volume, std::uint8_t attenuation, Vec3 origin);
+    void reset_live();
     ~QuakeAudioSession();
 
     QuakeAudioSession(const QuakeAudioSession&) = delete;

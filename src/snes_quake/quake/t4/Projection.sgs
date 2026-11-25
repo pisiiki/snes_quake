@@ -1,0 +1,149 @@
+; The shaded polygon loop owns CACHE at $D880. Technique 4 does not execute
+; the following T2 raster prefix, so keep its exact component/divide dependency
+; there without changing CBR. X2 returns directly; X3 keeps the public focal site.
+; Wider-clamp F3 variants retain the public component, including its patches.
+.segment "GSU_T4_PROJECTION_CODE"
+.export T4ConvexProjectComponentCached, ConvexProjectComponent
+.export TextureShadeProjectRightCall, TextureShadeProjectUpCall
+T4ConvexProjectComponentCached:
+.if .defined(PLAYABLE_E1M1_SHADED_PROJECTOR) && (BSP_RENDER_SCALE = 2)
+        ; These two shaded-polygon callers need the signed screen delta only.
+        ; R2 holds the original sign through both exact divider continuations.
+        move    R9, R2
+        move    R2, R1
+        moves   R0, R1
+        bpl     @Magnitude
+        nop
+        not
+        inc     R0
+@Magnitude:
+        cmp     R9
+        bcc     @Divide
+        nop
+        iwt     R0, #12288
+        bra     @Sign
+        nop
+@Divide:
+        move    R8, R0
+        move    R7, R11
+        jal     T4TextureProjectionDivideInputsReady
+        nop
+        move    R11, R7
+        move    R0, R3
+        add     R0
+        add     R3
+@Sign:
+        moves   R2, R2
+        bpl     @Done
+        nop
+        not
+        inc     R0
+@Done:
+        ret
+        nop
+        ; Keep the copied overlay size and its exact divider addresses pinned.
+        .res $51-(*-T4ConvexProjectComponentCached), $01
+.else
+        move    R4, #0
+        move    R0, #0
+        sm      (CONVEX_CUR_INSIDE), R0
+        moves   R1, R1
+        bpl     T4ProjectionMagnitudeReady
+        nop
+        move    R0, #0
+        sub     R1
+        move    R1, R0
+        move    R0, #1
+        sm      (CONVEX_CUR_INSIDE), R0
+T4ProjectionMagnitudeReady:
+        moves   R4, R4
+        bne     T4ProjectionDivide
+        nop
+        move    R0, R1
+        cmp     R2
+        bcc     T4ProjectionDivide
+        nop
+.if BSP_RENDER_SCALE = 2
+        iwt     R3, #4096
+.else
+        iwt     R3, #2048
+.endif
+        bra     T4ProjectionSignedQuotient
+        nop
+T4ProjectionDivide:
+        move    R0, R1
+        move    R7, R11
+        move    R5, R10
+        jal     T4TextureProjectionDividePrepared
+        nop
+        move    R10, R5
+        move    R11, R7
+.if BSP_RENDER_SCALE <> 2
+        with    R3
+        lsr
+.endif
+T4ProjectionSignedQuotient:
+.if BSP_RENDER_SCALE = 2
+        move    R0, R3
+        add     R0
+        add     R3
+        with    R3
+        lsr
+.endif
+        lm      R1, (CONVEX_CUR_INSIDE)
+        moves   R1, R1
+        beq     T4ProjectionScale
+        nop
+        move    R1, #0
+        with    R1
+        sub     R3
+        move    R3, R1
+.if BSP_RENDER_SCALE = 2
+        not
+        inc     R0
+.endif
+T4ProjectionScale:
+.if BSP_RENDER_SCALE = 2
+        ret
+        nop
+.else
+        GSU_ABSOLUTE_GOTO ConvexProjectScale
+.endif
+.endif
+
+; Exact copy of the prepared reciprocal multiply and its cold correction
+; continuation. Neither the cold correction nor the public scale uses CACHE.
+T4TextureProjectionDividePrepared:
+        move    R8, R0
+        move    R9, R2
+T4TextureProjectionDivideInputsReady:
+        lm      R12, (TEXTURE_RECIPROCAL_HIGH)
+        lm      R13, (TEXTURE_RECIPROCAL_LOW)
+T4TextureProjectionDivideLoaded:
+        move    R6, R12
+        from    R8
+        lmult
+        move    R3, R4
+        move    R6, R13
+        from    R8
+        lmult
+        with    R4
+        add     R4
+        adc     R0
+        with    R3
+        add     R0
+        with    R4
+        lsr
+        with    R4
+        cmp     R8
+        bcs     T4TextureProjectionDivideReady
+        nop
+        GSU_ABSOLUTE_GOTO TextureDivideQ12CorrectionCold
+T4TextureProjectionDivideReady:
+        ret
+        nop
+T4ProjectionCachedEnd:
+.assert T4ConvexProjectComponentCached = TextureRasterPolygon, lderror, "T4 projector moved away from the retired T2 raster"
+.assert .loword(T4ConvexProjectComponentCached) = GSU_T4_PROJECTION_CODE_OFFSET, lderror, "T4 projector cache prefix moved"
+.assert T4ProjectionCachedEnd - T4ConvexProjectComponentCached <= GSU_T4_PROJECTION_CODE_CAPACITY, error, "T4 projector exceeds its cache suffix"
+.assert .loword(T4ProjectionCachedEnd) <= (.loword(TextureProjectPolygonShaded) & $FFF0) + GSU_CACHE_BYTES, lderror, "T4 projector leaves the shaded projection cache window"

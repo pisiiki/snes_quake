@@ -10,7 +10,7 @@ The runtime contract has four independently staged little-endian streams:
 
 Candidate faces are enumerated in ascending world-face order, rejected with the
 same Q2-coordinate/Q6-view/Q12-projection model as the renderer, and admitted
-with shared global vertex IDs under the 405-face/768-vertex/2,048-index limits.  Vertex and
+with shared global vertex IDs under the 409-face/880-vertex/2,048-index limits.  Vertex and
 index spans retain that admission order.  Only face and plane records are then
 emitted in packed-BSP far/node/near order for the painter.  ``source_face_ids``
 is a host-only sidecar used to prove ordering and live packet identity.
@@ -36,6 +36,9 @@ from pathlib import Path
 from typing import Iterable
 
 import snes_tooling.quake.analyze_quake_bsp_packets as admission
+from snes_tooling.quake.quake_packet_capacity_retry import (
+    CAPACITY_INPUTS, CapacityMaterials, X2_VIEWPORT, load_capacity_materials, prune_x2_candidates,
+)
 
 
 DEFAULT_DATA_DIR = Workspace.discover().root / "src/snes_quake/Data"
@@ -159,6 +162,7 @@ class World:
     root: int
     source_files: tuple[str, ...]
     source_sha256: str
+    capacity_materials: CapacityMaterials | None = None
 
 
 @dataclass(frozen=True)
@@ -314,12 +318,15 @@ def _unpack_q2_vertices(payload: bytes) -> tuple[tuple[int, int, int], ...]:
     )
 
 
-def _front_side(plane: tuple[int, int, int, int], camera: tuple[int, int, int]) -> bool:
+def _front_side(
+    plane: tuple[int, int, int, int], camera: tuple[int, int, int], *, strict: bool = False
+) -> bool:
     nx, ny, nz, distance = plane
     dot = _signed16(_signed8(nx) * _signed8(camera[0]))
     dot = _signed16(dot + _signed8(ny) * _signed8(camera[1]))
     dot = _signed16(dot + _signed8(nz) * _signed8(camera[2]))
-    return _signed16(dot - distance) >= 0
+    signed_distance = _signed16(dot - distance)
+    return signed_distance > 0 if strict else signed_distance >= 0
 
 
 def _validate_camera(camera: CameraState) -> None:
@@ -343,7 +350,8 @@ def load_world(data_dir: Path = DEFAULT_DATA_DIR) -> World:
     source_files: list[str] = []
 
     try:
-        metadata = json.loads((data_dir / METADATA_PATH).read_text(encoding="utf-8"))
+        metadata_bytes = (data_dir / METADATA_PATH).read_bytes()
+        metadata = json.loads(metadata_bytes)
         world_metadata = metadata["world"]
         packing = world_metadata["packing"]
         vertex_count = int(packing["vertex_count"])
@@ -558,6 +566,13 @@ def load_world(data_dir: Path = DEFAULT_DATA_DIR) -> World:
     if len(pvs_rows) != pvs_row_count:
         raise ValueError(f"world face-PVS directory must contain {pvs_row_count} rows")
 
+    capacity_materials = load_capacity_materials(
+        data_dir, metadata, len(faces), metadata_bytes=metadata_bytes,
+    )
+    if capacity_materials is not None:
+        source_files.extend(CAPACITY_INPUTS)
+        digest.update(b"packet-capacity-materials\0")
+        digest.update(bytes.fromhex(capacity_materials.source_sha256))
     assets = admission.Assets(
         vertices=vertices,
         vertex_fraction_bits=2,
@@ -582,6 +597,7 @@ def load_world(data_dir: Path = DEFAULT_DATA_DIR) -> World:
         root=root_node,
         source_files=tuple(source_files),
         source_sha256=digest.hexdigest(),
+        capacity_materials=capacity_materials,
     )
 
 
@@ -597,7 +613,9 @@ def locate_leaf(world: World, camera: tuple[int, int, int]) -> tuple[int, int]:
         node = world.nodes[node_index]
         child = (
             node.front_child
-            if _front_side(world.bsp_planes[node.plane], camera)
+            # Quake Mod_PointInLeaf sends exact plane ties to the back.
+            # Painter ordering retains its existing coplanar-front convention.
+            if _front_side(world.bsp_planes[node.plane], camera, strict=True)
             else node.back_child
         )
         node_index = child
@@ -827,6 +845,16 @@ def build_render_packet(
         viewport=viewport,
     )
     admitted = admit_shared_faces(world.assets, screen)
+    retry_removed = None
+    rejects = admitted.rejections
+    if (viewport == X2_VIEWPORT and world.capacity_materials is not None
+            and (rejects.face_capacity or rejects.vertex_capacity or rejects.index_capacity)):
+        retry_screen = prune_x2_candidates(
+            world.assets, screen, camera, view_transform or admission.transform_vertex,
+            world.capacity_materials,
+        )
+        retry_removed = len(screen) - len(retry_screen)
+        admitted = admit_shared_faces(world.assets, retry_screen)
     stage_counts = {
         "pvsFaces": len(visible),
         "drawableFaces": len(drawable),
@@ -835,6 +863,8 @@ def build_render_packet(
         "screenCandidateFaces": len(screen),
         "selectedFaces": len(admitted.face_ids),
     }
+    if retry_removed is not None:
+        stage_counts["capacityRetryRemovedFaces"] = retry_removed
     return serialize_admission(world, camera, leaf, visits, stage_counts, admitted)
 
 

@@ -29,8 +29,10 @@ FLY_VIS_RESULT            = CLIP_RATIO
 ; Preserve every register retained by that loop, restore the sprite ROM bank,
 ; and return nonzero only when the current pixel has no opaque occluder.
 FlyAliasTestVisibility:
+.if !FLY_MASK_BATCH_WORLD_CLAIMS
         sm      (FLY_VIS_SAVED_R2), R2
         sm      (FLY_VIS_SAVED_R3), R3
+.endif
         lm      R0, (BRUSH_CURRENT_TOKEN)
         lm      R1, (FLY_MASK_TOKEN)
         with    R0
@@ -39,6 +41,38 @@ FlyAliasTestVisibility:
         nop
         ; Later texels of this alias only read its immutable mask. Keep this
         ; path in RAM without a ROM-bank switch or saving untouched registers.
+.if FLY_MASK_BATCH_WORLD_CLAIMS
+        .assert GSU_PACKET_BIT_MASK_BYTES = 8, error, "Alias lookup requires the packet bit table"
+        lm      R8, (ALIAS_DEST_Y)
+        from    R12
+        and     #7
+        iwt     R10, #GSU_PACKET_BIT_MASK_OFFSET
+        with    R10
+        add     R0
+        moveb   R1, (R10)
+        from    R12
+  .repeat 3
+        lsr
+  .endrepeat
+        move    R10, R0
+        from    R8
+        add     R8
+  .repeat 3
+        add     R0
+  .endrepeat
+        add     R10
+        iwt     R10, #FLY_MASK_BITS
+        with    R10
+        add     R0
+        moveb   R0, (R10)
+        and     R1
+        beq     FlyAliasMaskReturn
+        inc     R0
+        sub     R0
+FlyAliasMaskReturn:
+        ret
+        nop
+.else
         lm      R0, (ALIAS_DEST_Y)
         move    R2, R12
         FLY_MASK_BIT
@@ -58,7 +92,12 @@ FlyAliasMaskReturn:
         lm      R3, (FLY_VIS_SAVED_R3)
         ret
         nop
+.endif
 FlyAliasBuildVisibility:
+.if FLY_MASK_BATCH_WORLD_CLAIMS
+        sm      (FLY_VIS_SAVED_R2), R2
+        sm      (FLY_VIS_SAVED_R3), R3
+.endif
         sm      (FLY_VIS_VISIBILITY_RETURN), R11
         sm      (FLY_VIS_SAVED_R4), R4
         sm      (FLY_VIS_SAVED_R5), R5
@@ -68,7 +107,7 @@ FlyAliasBuildVisibility:
         sm      (FLY_VIS_SAVED_R12), R12
         sm      (FLY_VIS_SAVED_R13), R13
 
-        move    R9, #$02
+        move    R9, #BSP_GSU_ROM2_BANK
         iwt     R8, #.loword(FlyBrushTestMaskROM)
         from    R8
         ljmp    R9
@@ -76,8 +115,17 @@ FlyAliasBuildVisibility:
 FlyAliasBrushMaskDone:
         sm      (FLY_VIS_RESULT), R0
 
+.ifdef PLAYABLE_SPRITE_STREAM
+        lm      R0, (AliasSpriteStreamPixelRam)
+        moves   R0, R0
+        bne     FlyAliasPixelBankReady
+        nop
+.endif
         lm      R0, (ALIAS_PIXEL_BANK)
         romb
+.ifdef PLAYABLE_SPRITE_STREAM
+FlyAliasPixelBankReady:
+.endif
         lm      R2, (FLY_VIS_SAVED_R2)
         lm      R3, (FLY_VIS_SAVED_R3)
         lm      R4, (FLY_VIS_SAVED_R4)
@@ -129,7 +177,6 @@ FlyWorldBuildDepthView:
         sm      (TEXTURE_CUR_T), R0
         move    R0, #15
         sm      (TEXTURE_CLIP_AND_OUTCODE), R0
-        iwt     R7, #32767
 FlyWorldDepthVertex:
         lm      R10, (CONVEX_INDEX_PTR)
         movew   R0, (R10)
@@ -139,15 +186,6 @@ FlyWorldDepthVertex:
         sm      (CLIP_VERTEX_INDEX), R0
         jal     LoadPacketViewVertex
         nop
-        with    R10
-        sub     #2
-        movew   R3, (R10)
-        with    R3
-        cmp     R7
-        FLY_SIGNED_BRANCH $06, FlyWorldDepthMinimumReady
-        nop
-        move    R7, R3
-FlyWorldDepthMinimumReady:
         lm      R0, (TEXTURE_CLIP_OUTCODE)
         with    R0
         or      R2
@@ -161,21 +199,6 @@ FlyWorldDepthMinimumReady:
         sm      (CONVEX_EDGE_COUNT), R0
         bne     FlyWorldDepthVertex
         nop
-        lm      R0, (FLY_MASK_LINK)
-        iwt     R1, #$7FFF
-        with    R0
-        and     R1
-        move    R1, R0
-        with    R0
-        add     R0
-        with    R0
-        add     R1
-        with    R0
-        add     R0
-        iwt     R10, #FLY_MASK_BOUNDS+4
-        with    R10
-        add     R0
-        movew   (R10), R7
         lm      R11, (BRUSH_VERTEX_RETURN)
         ret
         nop
@@ -189,8 +212,9 @@ FlyBrushMaskCallRAM:
         link    #2
         jmp     R8
         nop
+FlyBrushMaskCallROMReturn:
         lm      R8, (FLY_MASK_ROM_RETURN)
-        move    R9, #$02
+        move    R9, #BSP_GSU_ROM2_BANK
         from    R8
         ljmp    R9
         nop

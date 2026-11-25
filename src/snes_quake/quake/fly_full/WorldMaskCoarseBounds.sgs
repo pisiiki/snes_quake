@@ -171,7 +171,5 @@ FlyWorldCoarsePaddingReady:
         moveb   (R10), R5
         inc     R10
         moveb   (R10), R6
-        inc     R10
-        movew   (R10), R7
         lm      R11, (BRUSH_VERTEX_RETURN)
         GSU_ABSOLUTE_GOTO FlyWorldMaskCheckBounds

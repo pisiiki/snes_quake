@@ -1,0 +1,28 @@
+.if (.defined(QUAKE_MSU_WORLD_KEEP) || .defined(PLAYABLE_SHORT_LIGHTMAP_CARRY)) && (BSP_RENDER_SCALE = 2)
+.include "quake/MsuShortCarry.sgs"
+.ifdef QUAKE_MSU_WORLD_KEEP
+.pushseg
+.segment "ROM2"
+TextureDivideUnsignedColdROM:
+.assert .bankbyte(TextureDivideUnsignedColdROM) = ($80+BSP_GSU_ROM2_BANK), lderror, "Cold divider left GSU bank 2"
+        move    R2, #0
+        move    R3, #0
+  .repeat 16
+        TEXTURE_DIVIDE_UNSIGNED_STEP
+  .endrepeat
+        move    R13, #$70
+        from    R11
+        ljmp    R13
+        nop
+.assert .loword(*) <= $D000, lderror, "Cold divider overlaps composed directory"
+.popseg
+.endif
+.else
+        move    R2, #0
+        move    R3, #0
+  .repeat 16
+        TEXTURE_DIVIDE_UNSIGNED_STEP
+  .endrepeat
+        ret
+        nop
+.endif

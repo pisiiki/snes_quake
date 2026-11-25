@@ -67,6 +67,7 @@ def _visual_states(
     model_face_textures: dict[int, tuple[int, ...]],
     source_to_packed: dict[int, int],
     external_first_slot: int,
+    independently_positioned: dict[int, int] | None = None,
 ) -> tuple[dict[str, bytes], dict[str, Any]]:
     from snes_tooling.quake.quake_bsp_brush_assets import (
         _animation_groups,
@@ -120,6 +121,11 @@ def _visual_states(
                     inline_textures.append(record)
                 else:
                     external_textures.append(record)
+        if independently_positioned:
+            # The live command always supplies these independent platform variants.
+            # Keep their low-stop base once in the otherwise immutable scene directory.
+            transforms = tuple((slot, independently_positioned.get(slot, variant))
+                               for slot, variant in transforms)
         key = (transforms, tuple(inline_textures), tuple(external_textures))
         state_id = keys.get(key)
         if state_id is None:
@@ -238,6 +244,15 @@ def _visual_states(
         "VTRANS": bytes(transform_entries),
         "VTEX": bytes(texture_entries),
     }
+    if independently_positioned:
+        slots = sorted(independently_positioned)
+        if len(slots) != 2:
+            raise ValueError("platform pose directory requires both E1M1 platform slots")
+        poses = bytearray(slots)
+        for transforms in compact.row_transforms:
+            local = dict(transforms)
+            poses.extend(local[slot] for slot in slots)
+        sections["PLATPOSE"] = bytes(poses)
     metadata = {
         "disabledStateId": 0,
         "firstEnabledStateId": 1,

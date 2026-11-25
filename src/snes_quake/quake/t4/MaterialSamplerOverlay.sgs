@@ -1,0 +1,300 @@
+; Material-owned T4 sampler overlay. Only positively installed T4 code
+; can use the retired bilinear/P2 slot for a mixed-axis material. The source
+; sampler and its interior continuation own exactly76 bytes before the DDA prefix.
+; R0/R1/R8/R9/R14 and ROMB are scratch; R11 remains the selector's return.
+.segment "GSU_MATERIAL_SAMPLER_ROM_CODE"
+
+T4InstallMixedSamplerROM:
+        move    R0, #0
+        ramb
+        ; The stable selector patch lies outside the changing sampler slot.
+        iwt     R8, #TextureSelectPowerOfTwoStateReady
+        movew   R0, (R8)
+        iwt     R1, #($FF | (.lobyte(T4TextureSelectPowerOfTwoStateReady) << 8))
+        cmp     R1
+.if BSP_QUAKEC_GAMEPLAY
+        bne     T4MixedSamplerUnavailable
+        nop
+.else
+        bne     T4MixedSamplerUnchanged
+        nop
+.endif
+        iwt     R8, #T4TextureSampleMixedResident
+        moveb   R0, (R8)
+        move    R1, #$3D
+        cmp     R1
+        beq     T4MixedSamplerResident
+        nop
+        move    R1, #$25
+        cmp     R1
+        bne     T4MixedSamplerUnchanged
+        nop
+; A different ROM cache owns execution before any program RAM is written.
+; Byte copies preserve both neighbors of the odd-addressed76-byte slot.
+        ; CACHE aligns with noninstruction fill; skip every alignment byte.
+        bra     T4CopyMixedSamplerROM
+        nop
+GSU_CACHE_KERNEL_BEGIN T4CopyMixedSamplerROM
+        iwt     R0, #(.bankbyte(T4MixedSamplerTemplate) & $7F)
+        romb
+        iwt     R8, #.loword(T4MixedSamplerTemplate)
+        GSU_SET_ROM_BUFFER_ADDRESS R8
+        iwt     R9, #T4TextureSampleMixedResident
+        move    R1, #76
+T4CopyMixedSamplerLoop:
+        getb
+        moveb   (R9), R0
+        inc     R9
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        dec     R1
+        bne     T4CopyMixedSamplerLoop
+        nop
+T4MixedSamplerResident:
+        move    R0, #1
+        ramb
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        iwt     R1, #T4TextureSampleMixedResident
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        iwt     R1, #T4MixedResidentInteriorSpanLoop
+        sm      (TEXTURE_ERR_T), R1
+        GSU_ABSOLUTE_GOTO T4SelectSampleRoutineDoneROM
+T4MixedSamplerUnchanged:
+        move    R0, #1
+        ramb
+        iwt     R1, #T4MixedInteriorSpanLoop
+        sm      (TEXTURE_ERR_T), R1
+        GSU_ABSOLUTE_GOTO T4SelectSampleRoutineDoneROM
+GSU_CACHE_KERNEL_END T4CopyMixedSamplerROM
+
+.if BSP_QUAKEC_GAMEPLAY
+T4MixedSamplerUnavailable:
+        ; The general playable T4 renderer retains the T2 albedo body in the
+        ; T4 AUX window. The caller tentatively published that window's mixed
+        ; sampler, but the existing ownership test proved it is not installed.
+        ; Restore the ordinary sampler and retain its generic lightmap routes.
+        ; Demo builds emit their original branch and no additional code.
+        move    R0, #1
+        ramb
+        iwt     R1, #TextureSampleAbsoluteRegisters
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        GSU_ABSOLUTE_GOTO T4SelectSampleRoutineDoneROM
+.endif
+
+; The square-P2 selector bypasses SkySelectSampleRoutineROM, so its T4-only
+; entry explicitly restores this slot before publishing any P2 block routes.
+T4RestorePower2SamplerROM:
+        move    R0, #0
+        ramb
+        iwt     R8, #T4TextureSampleMixedResident
+        moveb   R0, (R8)
+        move    R1, #$25
+        cmp     R1
+        beq     T4PublishPower2SamplerROM
+        nop
+        ; CACHE aligns with noninstruction fill; skip every alignment byte.
+        bra     T4CopyPower2SamplerROM
+        nop
+GSU_CACHE_KERNEL_BEGIN T4CopyPower2SamplerROM
+        iwt     R0, #(.bankbyte(T4Power2SamplerRestoreTemplate) & $7F)
+        romb
+        iwt     R8, #.loword(T4Power2SamplerRestoreTemplate)
+        GSU_SET_ROM_BUFFER_ADDRESS R8
+        iwt     R9, #T4TextureSampleMixedResident
+        move    R1, #76
+T4CopyPower2SamplerLoop:
+        getb
+        moveb   (R9), R0
+        inc     R9
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        dec     R1
+        bne     T4CopyPower2SamplerLoop
+        nop
+T4PublishPower2SamplerROM:
+        move    R0, #1
+        ramb
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        iwt     R1, #T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        T4_PUBLISH_LIGHTMAP_ROUTES
+        GSU_ABSOLUTE_GOTO T4SelectSampleRoutineDoneROM
+GSU_CACHE_KERNEL_END T4CopyPower2SamplerROM
+.assert ^(*-1) = ($80+BSP_GSU_ROM2_BANK), lderror, "Material sampler overlay helpers left executable ROM bank2"
+
+; A source-derived code template is readable by GSU ROMB in bank2.
+; The CPU-only ROM111/115 load images cannot be addressed through ROMB.
+
+
+; The textured mode does not enter the retired state-loading T2 sampler or
+; the T7 interior continuation. Keep its unchanged bilinear pixel loop here
+; in the already resident lightmap window. Restoring the full overlay returns
+; both legacy entries before either other mode can run.
+T4Power2SamplerRestoreTemplate:
+        move    R8, R5
+        move    R9, R6
+        jal     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        move    R12, R0
+        move    R3, R8
+        iwt     R1, #$00F0
+        GSU_ABSOLUTE_GOTO LightmapSampleBlockBilinearCached
+.assert * - T4Power2SamplerRestoreTemplate <= $15, error, "Cached T4 bilinear loop exceeds retired sampler entries"
+        .res $15 - (* - T4Power2SamplerRestoreTemplate), $01
+
+T4RestoreTemplateSampleAbsolutePowerOfTwoSingleBankRegisters:
+        ; Keep the established general row router byte-for-byte: moving the
+        ; uncommon-width continuation out of this cache window costs more on
+        ; those faces than fixing the dominant width saves.
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+.else
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+.endif
+        from    R5
+        and     R1
+        ; Match the ordinary sampler's implicit scratch shifts and anchors.
+  .repeat 3
+        lsr
+  .endrepeat
+        to      R5
+        lsr
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+.endif
+        with    R6
+        and     R1
+        lm      R12, (TEXTURE_STEP_SHADE_Q8)
+        jmp     R12
+        with    R6
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        ; The second mask load occupies the old three-byte padding.
+.else
+  .repeat 3
+        nop
+  .endrepeat
+.endif
+T4RestoreTemplateSamplePowerOfTwoRowShift3:
+        add     R6
+        with    R6
+T4RestoreTemplateSamplePowerOfTwoRowShift2:
+        add     R6
+        with    R6
+T4RestoreTemplateSamplePowerOfTwoRowShift1:
+        add     R6
+        with    R6
+T4RestoreTemplateSamplePowerOfTwoRowReady:
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R6
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        jmp     R11
+        getb
+        .res 3, $01
+        nop
+
+T4RestoreTemplateInterior:
+        move    R8, R5
+        move    R9, R6
+        jal     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        move    R12, R0
+        GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect, shared_delay
+        with    R8
+T4Power2SamplerRestoreTemplateEnd:
+.assert * - T4Power2SamplerRestoreTemplate = 76, error, "Power2 restore template changed"
+.assert ^(*-1) = ($80+BSP_GSU_ROM2_BANK), lderror, "Power2 restore template left GSU-readable ROM2"
+
+T4MixedSamplerTemplate:
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+        with    R5
+        and     R1
+        ; T correction never changes R1. One height load covers both loops,
+        ; including signed coordinates that require repeated wrapping.
+        lm      R1, (TEXTURE_HEIGHT_Q4)
+T4MixedTemplateTNegative:
+        moves   R6, R6
+        bpl     T4MixedTemplateTHigh
+        nop
+T4MixedTemplateTAdd:
+        with    R6
+        add     R1
+        bmi     T4MixedTemplateTAdd
+        nop
+T4MixedTemplateTHigh:
+        move    R0, R6
+T4MixedTemplateTSubtract:
+        with    R0
+        sub     R1
+        bmi     T4MixedTemplateTDone
+        nop
+        move    R6, R0
+        bra     T4MixedTemplateTSubtract
+        nop
+T4MixedTemplateTDone:
+        ; Only the final shift writes the caller's coordinate register.
+        ; Each ordinary LSR resets its prefixes and continues through R0.
+        from    R5
+        lsr
+        lsr
+        lsr
+        to      R5
+        lsr
+        from    R6
+        lsr
+        lsr
+        lsr
+        to      R6
+        lsr
+        lm      R1, (TEXTURE_WIDTH)
+        from    R6
+        umult   R1
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        add     R4
+        GSU_SET_ROM_BUFFER_ADDRESS R0
+        jmp     R11
+        getb
+        .res 4, $01
+T4MixedTemplateInterior:
+        move    R8, R5
+        move    R9, R6
+        jal     T4TextureSampleMixedResident
+        move    R12, R0
+        GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect, shared_delay
+        with    R8
+T4MixedSamplerTemplateEnd:
+.assert T4MixedTemplateInterior - T4MixedSamplerTemplate = 61, error, "Mixed sampler prefix changed"
+.assert * - T4MixedSamplerTemplate = 76, error, "Mixed material payload changed"
+.assert ^(*-1) = ($80+BSP_GSU_ROM2_BANK), lderror, "Mixed material template left GSU-readable ROM2"
+
+; Only the bank-switch thunk needs new main RAM code; the interior loop is resident.
+.pushseg
+.segment "GSUCODE"
+T4RestorePower2SamplerThunk:
+        ; This entry is reached only through the installed T4 selector patch.
+        ; Inspect the actual code, including when the CPU variant word is zero.
+        move    R0, #0
+        ramb
+        iwt     R8, #T4TextureSampleMixedResident
+        moveb   R1, (R8)
+        move    R0, #1
+        ramb
+        move    R0, #$25
+        with    R1
+        cmp     R0
+        bne     T4RestorePower2SamplerSlow
+        nop
+        ; Default bytes are already resident. No copy, bank crossing or CACHE.
+        iwt     R1, #T4TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        sm      (TEXTURE_SAMPLE_ROUTINE), R1
+        GSU_ABSOLUTE_GOTO T4PublishPowerOfTwoStateReady
+T4RestorePower2SamplerSlow:
+        move    R9, #BSP_GSU_ROM2_BANK
+        iwt     R8, #.loword(T4RestorePower2SamplerROM)
+        from    R8
+        ljmp    R9
+        nop
+T4MaterialSamplerHelpersEnd:
+.assert * - T4RestorePower2SamplerThunk = 41, error, "Material sampler cold route changed"
+.assert * - GSU_SelectVisibility <= GSU_CODE_CAPACITY, lderror, "Material sampler route exceeds GSUCODE"
+.popseg

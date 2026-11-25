@@ -4,7 +4,14 @@
 .include "GSU_Cache.i"
 .include "GSU_Primitives.i"
 .include "MemoryMap.i"
+.ifdef E1M1_FLY_LARGE_PACKET
+PLAYABLE_RECTANGULAR_POT_SAMPLER = 1
+PLAYABLE_SIGNED_LIGHTMAP_INTERPOLATION = 1
+PLAYABLE_LIGHTMAP_ZERO_T = 1
+.endif
 .include "quake/Viewport.i"
+.include "Data/Fly3x/WorldLightmapProof.i"
+.include "Data/QuakeBSPWeaponSpritesMask.i"
 
 ; Prefer the GSU's shorter equivalent encoding whenever a direct word access
 ; resolves to an even low-RAM address. Forward or high addresses retain LM/SM.
@@ -33,6 +40,94 @@
 .define lm QuakeLoadWord
 .define sm QuakeStoreWord
 
+.macro TEXTURE_DIVIDE_UNSIGNED_STEP
+        .local Next
+        with    R0
+        add     R0
+        from    R3
+        to      R3
+        rol
+        with    R2
+        add     R2
+        to      R4
+        from    R3
+        sub     R1
+        bcc     Next
+        nop
+        move    R3, R4
+        inc     R2
+Next:
+.endmacro
+
+.macro QuakeNextQ12Bank select_bank, packed_tail
+        with    R1
+        sub     R4
+  .ifdef PLAYABLE_COMPACT_Q12_RECIPROCALS
+        GSU_ABSOLUTE_GOTO packed_tail
+  .else
+        inc     R0
+        bra     select_bank
+        nop
+  .endif
+.endmacro
+
+.macro QuakeDecodeWorldLightmap unpack
+        lm      R4, (LIGHTMAP_ROM_ADDRESS)
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        lm      R0, (LIGHTMAP_WIDTH)
+        lm      R6, (LIGHTMAP_HEIGHT)
+        with    R0
+        umult   R6
+        move    R12, R0
+        iwt     R10, #GSU_LIGHTMAP_CACHE_OFFSET
+        sm      (LIGHTMAP_ROM_ADDRESS), R10
+        jal     unpack
+        nop
+.endmacro
+
+.macro QuakeRouteWorldLightmap missing, resident
+  .ifdef PLAYABLE_RESIDENT_WORLD_LIGHTMAPS
+        ; A negative bank is resident. $FF is still the missing sentinel.
+        inc     R7
+        beq     missing
+        dec     R7
+        bpl     :+
+        nop
+        GSU_ABSOLUTE_GOTO resident
+:
+  .else
+        move    R0, R7
+        inc     R0
+        bne     :+
+        nop
+        GSU_ABSOLUTE_GOTO missing
+:
+  .endif
+.endmacro
+
+.if .defined(QUAKE_MSU_WORLD_KEEP) || .defined(PLAYABLE_LAZY_WORLD_LIGHTMAP)
+QUAKE_CACHED_LIGHTMAP_BLOCK8 = 1
+.endif
+
+.ifdef PLAYABLE_LAZY_WORLD_LIGHTMAP
+  .if BSP_RENDER_SCALE = 2
+    .assert .defined(PLAYABLE_EMPTY_COMPOSED), error, "Deferred world lightmaps require an empty composed cache"
+    .assert !.defined(QUAKE_MSU_CACHE), error, "Deferred world lightmap code must run from GSU AUX RAM"
+  .endif
+.endif
+
+.macro TexturePrepareWorldLightmap
+  .if (!.defined(PLAYABLE_LAZY_WORLD_LIGHTMAP)) || (BSP_RENDER_SCALE <> 2)
+        jal     TextureLoadFaceLightmap
+  .endif
+.endmacro
+
+.macro TextureWorldLightmapDispatchPadding
+  .if .defined(PLAYABLE_LAZY_WORLD_LIGHTMAP) && (BSP_RENDER_SCALE = 2)
+        ; Keep the pinned T4 patch boundaries without executing the filler.
+        .res 5, $01
+  .endif
+.endmacro
 
 .include "quake/PacketSelection.sgs"
 .include "quake/PacketEmissionAndTextureSetup.sgs"
@@ -44,11 +139,19 @@
 .include "quake/ProjectiveAlbedoSpan.sgs"
 ClassifyClipOutcode:
         BSP_CLASSIFY_CLIP_OUTCODE SharedClipRightScale, SharedClipUpScale
+ClassifyClipOutcodeReturn:
         ret
         nop
 .include "quake/DynamicBrushRenderer.sgs"
+.ifdef PLAYABLE_MAP_ID
+.include "quake/FaceBakedColor.sgs"
+.endif
+.if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2)
+.include "quake/FlatMonotoneRaster.sgs"
+.endif
 .include "quake/TextureEndpointBatch.sgs"
 .include "quake/DynamicBrushRowStage.sgs"
+.include "quake/BrushRowFilter.sgs"
 .include "quake/DynamicBrushSpanLightmapProof.sgs"
 .include "quake/ComposedSurfaceCache.sgs"
 .include "quake/AliasBillboardRenderer.sgs"
@@ -62,16 +165,55 @@ ClassifyClipOutcode:
 .include "quake/fly_full/BrushDepthView.sgs"
 .include "quake/t4/Faces.sgs"
 .include "quake/t4/Raster.sgs"
+.include "quake/t4/Projection.sgs"
+.include "quake/t4/ReplayBounds.sgs"
 .include "quake/t4/Sampling.sgs"
 .include "quake/t4/DynamicBrush.sgs"
 .include "quake/fly_full/BrushPVS.sgs"
 .include "quake/DynamicBrushCachedSpan.sgs"
+.include "quake/UntexturedLightmap.sgs"
+; Append the marker-only replay after established RAM code and cache windows.
+.include "quake/SkyMarkerSpan.sgs"
 
 ; Both copies assemble at the established RAM overlay addresses. Only their
 ; ROM load images and private symbols differ; the selected image is installed
 ; at a fly-resolution transition while the GSU is stopped.
+.include "quake/fly_full/MaskLightmapCold.sgs"
+
 .include "Data/Fly3x/quake.sgs.inc"
+.if .defined(PLAYABLE_PAIRED_WORLD_CODE) && (BSP_RENDER_SCALE = 2)
+.include "quake/PairedWorldLightmap.sgs"
+.endif
 .if BSP_RENDER_SCALE = 2
-.include "quake/Mode7Pack.sgs"
-.include "quake/WarpFocalPatch.sgs"
+.endif
+
+; Material code follows both existing ROM images without moving Sky helpers.
+.include "quake/t4/MaterialSamplerOverlay.sgs"
+.include "quake/UniformBrushSpan.sgs"
+
+; Cold X2 world-only raster owns the remaining ROM3 tail.
+.include "quake/TextureGeneralRaster.sgs"
+
+.include "quake/PacketCapacityRetry.sgs"
+
+.include "quake/TextureWorldFrustum.sgs"
+.include "quake/TextureShadedContourROM.sgs"
+.include "quake/BrushProjectedReuseROM.sgs"
+
+.if BSP_RENDER_SCALE = 2
+.include "quake/WeaponBlitX2.sgs"
+.ifdef PLAYABLE_FX3_PLANE_DISTANCE
+.include "quake/CollisionFx3.sgs"
+.endif
+.endif
+
+
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+.include "quake/MsuWorldKeep.sgs"
+.endif
+
+.include "quake/PacketScreenCache.sgs"
+
+.if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2) && !BSP_ALIAS_LIVE_POSES
+.include "quake/BrushResidentWorld.sgs"
 .endif

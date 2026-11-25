@@ -38,13 +38,16 @@ int ratio_q12(int numerator, int denominator)
 namespace {
 int perspective_factor_q12(int first_depth, int second_depth, int screen_factor_q12)
 {
-    if (first_depth <= 0 || second_depth <= 0 || screen_factor_q12 < 0 || screen_factor_q12 > 4096)
+    if (first_depth < 0 || second_depth < 0 || screen_factor_q12 < 0 || screen_factor_q12 > 4096)
     {
         fail("perspective factor received an invalid segment");
     }
     const int numerator = signed_multiply_shift_trunc(first_depth, screen_factor_q12, 12);
     const int depth_delta = second_depth - first_depth;
     const int denominator = second_depth - signed_multiply_shift_trunc(depth_delta, screen_factor_q12, 12);
+    // FX3 returns unity when both rounded endpoint products are zero.
+    if (numerator == denominator)
+        return 4096;
     if (denominator <= 0 || numerator < 0 || numerator > denominator)
     {
         fail("perspective factor escaped its positive depth segment");
@@ -103,10 +106,16 @@ interpolate_textured_frustum_edge(const TexturedViewVertex& inside, const Textur
         const int delta = wrap_i16(other - base);
         return wrap_i16(base + signed_multiply_shift_trunc(delta, factor, 12));
     };
+    const auto interpolate_geometry = [&](int inside_value, int outside_value) {
+        if (active_render_scale != RenderScale::X2)
+            return interpolate(inside_value, outside_value);
+        return interpolate_view_nearest_q12(inside_base ? inside_value : outside_value,
+            inside_base ? outside_value : inside_value, factor);
+    };
     return {
-        {interpolate(inside.view.right_q6, outside.view.right_q6),
-         interpolate(inside.view.up_q6, outside.view.up_q6),
-         interpolate(inside.view.depth_q6, outside.view.depth_q6)},
+        {interpolate_geometry(inside.view.right_q6, outside.view.right_q6),
+         interpolate_geometry(inside.view.up_q6, outside.view.up_q6),
+         interpolate_geometry(inside.view.depth_q6, outside.view.depth_q6)},
         interpolate(inside.s_q4, outside.s_q4),
         interpolate(inside.t_q4, outside.t_q4),
     };
@@ -122,6 +131,14 @@ std::vector<TexturedViewVertex> clip_textured_frustum(std::span<const TexturedVi
         if (input.empty())
         {
             break;
+        }
+        // A rounded intersection cannot schedule a plane absent from the
+        // original FX3 outcode union.
+        if (std::ranges::none_of(polygon, [plane](const auto& point) {
+                return frustum_distance(point.view, plane) < 0;
+            }))
+        {
+            continue;
         }
         std::vector<TexturedViewVertex> output;
         output.reserve(input.size() + 1);
@@ -184,7 +201,60 @@ std::uint8_t sample_packed_texture(const MipTexture& texture, int s_q4, int t_q4
 }
 } // namespace
 
+bool hidden_packed_opaque_contact(const SourceWorld& world, const Camera& camera, std::uint16_t face,
+    std::span<const std::uint8_t> authored_visibility)
+{
+    if (face >= authored_visibility.size() || authored_visibility[face])
+        return false;
+    const auto& texture = world.packed_textures.at(world.face_texture_ids.at(face));
+    if (texture.turbulent || (face < world.face_sky_mask.size() && world.face_sky_mask[face]))
+        return false;
+    const auto camera_q2 = camera.position_q2();
+    const Vec3 source_eye = world.origin + Vec3{camera_q2[0] * (kWorldScale / 4),
+        camera_q2[1] * (kWorldScale / 4), camera_q2[2] * (kWorldScale / 4)};
+    const auto& source_plane = world.visibility_planes.at(face);
+    // A packed plane can round onto the eye even when the authored polygon
+    // has real coverage. Reject only a contact in both representations.
+    if (dot(source_eye, source_plane.normal) != source_plane.distance)
+        return false;
+    const auto& ids = world.face_vertex_ids.at(face);
+    const auto& origin = world.packed_vertices.at(ids.front());
+    const auto delta = [&](std::uint16_t id) {
+        const auto& point = world.packed_vertices.at(id);
+        return Vec3{double(point.x - origin.x), double(point.y - origin.y), double(point.z - origin.z)};
+    };
+    const auto axis = delta(ids[1]);
+    Vec3 normal{};
+    for (const auto id : std::span(ids).subspan(2))
+    {
+        normal = cross(axis, delta(id));
+        if (dot(normal, normal) != 0)
+            break;
+    }
+    if (dot(normal, normal) == 0)
+        return false;
+    const int scale = 1 << world.packed_vertex_fraction_bits;
+    const auto position = scale == 4 ? camera_q2 :
+        std::array{camera.x * scale, camera.y * scale, camera.z * scale};
+    const Vec3 eye{double(position[0] - origin.x), double(position[1] - origin.y), double(position[2] - origin.z)};
+    return dot(normal, eye) == 0 && std::ranges::all_of(ids, [&](const auto id) {
+        return dot(normal, delta(id)) == 0;
+    });
+}
+
 namespace {
+bool farther_sky_sample(const PackedTextureRaster& result, const SourceWorld& world,
+    std::uint16_t face, std::size_t pixel, std::int16_t depth_q6)
+{
+    if (result.current_model != 0 || face >= result.authored_visibility.size() || result.authored_visibility[face]
+        || face >= world.face_sky_mask.size() || !world.face_sky_mask[face])
+        return false;
+    const auto owner = result.faces[pixel];
+    const bool opaque = owner != kMissFace && (result.models[pixel] != 0 ||
+        (owner < world.face_sky_mask.size() && !world.face_sky_mask[owner]));
+    return opaque && result.depth_q6[pixel] > 0 && result.depth_q6[pixel] < depth_q6;
+}
+
 bool packed_texture_candidate_wins(PackedTextureRaster& result, std::size_t pixel, std::int16_t depth_q6)
 {
     if (!result.current_depth_arbitration)
@@ -293,38 +363,42 @@ void draw_packed_texture_span_affine(
     for (int x = first_x; x <= last_x; ++x)
     {
         ++result.stats.candidate_writes;
-        ++result.stats.plot_writes;
         const auto pixel = logical_pixel_index(x, y);
-        result.faces[pixel] = result.current_source_face == kMissFace ? face : result.current_source_face;
-        result.entities[pixel] = result.current_entity;
-        result.models[pixel] = result.current_model;
-        result.s_q4[pixel] = static_cast<std::int16_t>(s);
-        result.t_q4[pixel] = static_cast<std::int16_t>(t);
-        result.absolute_s_q4[pixel] = static_cast<std::int16_t>(absolute_s);
-        result.absolute_t_q4[pixel] = static_cast<std::int16_t>(absolute_t);
-        result.depth_q6[pixel] = sample_depth(x);
-        const auto texel =
-            texture.turbulent
-                ? sample_quake_turbulent_texture(
-                      texture,
-                      absolute_s,
-                      absolute_t,
-                      result.turbulence_phase,
-                      world.turbulence_table
-                  )
-                : sample_packed_texture(texture, s, t);
-        result.indices[pixel] = texel;
-        const auto source_lightmap_level = sample_packed_bsp_lightmap_level(
-            world,
-            face,
-            static_cast<std::int16_t>(absolute_s),
-            static_cast<std::int16_t>(absolute_t)
-        );
-        const auto lightmap_level = exact_lightmap_colormap_level(source_lightmap_level);
-        result.lightmap_levels[pixel] = lightmap_level;
-        result.lightmapped_indices[pixel] = texture.turbulent ? texel : world.texture_colormap[lightmap_level][texel];
-        result.turbulent_pixels[pixel] = static_cast<std::uint8_t>(texture.turbulent);
-        result.untextured_lightmap_indices[pixel] = untextured_lightmap_index(source_lightmap_level);
+        const auto depth_sample = sample_depth(x);
+        if (!farther_sky_sample(result, world, face, pixel, depth_sample))
+        {
+            ++result.stats.plot_writes;
+            result.faces[pixel] = result.current_source_face == kMissFace ? face : result.current_source_face;
+            result.entities[pixel] = result.current_entity;
+            result.models[pixel] = result.current_model;
+            result.s_q4[pixel] = static_cast<std::int16_t>(s);
+            result.t_q4[pixel] = static_cast<std::int16_t>(t);
+            result.absolute_s_q4[pixel] = static_cast<std::int16_t>(absolute_s);
+            result.absolute_t_q4[pixel] = static_cast<std::int16_t>(absolute_t);
+            result.depth_q6[pixel] = depth_sample;
+            const auto texel =
+                texture.turbulent
+                    ? sample_quake_turbulent_texture(
+                          texture,
+                          absolute_s,
+                          absolute_t,
+                          result.turbulence_phase,
+                          world.turbulence_table
+                      )
+                    : sample_packed_texture(texture, s, t);
+            result.indices[pixel] = texel;
+            const auto source_lightmap_level = sample_packed_bsp_lightmap_level(
+                world,
+                face,
+                static_cast<std::int16_t>(absolute_s),
+                static_cast<std::int16_t>(absolute_t)
+            );
+            const auto lightmap_level = exact_lightmap_colormap_level(source_lightmap_level);
+            result.lightmap_levels[pixel] = lightmap_level;
+            result.lightmapped_indices[pixel] = texture.turbulent ? texel : world.texture_colormap[lightmap_level][texel];
+            result.turbulent_pixels[pixel] = static_cast<std::uint8_t>(texture.turbulent);
+            result.untextured_lightmap_indices[pixel] = untextured_lightmap_index(source_lightmap_level);
+        }
         if (x == last_x)
         {
             break;
@@ -438,7 +512,8 @@ void draw_packed_texture_span_projective(
         const auto pixel = logical_pixel_index(x, y);
         ++result.stats.candidate_writes;
         const auto depth_sample = sample_attribute(left_depth_q6, right_depth_q6, x);
-        if (!packed_texture_candidate_wins(result, pixel, depth_sample))
+        if ((result.face_colors.empty() && farther_sky_sample(result, world, face, pixel, depth_sample)) ||
+            !packed_texture_candidate_wins(result, pixel, depth_sample))
         {
             continue;
         }
@@ -451,6 +526,13 @@ void draw_packed_texture_span_projective(
         result.absolute_s_q4[pixel] = absolute_s_sample;
         result.absolute_t_q4[pixel] = absolute_t_sample;
         result.depth_q6[pixel] = depth_sample;
+        if (!result.face_colors.empty())
+        {
+            if (face >= result.face_colors.size())
+                fail("baked face table does not cover the packed face");
+            result.indices[pixel] = result.face_colors[face];
+            continue;
+        }
         const auto texel =
             texture.turbulent
                 ? sample_quake_turbulent_texture(
@@ -482,7 +564,8 @@ void raster_packed_texture_polygon(
     std::span<const TexturedViewVertex> view_polygon,
     const MipTexture& texture,
     std::uint16_t face,
-    TextureRasterMode mode
+    TextureRasterMode mode,
+    bool world_polygon
 )
 {
     const auto clipped = clip_textured_frustum(view_polygon);
@@ -494,11 +577,9 @@ void raster_packed_texture_polygon(
     polygon.reserve(clipped.size());
     for (const auto& point : clipped)
     {
-        const int depth = std::max(1, point.view.depth_q6);
+        const int depth = point.view.depth_q6 < 0 ? 1 : point.view.depth_q6;
         const auto projected_delta = [&](int component) {
-            const int magnitude = std::min(std::abs(component), depth * (render_wide_frustum() ? 2 : 1));
-            const int ratio_q11 = (magnitude << 11) / depth;
-            return render_project_q7(component < 0 ? -ratio_q11 : ratio_q11);
+            return render_project_world_q7(component, depth);
         };
         polygon.push_back(
             {render_center_x() * 128 + projected_delta(point.view.right_q6),
@@ -544,6 +625,74 @@ void raster_packed_texture_polygon(
         );
     }
 
+    // Integer projection can bend collinear/foreshortened edges into a
+    // non-Y-monotone outline. Keep the existing two-chain fast path unless
+    // the cyclic sequence has more than two nonzero Y-direction changes.
+    int direction_changes = 0;
+    // The ordinary world pipeline opts in; brush collectors retain their
+    // separate row metadata and arbitration contract.
+    if (world_polygon && active_render_scale == RenderScale::X2)
+    {
+        int first_direction = 0;
+        int last_direction = 0;
+        for (std::size_t index = 0; index < polygon.size(); ++index)
+        {
+            const int dy = polygon[(index + 1) % polygon.size()].y_q7 - polygon[index].y_q7;
+            if (dy == 0)
+            {
+                continue;
+            }
+            const int direction = dy > 0 ? 1 : -1;
+            if (first_direction == 0)
+            {
+                first_direction = direction;
+            }
+            else if (direction != last_direction)
+            {
+                ++direction_changes;
+            }
+            last_direction = direction;
+        }
+        direction_changes += first_direction != last_direction;
+    }
+    const bool nonmonotone = direction_changes > 2;
+    const auto intersect_edge = [&](const TexturedFixedPoint& first,
+                                    const TexturedFixedPoint& second, int sample_y_q7) {
+        const int factor_q10 = ((sample_y_q7 - first.y_q7) << 10) / (second.y_q7 - first.y_q7);
+        const auto interpolate_affine = [&](std::int16_t first_value, std::int16_t second_value) {
+            const int delta = wrap_i16(static_cast<int>(second_value) - first_value);
+            return wrap_i16(first_value + signed_multiply_shift_trunc(delta, factor_q10, 10));
+        };
+        ++result.stats.edge_intersections;
+        return TexturedFixedPoint{
+            wrap_i16(first.x_q7 + (((second.x_q7 - first.x_q7) * factor_q10) >> 10)),
+            sample_y_q7,
+            mode == TextureRasterMode::projective_block8
+                ? perspective_interpolate_i16(
+                      first.s_q4,
+                      second.s_q4,
+                      first.depth_q6,
+                      second.depth_q6,
+                      factor_q10,
+                      1024
+                  )
+                : interpolate_affine(first.s_q4, second.s_q4),
+            mode == TextureRasterMode::projective_block8
+                ? perspective_interpolate_i16(
+                      first.t_q4,
+                      second.t_q4,
+                      first.depth_q6,
+                      second.depth_q6,
+                      factor_q10,
+                      1024
+                  )
+                : interpolate_affine(first.t_q4, second.t_q4),
+            mode == TextureRasterMode::projective_block8
+                ? perspective_interpolate_depth(first.depth_q6, second.depth_q6, factor_q10, 1024)
+                : interpolate_affine(first.depth_q6, second.depth_q6),
+        };
+    };
+
     std::size_t forward = top;
     std::size_t reverse = top;
     const auto intersect_chain = [&](std::size_t& current, int direction, int sample_y_q7) {
@@ -565,49 +714,12 @@ void raster_packed_texture_polygon(
             {
                 fail("textured convex boundary is not Y-monotonic");
             }
-            const int factor_q10 = ((sample_y_q7 - first.y_q7) << 10) / (second.y_q7 - first.y_q7);
-            const auto interpolate_affine = [&](std::int16_t first_value, std::int16_t second_value) {
-                const int delta = wrap_i16(static_cast<int>(second_value) - first_value);
-                return wrap_i16(first_value + signed_multiply_shift_trunc(delta, factor_q10, 10));
-            };
-            ++result.stats.edge_intersections;
-            return TexturedFixedPoint{
-                wrap_i16(first.x_q7 + (((second.x_q7 - first.x_q7) * factor_q10) >> 10)),
-                sample_y_q7,
-                mode == TextureRasterMode::projective_block8
-                    ? perspective_interpolate_i16(
-                          first.s_q4,
-                          second.s_q4,
-                          first.depth_q6,
-                          second.depth_q6,
-                          factor_q10,
-                          1024
-                      )
-                    : interpolate_affine(first.s_q4, second.s_q4),
-                mode == TextureRasterMode::projective_block8
-                    ? perspective_interpolate_i16(
-                          first.t_q4,
-                          second.t_q4,
-                          first.depth_q6,
-                          second.depth_q6,
-                          factor_q10,
-                          1024
-                      )
-                    : interpolate_affine(first.t_q4, second.t_q4),
-                mode == TextureRasterMode::projective_block8
-                    ? perspective_interpolate_depth(first.depth_q6, second.depth_q6, factor_q10, 1024)
-                    : interpolate_affine(first.depth_q6, second.depth_q6),
-            };
+            return intersect_edge(first, second, sample_y_q7);
         }
         fail("textured convex boundary has no active edge");
     };
 
-    for (int y = first_y; y <= last_y; ++y)
-    {
-        ++result.stats.bounded_rows;
-        const int sample_y_q7 = y * 128 + 64;
-        auto left = intersect_chain(forward, 1, sample_y_q7);
-        auto right = intersect_chain(reverse, -1, sample_y_q7);
+    const auto draw_row_span = [&](int y, TexturedFixedPoint left, TexturedFixedPoint right) {
         if (right.x_q7 < left.x_q7)
         {
             std::swap(left, right);
@@ -635,7 +747,7 @@ void raster_packed_texture_polygon(
                     left.depth_q6,
                     right.depth_q6
                 );
-                continue;
+                return;
             }
             draw_packed_texture_span_projective(
                 result,
@@ -655,6 +767,50 @@ void raster_packed_texture_polygon(
                 right.depth_q6
             );
         }
+    };
+    std::vector<TexturedFixedPoint> intersections;
+    if (nonmonotone)
+    {
+        intersections.reserve(polygon.size());
+    }
+    for (int y = first_y; y <= last_y; ++y)
+    {
+        ++result.stats.bounded_rows;
+        const int sample_y_q7 = y * 128 + 64;
+        if (!nonmonotone)
+        {
+            auto left = intersect_chain(forward, 1, sample_y_q7);
+            auto right = intersect_chain(reverse, -1, sample_y_q7);
+            draw_row_span(y, left, right);
+            continue;
+        }
+        intersections.clear();
+        for (std::size_t edge = 0; edge < polygon.size(); ++edge)
+        {
+            const auto* first = &polygon[edge];
+            const auto* second = &polygon[(edge + 1) % polygon.size()];
+            if (second->y_q7 < first->y_q7)
+            {
+                std::swap(first, second);
+            }
+            // Half-open Y intervals count each shared vertex exactly once.
+            if (first->y_q7 <= sample_y_q7 && sample_y_q7 < second->y_q7)
+            {
+                intersections.push_back(intersect_edge(*first, *second, sample_y_q7));
+            }
+        }
+        // Stable ties preserve the original edge order for equal-X spans.
+        std::stable_sort(intersections.begin(), intersections.end(), [](const auto& a, const auto& b) {
+            return a.x_q7 < b.x_q7;
+        });
+        if ((intersections.size() & 1) != 0)
+        {
+            fail("textured polygon has an odd scanline intersection count");
+        }
+        for (std::size_t index = 0; index < intersections.size(); index += 2)
+        {
+            draw_row_span(y, intersections[index], intersections[index + 1]);
+        }
     }
 }
 
@@ -663,9 +819,12 @@ PackedTextureRaster render_packed_texture_pipeline(
     const PacketSelection& packet,
     const Camera& camera,
     TextureRasterMode mode,
-    double surface_time
+    double surface_time,
+    std::span<const std::uint8_t> face_colors
 )
 {
+    if (!face_colors.empty() && mode != TextureRasterMode::projective_block8)
+        fail("baked face colors require the projective gameplay raster");
     if (world.face_vertex_ids.size() != static_cast<std::size_t>(world.face_count) ||
         world.face_texture_coordinates.size() != static_cast<std::size_t>(world.face_count) ||
         world.face_texture_ids.size() != static_cast<std::size_t>(world.face_count) || world.packed_textures.empty())
@@ -673,6 +832,7 @@ PackedTextureRaster render_packed_texture_pipeline(
         fail("packed texture render requires complete generated texture data");
     }
     PackedTextureRaster result;
+    result.face_colors = face_colors;
     result.indices.assign(kLogicalPixels, kUnwrittenIndex);
     result.lightmapped_indices.assign(kLogicalPixels, kUnwrittenIndex);
     result.lightmap_levels.resize(kLogicalPixels);
@@ -704,6 +864,7 @@ PackedTextureRaster render_packed_texture_pipeline(
         {
             fail("packed face texture ID escapes its directory");
         }
+        ++result.stats.input_faces;
         std::vector<TexturedViewVertex> polygon;
         polygon.reserve(vertex_ids.size());
         for (std::size_t index = 0; index < vertex_ids.size(); ++index)
@@ -714,8 +875,7 @@ PackedTextureRaster render_packed_texture_pipeline(
                  coordinates[index].t_q4}
             );
         }
-        ++result.stats.input_faces;
-        raster_packed_texture_polygon(result, world, polygon, world.packed_textures[texture_id], face, mode);
+        raster_packed_texture_polygon(result, world, polygon, world.packed_textures[texture_id], face, mode, true);
     }
     std::set<std::uint16_t> unique_faces;
     for (const auto face : result.faces)
@@ -733,6 +893,7 @@ PackedTextureRaster render_packed_texture_pipeline(
     result.unique_faces = static_cast<int>(unique_faces.size());
     result.stats.unique_samples = result.hits;
     result.stats.unwritten_samples = result.misses;
+    result.face_colors = {};
     return result;
 }
 

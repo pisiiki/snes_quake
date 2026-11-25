@@ -26,7 +26,9 @@ SKY_LOGICAL_WIDTH = 128
 SKY_LOGICAL_HEIGHT = 112
 SKY_SPAN_MAXIMUM = 32
 SKY_PROJECTION_SCALE = 378
-SKY_RUNTIME_MARKER_CAPACITY = 9
+SKY_RUNTIME_MARKER_CAPACITY = 9  # Historical allocation retained for palette stability.
+SKY_ROW_TOKEN_PROTOCOL = "quake-sky-row-delimiters-v1"
+SKY_ROW_TOKEN_ROLES = ("BODY", "START", "END", "SINGLE")
 MAX_QUAKE_SURFACE_TIME = 0x7FFFFFFF
 SNES_NTSC_FRAMES_PER_SECOND = 60.0988138974405
 FLY_CLOCK_FRACTION_BITS = 8
@@ -727,12 +729,10 @@ def audit_opaque_palette_domain(
 def assign_sky_face_markers(
     domain: OpaquePaletteDomain, face_ids: Sequence[int]
 ) -> tuple[tuple[int, int], ...]:
-    """Assign bounded safe markers in deterministic face-ID order.
+    """Retain the historical allocation for palette compatibility metadata.
 
-    The renderer only needs to distinguish sky from ordinary opaque output;
-    separate sky faces do not need separate palette values.  Reuse the
-    runtime's bounded marker set when a BSP contains more sky faces than the
-    palette proof exposes safe values for.
+    These values no longer encode runtime face ownership. Row delimiters use
+    four distinct globally reserved values independent of the number of faces.
     """
 
     ordered_faces = tuple(sorted(face_ids))
@@ -747,6 +747,53 @@ def assign_sky_face_markers(
         (face, markers[index % len(markers)])
         for index, face in enumerate(ordered_faces)
     )
+
+
+def sky_row_tokens(domain: OpaquePaletteDomain, *, enabled: bool = True) -> dict:
+    """Allocate four safe row delimiters; clear index zero is never a token."""
+    safe = tuple(value for value in domain.safe_indices if 0 < value <= 255)
+    if enabled and len(safe) < len(SKY_ROW_TOKEN_ROLES):
+        raise SkyAssetError("sky row protocol requires four nonzero safe palette indices")
+    values = safe[:4] if enabled else (256,) * 4
+    return {
+        "protocol": SKY_ROW_TOKEN_PROTOCOL,
+        "enabled": enabled,
+        "roles": dict(zip(SKY_ROW_TOKEN_ROLES, values, strict=True)),
+        "runtimeTokenCount": 4 if enabled else 0,
+        "reservedIndices": list(values) if enabled else [],
+        "disabledSentinel": 256,
+        "faceIdentityEncoded": False,
+        "rowEncoding": "SINGLE for one pixel; START, BODY*, END otherwise",
+        "survivorRule": "split before START/SINGLE and after END/SINGLE; opaque pixels end runs",
+    }
+
+
+def row_token_values(record: dict) -> tuple[int, ...]:
+    """Validate a stored protocol before tools classify framebuffer bytes."""
+    if not isinstance(record, dict):
+        raise SkyAssetError("sky row token contract must be an object")
+    if record.get("protocol") != SKY_ROW_TOKEN_PROTOCOL:
+        raise SkyAssetError("unknown sky row token protocol")
+    roles = record.get("roles")
+    if not isinstance(roles, dict) or set(roles) != set(SKY_ROW_TOKEN_ROLES):
+        raise SkyAssetError("sky row token roles are incomplete")
+    values = tuple(roles[role] for role in SKY_ROW_TOKEN_ROLES)
+    if any(type(value) is not int for value in values):
+        raise SkyAssetError("sky row token values must be integers")
+    enabled = record.get("enabled")
+    if type(enabled) is not bool:
+        raise SkyAssetError("sky row token enabled flag must be boolean")
+    if type(record.get("runtimeTokenCount")) is not int:
+        raise SkyAssetError("sky row token count must be an integer")
+    if not enabled:
+        if values != (256,) * 4 or record.get("runtimeTokenCount") != 0 or record.get("reservedIndices") != []:
+            raise SkyAssetError("disabled sky row tokens must use the non-byte sentinel")
+        return ()
+    if len(set(values)) != 4 or any(not 0 < value <= 255 for value in values):
+        raise SkyAssetError("sky row tokens must be four distinct nonzero bytes")
+    if record.get("runtimeTokenCount") != 4 or record.get("reservedIndices") != list(values):
+        raise SkyAssetError("sky row token reservation disagrees with its roles")
+    return values
 
 
 def quake_sky_clock(surface_time: float) -> SkyClock:
@@ -817,6 +864,15 @@ def build_demo_phase_asset(
             pack_phase_low23(quake_sky_clock(surface_time).projected_phase_low23)
         )
     return bytes(records)
+
+
+def build_demo_float_phase_asset(first_server_time: float, pose_count: int, sample_rate_hz: int) -> bytes:
+    """Keep every binary32 phase bit, including its full 0..4096 magnitude."""
+    if pose_count <= 0 or sample_rate_hz <= 0:
+        raise SkyAssetError("float phase asset requires positive pose count and sample rate")
+    quake_sky_clock(first_server_time)
+    return b"".join(quake_sky_clock(first_server_time + pose / sample_rate_hz)
+                    .projected_phase_float32_bits.to_bytes(4, "little") for pose in range(pose_count))
 
 
 def phase_asset_record(asset: bytes, source_pose: int) -> int:

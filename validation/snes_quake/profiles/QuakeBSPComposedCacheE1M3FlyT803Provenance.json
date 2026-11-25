@@ -1,0 +1,51 @@
+{
+  "schema": "quake-composed-cache-player-fly-provenance-v1",
+  "assetsSha256": "d383c7c16dcca717bf369c9bc51b2e5e54470e62d2a78add49bb0917ef167064",
+  "source": {
+    "sourceCommit": "071893c5aca68fcd79d0e9ac6f3e4772d87d7c6f",
+    "sourceDirty": false
+  },
+  "captureReport": {
+    "bytes": 242425,
+    "sha256": "b7b9401c8da2099ede337faeb3066dca2f6751de90637c935c87d69195535911"
+  },
+  "captureCommand": {
+    "bytes": 1422,
+    "sha256": "98eb6891de669c4cc3d162e18d4f2960aca2736bdfc412fd9e44bf254ab20e7b"
+  },
+  "referenceResult": {
+    "bytes": 317,
+    "sha256": "c41becbb20e5bceb108b13bc219a9922c57da965216084986e803ad5a82de37e"
+  },
+  "finalSavedFrameReport": {
+    "bytes": 20909,
+    "sha256": "9376943cdb1256ac76c692537040207086d5dad6c919464ffedd9c2e736e0afe"
+  },
+  "captureScope": {
+    "evaluation": 11448,
+    "cameraState": [
+      -92,
+      1,
+      -11,
+      4,
+      -13,
+      1417
+    ],
+    "technique": 4,
+    "entities": true,
+    "dynamicBrushes": true,
+    "stage": "Independent packed-projective opaque composition. Model zero selects world owners."
+  },
+  "worldOwnerPlane": {
+    "bytes": 28672,
+    "sha256": "917d04788a4ae175844d5997c67659e252e5b2ede2a6c2a411490a2196bda617"
+  },
+  "broadProfileSha256": "7865617fbd832030d1113300685568dd75bbf06243e6b36092996c766887c645",
+  "priorityProfileSha256": "2e20209e39cdda353d825afa4f65933d96107d519959e05f797e8a4c75d86da0",
+  "cacheAllocationPolicy": {
+    "totalHalfbankCount": 23,
+    "priorityHalfbankCount": 6,
+    "firstPhysicalHalfbank": 64,
+    "lastPhysicalHalfbank": 86
+  }
+}

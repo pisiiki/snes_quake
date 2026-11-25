@@ -50,7 +50,7 @@ BrushTryRenderComposedWorldFace:
         add     R1
         with    R1
         add     R2
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_FACES_ROM_BANK
@@ -140,10 +140,74 @@ TexturePublishQ12RoutesStore:
 
 ; Return R0=1 after publishing the eight-byte descriptor for the source face.
 ; R0=0 is the no-hit path, which leaves normal material setup to the caller.
+.if .defined(QUAKE_MSU_CACHE) .and (BSP_RENDER_SCALE = 2)
+        ; Keep the ordinary AUX overlay and pinned cache window addresses.
+        .res $66, $01
+.pushseg
+.segment "GSU_MSU_CODE"
+.endif
 TextureSelectComposedSurface:
+.ifdef PLAYABLE_EMPTY_COMPOSED
+        .assert BSP_COMPOSED_CACHE_SELECTED_FACE_COUNT = 0, error, "Playable composed cache is not empty"
         move    R7, R11
+        bra     TextureSelectComposedSurfaceMiss
+        nop
+  .if .defined(PLAYABLE_LAZY_WORLD_LIGHTMAP) && (BSP_RENDER_SCALE = 2)
+; Use the empty lookup's padding to stream only after geometry survives clipping.
+WorldLightmapRasterTarget:
+        sm      (TEXTURE_RASTER_RETURN), R11
+        jal     TextureLoadFaceLightmap
+        lm      R11, (TEXTURE_RASTER_RETURN)
+        GSU_ABSOLUTE_GOTO TextureRasterPolygonShaded
+  .endif
+  .ifdef PLAYABLE_RESIDENT_WORLD_LIGHTMAPS
+TextureLoadResidentWorldLightmap:
+        ibt     R1, #$7F
+        with    R7
+        and     R1
+    .ifdef PLAYABLE_RESIDENT_NIBBLE_LIGHTMAPS
+        ; The directory width high bit tags a base-plus-nibbles grid.
+        ; Pass the tag above the physical bank byte until decode dispatch.
+        lm      R0, (LIGHTMAP_WIDTH)
+        to      R2
+        and     R1
+        cmp     R2
+        beq     @DecodeResident
+        nop
+        sm      (LIGHTMAP_WIDTH), R2
+        iwt     R1, #$0100
+        with    R7
+        or      R1
+@DecodeResident:
+    .endif
+        QuakeDecodeWorldLightmap TextureLoadFaceLightmapCache
+        GSU_ABSOLUTE_GOTO TextureLoadFaceLightmapAddressReady
+  .endif
+  .ifdef PLAYABLE_BRUSH_PROJECTED_X_BOUNDS
+        ; E1M1's empty composed lookup leaves this PRAM window unused.
+        .include "quake/BrushProjectedXBounds.sgs"
+  .endif
+        ; Keep the established miss/return labels and following cache alignment.
+        .res $5E - (* - TextureSelectComposedSurface), $01
+.else
+.if .defined(QUAKE_MSU_CACHE) .and (BSP_RENDER_SCALE = 2)
+        .assert .loword(TextureSelectComposedSurface) = MSU_SURFACE_LOOKUP_OFFSET, lderror, "MSU lookup moved"
+.endif
+        move    R7, R11
+.if .defined(QUAKE_MSU_CACHE) .and (BSP_RENDER_SCALE = 2)
+        jal     TextureSelectMsuSurface
+        nop
+        bne     TextureSelectComposedSurfacePublish
+        nop
+.endif
+.if BSP_QUAKEC_GAMEPLAY
+        ; A miss can reuse the preceding face's ordinary material. Retain its
+        ; wrap and single-bank flags until an actual hit publishes its state.
+        .res 5, $01
+.else
         move    R0, #0
         sm      (TEXTURE_WRAP_FLAGS), R0
+.endif
         lm      R1, (PACKET_SOURCE_INDEX)
         with    R1
         add     R1
@@ -175,106 +239,130 @@ TextureSelectComposedSurface:
         sm      (TEXTURE_ROM_ADDRESS), R0
         BSP_ROM_LOAD_WORD R0
         sm      (TEXTURE_WIDTH), R0
-        ; $8000 is outside the byte-sized ordinary wrap-flag domain and means
-        ; selected but not yet cached. The first visible span changes it to
-        ; $8001 so later blocks enter below CACHE without refilling the window.
+.if .defined(QUAKE_MSU_CACHE) .and (BSP_RENDER_SCALE = 2)
+TextureSelectComposedSurfacePublish:
+.endif
+        ; $8000 is outside the byte-sized ordinary wrap-flag domain and marks
+        ; a selected composed face. It carries no cache-ownership information;
+        ; every block re-enters CACHE.
         iwt     R0, #$8000
         sm      (TEXTURE_WRAP_FLAGS), R0
         jal     TexturePublishComposedQ12Routes
         nop
         move    R0, #1
+.endif
 TextureSelectComposedSurfaceReturn:
         move    R11, R7
         ret
         nop
 TextureSelectComposedSurfaceMiss:
-        move    R0, #0
         bra     TextureSelectComposedSurfaceReturn
-        nop
+        sub     R0
+.if .defined(QUAKE_MSU_CACHE) .and (BSP_RENDER_SCALE = 2)
+.popseg
+.endif
 
 ; R5/R6 are the first exact Q4 coordinate and R10 addresses the remaining
-; block coordinates. This cold entry sets the face ROM bank once per block.
+; block coordinates. Keep setup and sampling resident across adjacent blocks.
+.align GSU_CACHE_LINE_BYTES, $01
 TextureComposedSpanStart:
+GSU_CACHE_KERNEL_BEGIN GSU_ComposedSurfaceCache
+.assert TextureComposedSpanStart = GSU_ComposedSurfaceCache, lderror, "Composed entry precedes CACHE"
         lm      R0, (TEXTURE_ROM_BANK)
         romb
         lm      R5, (TEXTURE_SPAN_S)
         lm      R6, (TEXTURE_SPAN_T)
         iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
-        lm      R0, (TEXTURE_WRAP_FLAGS)
-        inc     R0
-        iwt     R1, #$8001
-        with    R0
-        cmp     R1
-        bne     TextureComposedSpanCached
-        nop
-        sm      (TEXTURE_WRAP_FLAGS), R0
-        GSU_ABSOLUTE_GOTO GSU_ComposedSurfaceCache
-TextureComposedSpanCached:
-        GSU_ABSOLUTE_GOTO TextureComposedSpanLoop
-
-; The alternate cache contains only face-local addressing, final-index fetch,
-; plot, and the coordinate-stream continuation needed by a selected face.
-GSU_CACHE_KERNEL_BEGIN GSU_ComposedSurfaceCache
-TextureComposedSpanLoop:
-  .repeat 4
-        with    R5
-        asr
-  .endrepeat
-  .repeat 4
-        with    R6
-        asr
-  .endrepeat
-        ; Coordinates are face-global and can exceed the 8-bit UMULT domain.
-        ; LMULT preserves the exact low-word row offset for signed 16-bit T.
-        lm      R0, (TEXTURE_WIDTH)
-        with    R0
-        lmult
-        with    R4
-        add     R5
-        lm      R1, (TEXTURE_ROM_ADDRESS)
-        with    R4
-        add     R1
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        to      R0
-        getb
-        color
-
-        lm      R0, (TEXTURE_SPAN_X)
-        iwt     R8, #GSU_TEXTURE_COORD_MAP_OFFSET
-        with    R8
-        add     R0
-        moveb   R1, (R8)
+        ; No calls occur inside the pixel loop. Keep its invariant addresses,
+        ; limits and plot Y in registers instead of reloading them per pixel.
+        lm      R3, (TEXTURE_SPAN_X)
+        lm      R9, (TEXTURE_WIDTH)
+        lm      R11, (TEXTURE_ROM_ADDRESS)
+        lm      R12, (TEXTURE_SPAN_END_X)
+        with    R12
+        sub     R3
+        inc     R12
         lm      R2, (TEXTURE_PLOT_Y)
-        plot
-
-        lm      R1, (TEXTURE_SPAN_END_X)
-        with    R0
-        cmp     R1
-        bne     TextureComposedSpanContinue
-        inc     R0
-        bra     TextureComposedSpanDone
+        iwt     R7, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R7
+        add     R3
+        bra     TextureComposedSpanCount
         nop
-TextureComposedSpanContinue:
+        .res $31 - (* - GSU_ComposedSurfaceCache), $01
+TextureComposedSpanCount:
+        ; A projective block owns up to eight pixels. The final block also
+        ; owns the span endpoint, including the direct single-pixel entry.
+        move    R0, #10
+        with    R12
+        cmp     R0
+        bcc     TextureComposedSpanCountReady
+        nop
+        move    R12, #8
+TextureComposedSpanCountReady:
+        iwt     R13, #TextureComposedSpanNextPixel
+        bra     TextureComposedSpanLoop
+        nop
+TextureComposedSpanNextPixel:
         movew   R5, (R10)
         inc     R10
         inc     R10
         movew   R6, (R10)
         inc     R10
         inc     R10
-        iwt     R8, #TEXTURE_SPAN_X
-        lm      R1, (TEXTURE_SIGN_S)
-        with    R0
-        cmp     R1
-        beq     TextureComposedSpanCheckBlock
-        ; Publish X with a single STW in the boundary branch delay slot. R8's
-        ; former coordinate-map pointer is dead and each sampler reloads it.
-        stw     (R8)
-        GSU_ABSOLUTE_GOTO TextureComposedSpanLoop
+        inc     R7
+TextureComposedSpanLoop:
+        from    R5
+  .repeat 3
+        asr
+  .endrepeat
+        to      R5
+        asr
+        from    R6
+  .repeat 3
+        asr
+  .endrepeat
+        to      R6
+        asr
+        ; Coordinates are face-global and can exceed the 8-bit UMULT domain.
+        ; LMULT preserves the exact low-word row offset for signed 16-bit T.
+        from    R9
+        lmult
+        with    R4
+        add     R5
+        with    R4
+        add     R11
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        moveb   R1, (R7)
+        to      R0
+        getb
+        color
+        plot
+        loop
+        inc     R3
+        lm      R0, (TEXTURE_SPAN_END_X)
+        sub     R3
+        bmi     TextureComposedSpanDone
+        nop
 TextureComposedSpanCheckBlock:
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        sm      (TEXTURE_SPAN_X), R3
         sm      (TEXTURE_SPAN_S), R5
         sm      (TEXTURE_SPAN_T), R6
-        GSU_ABSOLUTE_GOTO TextureLightmapBlockSetup
+        move    R0, R3
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO TextureComposedBlockSetupCurrentX
+.else
+        GSU_ABSOLUTE_GOTO TextureLightmapBlockSetupCurrentX
+.endif
 TextureComposedSpanDone:
+        ; Preserve the public span exit: memory names the last plotted X,
+        ; while R0 names its successor. Intermediate pixels need no stores.
+        move    R0, R3
+        dec     R3
+        sm      (TEXTURE_SPAN_X), R3
         lm      R11, (TEXTURE_SPAN_RETURN)
         ret
         nop
@@ -341,6 +429,9 @@ TextureComposedDivideQ12Ready:
         ret
         nop
 
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+.include "quake/MsuComposedCarry.sgs"
+.else
 TextureComposedLightmapBlock8Setup:
         sm      (TEXTURE_SIGN_S), R4
         move    R0, R4
@@ -350,6 +441,7 @@ TextureComposedLightmapBlock8Setup:
         move    R10, R6
         move    R0, #8
         sm      (TEXTURE_SPAN_DEN), R0
+TextureComposedBlock8CoordinatesReady:
         move    R0, R5
         lm      R1, (TEXTURE_SPAN_S)
         with    R0
@@ -405,6 +497,7 @@ TextureComposedLightmapBlock8TPositive:
         ; alternate window.
         iwt     R0, #TextureLightmapCoordinateBlockReady
         sm      (TEXTURE_COORD_RETURN), R0
+TextureComposedCoordinateStateSetup:
         iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
         lm      R5, (TEXTURE_SPAN_S)
         lm      R6, (TEXTURE_SPAN_T)
@@ -473,4 +566,12 @@ TextureComposedBuildCoordinateTReady:
         nop
   .endrepeat
         .byte   $01                     ; one-byte NOP keeps the cache ABI size
+.endif
+        .assert * - GSU_ComposedSurfaceCache <= 442, error, "Composed loop exceeds its pinned cache body"
+        .res 442 - (* - GSU_ComposedSurfaceCache), $01
 GSU_CACHE_KERNEL_END GSU_ComposedSurfaceCache
+.if .defined(QUAKE_MSU_CACHE) .and (BSP_RENDER_SCALE = 2)
+.pushseg
+.include "quake/MsuSurfaceLookup.sgs"
+.popseg
+.endif

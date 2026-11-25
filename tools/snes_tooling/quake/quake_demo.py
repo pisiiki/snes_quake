@@ -7,7 +7,7 @@ import bisect
 import math
 import struct
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 PROTOCOL_NETQUAKE = 15
@@ -118,6 +118,17 @@ class ParticleEvent:
 
 
 @dataclass(frozen=True)
+class ClientViewState:
+    weapon: int = 0
+    weapon_frame: int = 0
+    items: int = 0
+    health: int = 0
+    punch: tuple[int, int, int] = (0, 0, 0)
+    velocity: tuple[int, int, int] = (0, 0, 0)
+    intermission: bool = False
+
+
+@dataclass(frozen=True)
 class EntityFrame:
     record: int
     server_time: float
@@ -125,6 +136,7 @@ class EntityFrame:
     map_entry: str = ""
     map_generation: int = 0
     model_precache: tuple[str, ...] = ()
+    client_view: ClientViewState = ClientViewState()
 
 
 @dataclass(frozen=True)
@@ -295,6 +307,8 @@ class NetQuakeCameraParser:
         self.map_entry = ""
         self.map_generation = 0
         self.message_record = -1
+        self.client_view = ClientViewState()
+        self.intermission = False
         self.model_precache: tuple[str, ...] = ("",)
         self.sound_precache: tuple[str, ...] = ("",)
         self.sound_events: list[SoundEvent] = []
@@ -359,6 +373,8 @@ class NetQuakeCameraParser:
         self.updated_entities.clear()
         self.no_lerp_entities.clear()
         self.sound_events.clear()
+        self.client_view = ClientViewState()
+        self.intermission = False
         self.view_entity = 0
         self.view_height = DEFAULT_VIEWHEIGHT
         self.server_time = 0.0
@@ -417,19 +433,17 @@ class NetQuakeCameraParser:
         self.view_height = reader.i8() if bits & SU_VIEWHEIGHT else DEFAULT_VIEWHEIGHT
         if bits & SU_IDEALPITCH:
             reader.i8()
+        punch, velocity = [], []
         for axis in range(3):
-            if bits & (SU_PUNCH1 << axis):
-                reader.i8()
-            if bits & (SU_VELOCITY1 << axis):
-                reader.i8()
-        reader.i32()  # items is always sent by protocol 15
-        if bits & SU_WEAPONFRAME:
-            reader.u8()
+            punch.append(reader.i8() if bits & (SU_PUNCH1 << axis) else 0)
+            velocity.append(reader.i8() * 16 if bits & (SU_VELOCITY1 << axis) else 0)
+        items = reader.i32()  # items is always sent by protocol 15
+        weapon_frame = reader.u8() if bits & SU_WEAPONFRAME else 0
         if bits & SU_ARMOR:
             reader.u8()
-        if bits & SU_WEAPON:
-            reader.u8()
-        reader.i16()  # health
+        weapon = reader.u8() if bits & SU_WEAPON else 0
+        self.client_view = ClientViewState(weapon, weapon_frame, items, reader.i16(),
+                                           tuple(punch), tuple(velocity))
         reader.read(6)  # ammo, shells, nails, rockets, cells, active weapon
 
     def _sound(self, reader: MessageReader, record: int) -> None:
@@ -583,11 +597,14 @@ class NetQuakeCameraParser:
                 self._temporary_entity(reader, record)
             elif command in (24, 25):  # pause/signon number
                 reader.u8()
-            elif command in (27, 28, 30, 33):
+            elif command in (27, 28, 33):
                 continue
+            elif command == 30:  # svc_intermission
+                self.intermission = True
             elif command == 29:  # svc_spawnstaticsound
                 self._static_sound(reader, record)
             elif command in (31, 34):  # finale/cutscene
+                self.intermission = True
                 reader.string()
             elif command == 32:  # svc_cdtrack
                 reader.read(2)
@@ -655,7 +672,8 @@ def decode_camera_entity_track(data: bytes, map_entry: str) -> DecodedDemoTrack:
             entity_frame = EntityFrame(record.index, parser.server_time, tuple(
                 parser.entity_states[entity] for entity in sorted(parser.current_entities)
                 if entity in parser.entity_states
-            ), parser.map_entry, parser.map_generation, parser.model_precache)
+            ), parser.map_entry, parser.map_generation, parser.model_precache,
+                replace(parser.client_view, intermission=parser.intermission))
             if (entity_frames and entity_frames[-1].server_time == parser.server_time
                     and entity_frames[-1].map_generation == parser.map_generation):
                 entity_frames[-1] = entity_frame

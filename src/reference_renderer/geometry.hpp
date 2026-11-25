@@ -49,7 +49,10 @@ class Bvh
         order_.resize(triangles.size());
         std::iota(order_.begin(), order_.end(), std::uint32_t{0});
         nodes_.reserve(triangles.size() * 2);
-        build(0, static_cast<std::uint32_t>(order_.size()));
+        if (!order_.empty())
+        {
+            build(0, static_cast<std::uint32_t>(order_.size()));
+        }
     }
 
     [[nodiscard]] std::size_t node_count() const
@@ -60,6 +63,10 @@ class Bvh
     [[nodiscard]] Hit nearest(const Ray& ray, std::span<const std::uint8_t> visible_faces) const
     {
         Hit best;
+        if (nodes_.empty())
+        {
+            return best;
+        }
         std::vector<std::uint32_t> stack;
         stack.reserve(64);
         stack.push_back(0);
@@ -108,6 +115,10 @@ class Bvh
     painter(const Ray& ray, std::span<const std::uint8_t> visible_faces, std::span<const int> painter_ranks) const
     {
         Hit best;
+        if (nodes_.empty())
+        {
+            return best;
+        }
         int best_rank = -1;
         std::vector<std::uint32_t> stack;
         stack.reserve(64);
@@ -290,6 +301,12 @@ struct Camera
     int z{};
     int yaw{};
     int pitch{};
+    std::array<int, 3> residual_q2{};
+
+    std::array<int, 3> position_q2() const
+    {
+        return {x * 4 + residual_q2[0], y * 4 + residual_q2[1], z * 4 + residual_q2[2]};
+    }
 };
 
 struct SourceCamera
@@ -318,6 +335,23 @@ ViewTransform packed_view_transform(const SourceWorld& world, const Camera& came
 ViewTransform source_view_transform(const SourceCamera& camera);
 
 Ray view_ray(const ViewTransform& view, int x, int y);
+
+// Diagnostic-only inverse of the continuous rounded basis. Rendering keeps
+// view_ray(), including its historical transpose convention.
+Ray inverse_projection_view_ray(const ViewTransform& view, int x, int y);
+
+struct ProjectionRayOwnerPlanes
+{
+    std::vector<std::uint16_t> nominal_transposed;
+    std::vector<std::uint16_t> inverse_projection;
+};
+
+ProjectionRayOwnerPlanes projection_ray_owner_planes(
+    const SourceWorld& world,
+    const ViewTransform& view,
+    std::span<const std::uint8_t> allowed_faces = {}
+);
+
 
 struct ReferenceFrame
 {
@@ -562,6 +596,9 @@ struct ViewVertex
     int depth_q6{};
 };
 
+ViewVertex transform_packed_delta(int dx, int dy, int dz,
+    int cy, int sy, int cp, int sp, int fraction_bits);
+
 struct ScreenPoint
 {
     int x{};
@@ -659,6 +696,8 @@ void raster_span_band(
 int floor_divide(int numerator, int denominator);
 
 int ceil_divide(int numerator, int denominator);
+
+std::int16_t interpolate_view_nearest_q12(int base, int other, int factor);
 
 int frustum_distance(const ViewVertex& point, int plane);
 

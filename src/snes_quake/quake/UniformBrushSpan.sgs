@@ -1,0 +1,366 @@
+; A generated whole-texture proof allows opaque missing-lightmap brushes to
+; retain exact ownership while skipping texture-coordinate and sample work.
+.if BSP_RENDER_SCALE = 2
+.include "Data/Fly3x/UniformBrushMaterials.i"
+
+.macro BRUSH_UNIFORM_GOTO_RAM target
+        move    R9, #$70
+        iwt     R8, #.loword(target)
+        from    R8
+        ljmp    R9
+        nop
+.endmacro
+
+.segment "GSU_BRUSH_CODE"
+BrushUniformDrawStart:
+        move    R9, #BSP_GSU_ROM2_BANK
+        iwt     R8, #.loword(BrushUniformDrawStartROM)
+        from    R8
+        ljmp    R9
+        nop
+.assert .loword(*) <= GSU_ALIAS_FLY_CODE_OFFSET, lderror, "Uniform draw thunk overlaps deferred aliases"
+
+.segment "GSU_MATERIAL_SAMPLER_ROM_CODE"
+BrushUniformMaterialGate:
+        ; Row setup selects the original route. Uniform exits restore it;
+        ; materials which cannot qualify pay no per-candidate route reset.
+        lm      R0, (BRUSH_ARB_ROW_STAGE_MODE)
+        dec     R0
+        beq     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformMaterialNormal
+:
+        lm      R0, (TEXTURE_COMPOSED_ALLOWED)
+        dec     R0
+        beq     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformMaterialNormal
+:
+.if BSP_TURBULENCE_ENABLED
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        with    R0
+        and     #BSP_WORLD_TEXTURE_FLAG_TURBULENT
+        beq     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformMaterialNormal
+:
+.endif
+.if BSP_SKY_ENABLED
+        lm      R0, (TEXTURE_ID)
+        move    R1, #BSP_WORLD_SKY_TEXTURE_ID
+        with    R0
+        cmp     R1
+        bne     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformMaterialNormal
+:
+.endif
+        ; Only $02xx is the missing-map class. $03FF is the fallback loader.
+        lm      R0, (BRUSH_ARB_LIGHTMAP_REF)
+        move    R5, R0
+        with    R5
+        hib
+        move    R1, #2
+        with    R5
+        cmp     R1
+        beq     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformMaterialNormal
+:
+        move    R5, R0
+        with    R5
+        lob
+.if BSP_BRUSH_UNIFORM_LEVEL_COUNT > 0
+        move    R0, #BSP_GSU_ROM2_BANK
+        romb
+        iwt     R10, #.loword(BrushUniformLevels)
+        iwt     R12, #BSP_BRUSH_UNIFORM_LEVEL_COUNT
+        move    R7, #0
+@FindLevel:
+        GSU_SET_ROM_BUFFER_ADDRESS R10
+        to      R0
+        getb
+        with    R0
+        cmp     R5
+        beq     @LevelFound
+        nop
+        inc     R10
+        iwt     R1, #BSP_BRUSH_UNIFORM_TEXTURE_COUNT*2
+        with    R7
+        add     R1
+        dec     R12
+        bne     @FindLevel
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformMaterialNormal
+@LevelFound:
+        lm      R1, (TEXTURE_ID)
+        iwt     R0, #BSP_BRUSH_UNIFORM_TEXTURE_COUNT
+        with    R1
+        cmp     R0
+        bcc     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformMaterialNormal
+:
+        with    R1
+        add     R1
+        iwt     R4, #.loword(BrushUniformColors)
+        with    R4
+        add     R7
+        with    R4
+        add     R1
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R0
+        iwt     R1, #256
+        with    R0
+        cmp     R1
+        bcc     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformMaterialNormal
+:
+        sm      (BRUSH_UNIFORM_COLOR), R0
+        sm      (BRUSH_UNIFORM_LEVEL), R5
+        iwt     R0, #BrushUniformDrawStart
+        sm      (BRUSH_ARBITER_DRAW_ROUTINE), R0
+.endif
+BrushUniformMaterialNormal:
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        BRUSH_UNIFORM_GOTO_RAM BrushArbiterMaterialLightmapped
+
+BrushUniformDrawStartROM:
+        ; The normal material loader ran after classification. Verify it.
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bmi     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformDrawFallback
+:
+        lm      R0, (LIGHTMAP_ROM_ADDRESS)
+        lm      R1, (BRUSH_UNIFORM_LEVEL)
+        with    R0
+        cmp     R1
+        beq     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformDrawFallback
+:
+        ; Preserve the original conservative rejection and eight-pixel prefix
+        ; trim before any buffered-depth work. Equal-depth pixels still reach
+        ; the exact authority test below.
+        lm      R5, (TEXTURE_LEFT_SHADE)
+        lm      R6, (TEXTURE_RIGHT_SHADE)
+        move    R0, R5
+        with    R0
+        cmp     R6
+        bcc     @NearReady
+        nop
+        move    R5, R6
+@NearReady:
+        lm      R0, (TEXTURE_SPAN_X)
+        move    R1, R0
+        with    R1
+        add     R1
+        iwt     R10, #GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET
+        with    R10
+        add     R1
+        move    R6, R10
+        lm      R12, (TEXTURE_SPAN_END_X)
+        with    R12
+        sub     R0
+        inc     R12
+        iwt     R13, #.loword(BrushUniformNearDepthLoop)
+BrushUniformNearDepthLoop:
+        movew   R0, (R10)
+        with    R5
+        cmp     R0
+        bcc     BrushUniformTrimPrefix
+        nop
+        beq     BrushUniformTrimPrefix
+        nop
+        inc     R10
+        inc     R10
+        loop
+        nop
+        iwt     R0, #BrushArbiterDrawCandidateSpan
+        sm      (BRUSH_ARBITER_DRAW_ROUTINE), R0
+        lm      R8, (BRUSH_ARBITER_SPAN_RETURN)
+        move    R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+BrushUniformTrimPrefix:
+        move    R2, R10
+        with    R2
+        sub     R6
+        with    R2
+        lsr
+        iwt     R1, #$FFF8
+        with    R2
+        and     R1
+        lm      R0, (TEXTURE_SPAN_X)
+        with    R0
+        add     R2
+        sm      (TEXTURE_SPAN_X), R0
+BrushUniformDepthSetup:
+        lm      R5, (TEXTURE_LEFT_SHADE)
+        sm      (TEXTURE_BASE_DEPTH), R5
+        lm      R1, (TEXTURE_RIGHT_SHADE)
+        with    R1
+        sub     R5
+        sm      (TEXTURE_DELTA_DEPTH), R1
+        lm      R2, (CONVEX_MAX_X)
+        lm      R0, (CONVEX_MIN_X)
+        with    R2
+        sub     R0
+        sm      (BRUSH_ARBITER_SCREEN_DEN), R2
+        moves   R1, R1
+        bne     @Nonconstant
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformSelectConstant
+@Nonconstant:
+        dec     R1
+        bne     @Projective
+        nop
+        moves   R2, R2
+        bne     @UnitRise
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformSelectConstant
+@UnitRise:
+        iwt     R8, #.loword(BrushUniformDepthUnitRise)
+        GSU_ABSOLUTE_GOTO BrushUniformSpan
+@Projective:
+        ; Short/zero-width legacy-depth cases retain the original path.
+        moves   R2, R2
+        bne     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformDrawFallback
+:
+        lm      R0, (TEXTURE_SPAN_END_X)
+        lm      R1, (TEXTURE_SPAN_X)
+        with    R0
+        sub     R1
+        with    R0
+        sub     #7
+        bpl     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformDrawFallback
+:
+        iwt     R0, #.loword(BrushUniformBufferedReady)
+        sm      (BRUSH_UNIFORM_ROM_RETURN), R0
+        BRUSH_UNIFORM_GOTO_RAM BrushUniformPrepareDepthBridge
+
+BrushUniformBufferedReady:
+        lm      R0, (BRUSH_ARBITER_DEPTH_ROUTINE)
+        iwt     R1, #BrushArbiterDepthBuffered
+        with    R0
+        cmp     R1
+        beq     :+
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformDrawFallback
+:
+        iwt     R8, #.loword(BrushUniformDepthBuffered)
+        GSU_ABSOLUTE_GOTO BrushUniformSpan
+BrushUniformSelectConstant:
+        iwt     R8, #.loword(BrushUniformDepthConstant)
+        GSU_ABSOLUTE_GOTO BrushUniformSpan
+BrushUniformDrawFallback:
+        iwt     R0, #BrushArbiterDrawCandidateSpan
+        sm      (BRUSH_ARBITER_DRAW_ROUTINE), R0
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        BRUSH_UNIFORM_GOTO_RAM BrushArbiterDrawCandidateSpan
+
+; This color-only loop and all depth callbacks share one instruction cache.
+GSU_CACHE_KERNEL_BEGIN BrushUniformSpan
+        lm      R13, (TEXTURE_SPAN_X)
+        lm      R7, (TEXTURE_SPAN_END_X)
+        lm      R9, (BRUSH_ARB_CANDIDATE_CURSOR)
+        lm      R6, (BRUSH_UNIFORM_COLOR)
+        iwt     R11, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R11
+        add     R13
+BrushUniformPixel:
+        jmp     R8
+        nop
+BrushUniformDepthReady:
+        move    R0, R13
+        with    R0
+        add     R0
+        iwt     R2, #GSU_BRUSH_ARBITER_WINNER_ROW_OFFSET
+        with    R2
+        add     R0
+        iwt     R10, #GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET
+        with    R10
+        add     R0
+        movew   R1, (R10)
+        with    R5
+        cmp     R1
+        bcc     BrushUniformWinner
+        nop
+        beq     BrushUniformDepthTie
+        movew   R0, (R2)
+        GSU_ABSOLUTE_GOTO BrushUniformAdvance
+BrushUniformDepthTie:
+        with    R9
+        cmp     R0
+        bcc     BrushUniformWinner
+        nop
+        GSU_ABSOLUTE_GOTO BrushUniformAdvance
+BrushUniformWinner:
+        movew   (R10), R5
+        movew   (R2), R9
+        from    R6
+        color
+        moveb   R1, (R11)
+        lm      R2, (TEXTURE_PLOT_Y)
+        plot
+BrushUniformAdvance:
+        with    R13
+        cmp     R7
+        beq     BrushUniformDone
+        nop
+        inc     R13
+        inc     R11
+        GSU_ABSOLUTE_GOTO BrushUniformPixel
+BrushUniformDone:
+        sm      (TEXTURE_SPAN_X), R13
+        iwt     R0, #BrushArbiterDrawCandidateSpan
+        sm      (BRUSH_ARBITER_DRAW_ROUTINE), R0
+        lm      R8, (BRUSH_ARBITER_SPAN_RETURN)
+        move    R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+BrushUniformDepthConstant:
+        lm      R5, (TEXTURE_BASE_DEPTH)
+        GSU_ABSOLUTE_GOTO BrushUniformDepthReady
+BrushUniformDepthUnitRise:
+        lm      R5, (TEXTURE_BASE_DEPTH)
+        move    R0, R13
+        BSP_SCALE_LOGICAL_TO_Q7 R0
+        iwt     R1, #64
+        add     R1
+        lm      R2, (CONVEX_MAX_X)
+        cmp     R2
+        bcc     BrushUniformDepthUnitRiseReady
+        nop
+        inc     R5
+BrushUniformDepthUnitRiseReady:
+        GSU_ABSOLUTE_GOTO BrushUniformDepthReady
+BrushUniformDepthBuffered:
+        lm      R10, (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET)
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET), R10
+        GSU_ABSOLUTE_GOTO BrushUniformDepthReady
+GSU_CACHE_KERNEL_END BrushUniformSpan
+
+.align 2
+BrushUniformLevels:
+        BSP_EMIT_BRUSH_UNIFORM_LEVELS
+BrushUniformColors:
+        BSP_EMIT_BRUSH_UNIFORM_COLORS
+BrushUniformEnd:
+.assert ^BrushUniformMaterialGate = ($80+BSP_GSU_ROM2_BANK), lderror, "Uniform material gate left executable ROM2"
+.assert ^(BrushUniformEnd-1) = ($80+BSP_GSU_ROM2_BANK), lderror, "Uniform material code/data cross ROM2"
+.endif

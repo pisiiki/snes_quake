@@ -20,6 +20,7 @@ struct ExternalBspEntityState
     std::uint8_t frame{};
     Vec3 origin;
     std::array<std::int8_t, 3> angles{};
+    std::optional<std::array<double, 3>> source_angles{};
 };
 
 struct ExternalBspReplayModel

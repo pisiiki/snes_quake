@@ -1,0 +1,126 @@
+; A tagged QBSF occurrence stores its Z at the low stop. Apply the frozen
+; platform height in Q2 before either Full or Flat decodes the packed vertex.
+; Preserve the streamed XY word, cursor, bank and live loop registers.
+BrushResolvePlatformVertex:
+        from    R7
+        hib
+        iwt     R5, #$00C0              ; IBT would sign-extend the tag to $FFC0.
+        and     R5
+        beq     @Done
+        nop
+  .ifdef QC_SECRET_DOOR_COUNT
+        cmp     R5                      ; $C0 marks a brush-local horizontal vertex.
+        beq     @Horizontal
+        nop
+  .endif
+        move    R5, #$40
+        cmp     R5
+        beq     @Short
+        nop
+        lm      R0, (GSU_PLATFORM_HEIGHTS)
+        hib
+        bra     @Height
+        nop
+@Short:
+        lm      R0, (GSU_PLATFORM_HEIGHTS)
+        lob
+@Height:
+        move    R2, R0
+        from    R7
+        hib
+        move    R3, R0
+        move    R5, #$30
+        and     R5
+        .repeat 4
+        lsr
+        .endrepeat
+        add     R2
+        move    R2, R0
+        lsr
+        lsr
+        add     R7
+        to      R5
+        lob                              ; Updated signed-byte Z base.
+        from    R2
+        and     #3
+        .repeat 4
+        add     R0
+        .endrepeat
+        move    R2, R0
+        from    R3
+        and     #15                      ; Original X/Y residuals.
+        or      R2
+        swap
+        to      R7
+        or      R5
+@Done:  ret
+        nop
+  .ifdef QC_SECRET_DOOR_COUNT
+@Horizontal:
+        lm      R5, (BRUSH_CURRENT_SLOT)
+        from    R5
+        add     R5
+        add     R0
+        add     R0
+        iwt     R5, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_X_Q3
+        with    R5
+        add     R0
+        movew   R2, (R5)
+.repeat 5
+        with    R2
+        asr
+.endrepeat
+        from    R7
+        hib
+        and     #3
+        add     R2
+        move    R2, R0
+        and     #3
+        sm      (BRUSH_VERTEX_X_Q2), R0 ; Scratch until the decoded vertex is stored.
+        from    R2
+        asr
+        asr
+        add     R4
+        to      R3
+        lob
+        inc     R5
+        inc     R5
+        movew   R2, (R5)
+.repeat 5
+        with    R2
+        asr
+.endrepeat
+        from    R7
+        hib
+        lsr
+        lsr
+        and     #3
+        add     R2
+        move    R2, R0
+        asr
+        to      R5
+        asr
+        from    R4
+        hib
+        add     R5
+        lob
+        swap
+        to      R4
+        or      R3
+        from    R2
+        and     #3
+        add     R0
+        add     R0
+        lm      R3, (BRUSH_VERTEX_X_Q2)
+        or      R3
+        swap
+        move    R3, R0
+        iwt     R5, #$30ff
+        from    R7
+        and     R5
+        to      R7
+        or      R3
+        move    R1, R4                  ; Full raster also consumes X via R1.
+        ret
+        nop
+  .endif

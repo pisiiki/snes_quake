@@ -1,0 +1,34 @@
+; A clean opaque image stays in bank $70 while the independent alias suffix
+; runs. The guarded selector and mixed-token cache own the opaque input key.
+.segment "GSU_ALIAS_FLY_CODE"
+
+BrushRenderResidentWorld:
+        lm      R0, (GSU_RESIDENT_WORLD_COMMAND)
+        dec     R0
+        bne     @Ordinary
+        nop
+        move    R0, #2
+        sm      (GSU_RESIDENT_WORLD_COMMAND), R0
+        lm      R1, (GSU_RESIDENT_WORLD_STATUS)
+        dec     R0
+        sm      (GSU_RESIDENT_WORLD_STATUS), R0
+        dec     R1
+        bne     @Ordinary
+        nop
+        lm      R0, (BRUSH_TOKEN_COUNT)
+.ifdef PLAYABLE_RESIDENT_FIXED_ALIAS
+.assert !BSP_ALIAS_LIVE_POSES, error, "Resident fixed alias requires proved immutable poses"
+        ; The matching framebuffer already includes the same fixed alias.
+.else
+        lm      R1, (ALIAS_TOKEN_COUNT)
+        sub     R1
+.endif
+        GSU_ABSOLUTE_GOTO BrushRenderMixedTokensAtCursor
+@Ordinary:
+        GSU_ABSOLUTE_GOTO BrushRenderMixedTokens
+
+BrushRebuildMixedAfterResidentWorld:
+        sm      (GSU_RESIDENT_WORLD_STATUS), R0
+        GSU_ABSOLUTE_GOTO BrushBuildMixedTokens
+
+.assert .loword(*) <= GSU_AUX_CODE_OFFSET, lderror, "Resident world gate overlaps auxiliary code"

@@ -1,6 +1,6 @@
 ; Technique-4 dynamic-brush dispatch overlays. Each fragment occupies the
 ; exact general-code window it replaces so cache identity and every external
-; entry remain stable. ROM63 keeps the independently restorable dynamic path.
+; entry remain stable. ROM123 keeps the independently restorable dynamic path.
 
 .segment "GSU_T4_BRUSH_FRAGMENT_PATCH"
 T4BrushFragmentLightmap:
@@ -14,7 +14,7 @@ T4BrushFragmentLightmap:
 
 .segment "GSU_T4_BRUSH_WORLD_PATCH"
 T4BrushWorldLightmap:
-        jal     TextureLoadFaceLightmap
+        TexturePrepareWorldLightmap
         jal     TextureRenderConvexFaceShaded
         GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
   .repeat GSU_T4_BRUSH_WORLD_CAPACITY - (* - T4BrushWorldLightmap)
@@ -46,7 +46,16 @@ T4BrushRasterPreparedLightmap:
 
 .segment "GSU_T4_BRUSH_MODE_PATCH"
 T4BrushArbiterModeCheck:
+.if .defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)
+        ; R0 is the marker cursor. The reader must stay inside the token count.
+        inc     R0
+        inc     R0
+        lm      R1, (BRUSH_TOKEN_COUNT)
+        cmp     R1
+        GSU_ABSOLUTE_GOTO BrushArbiterCheckSingleton
+.else
         GSU_ABSOLUTE_GOTO BrushArbiterCollectBegin
+.endif
   .repeat GSU_T4_BRUSH_MODE_CAPACITY - (* - T4BrushArbiterModeCheck)
         nop
   .endrepeat
@@ -84,7 +93,13 @@ T4BrushArbiterStageRow:
 
 .segment "GSU_T4_BRUSH_MATERIAL_PATCH"
 T4BrushArbiterMaterialLightmap:
+.if BSP_RENDER_SCALE = 2
+        jal     BrushUniformMissingGateRAM
+        nop
         GSU_ABSOLUTE_GOTO BrushArbiterMaterialLightmapped
+.else
+        GSU_ABSOLUTE_GOTO BrushArbiterMaterialLightmapped
+.endif
   .repeat GSU_T4_BRUSH_MATERIAL_CAPACITY - (* - T4BrushArbiterMaterialLightmap)
         nop
   .endrepeat
@@ -93,15 +108,14 @@ T4BrushArbiterMaterialLightmap:
 
 .segment "GSU_T4_BRUSH_FORWARD_PATCH"
 T4BrushArbiterForwardIntersect:
-        jal     TextureCacheActiveEdgeShaded
-        nop
         iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET
         jal     TextureIntersectActiveEdgeShaded
-        nop
-        sm      (TEXTURE_EDGE_S), R8
-        sm      (TEXTURE_EDGE_T), R9
-        sm      (TEXTURE_EDGE_SHADE), R12
-        bra     BrushArbiterForwardIntersected
+        ; The shaded edge already returns these attributes in registers.
+        sm      (CONVEX_MIN_X), R0
+        sm      (TEXTURE_LEFT_S), R8
+        sm      (TEXTURE_LEFT_T), R9
+        sm      (TEXTURE_LEFT_SHADE), R12
+        bra     BrushArbiterForwardAttributesReady
         nop
   .repeat GSU_T4_BRUSH_FORWARD_CAPACITY - (* - T4BrushArbiterForwardIntersect)
         nop
@@ -113,11 +127,11 @@ T4BrushArbiterForwardIntersect:
 T4BrushArbiterReverseIntersect:
         iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET+GSU_TEXTURE_EDGE_DIVIDE_CACHE_ENTRY_BYTES
         jal     TextureIntersectActiveEdgeShaded
-        nop
-        sm      (TEXTURE_EDGE_S), R8
-        sm      (TEXTURE_EDGE_T), R9
-        sm      (TEXTURE_EDGE_SHADE), R12
-        bra     BrushArbiterReverseIntersected
+        sm      (CONVEX_MAX_X), R0
+        sm      (TEXTURE_RIGHT_S), R8
+        sm      (TEXTURE_RIGHT_T), R9
+        sm      (TEXTURE_RIGHT_SHADE), R12
+        bra     BrushArbiterReverseAttributesReady
         nop
   .repeat GSU_T4_BRUSH_REVERSE_CAPACITY - (* - T4BrushArbiterReverseIntersect)
         nop

@@ -1,0 +1,23 @@
+; R1/R2/R3 are the original signed Q2 deltas. The depth entry preserves them.
+PacketProjectDepthFirst:
+        move    R9, R11
+        link    #4
+        GSU_ABSOLUTE_GOTO ClipTransformQ2DepthOnly, shared_delay
+        nop
+        move    R11, R9
+        sm      (PACKET_VIEW_DEPTH), R12
+        ; Match both actual projector predicates, including wrapped near SUB.
+        move    R7, #(BSP_NEAR_DEPTH << BSP_VIEW_FRACTION_BITS)
+        from    R12
+        sub     R7
+        bmi     PacketProjectDepthRejected
+        nop
+        iwt     R7, #(256 << BSP_VIEW_FRACTION_BITS)
+        from    R12
+        cmp     R7
+        bcs     PacketProjectDepthRejected
+        nop
+        GSU_ABSOLUTE_GOTO PacketProjectDepthRight
+        ; The replaced X2 post-decode wrapper occupied exactly 32 bytes.
+.assert * - PacketProjectDepthFirst <= 32, error, "Depth-first selector exceeds the original post-decode slot"
+        .res 32 - (* - PacketProjectDepthFirst), $01

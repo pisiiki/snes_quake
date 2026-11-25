@@ -1,0 +1,8 @@
+.include "quake/ViewDotArithmetic.i"
+PacketProjectDepthRejected:
+        ; Existing projector initializes the far/near flags and cached marker.
+        GSU_ABSOLUTE_GOTO PacketProjectTransformedWorldVertex
+PacketProjectDepthUp:
+        BSP_VIEW_DOT_AXIS3 GSU_VIEW_MATRIX_UX, GSU_VIEW_MATRIX_UY, GSU_VIEW_MATRIX_UZ, CLIP_UP
+        sm      (PACKET_VIEW_UP), R0
+        GSU_ABSOLUTE_GOTO PacketProjectTransformedWorldVertex

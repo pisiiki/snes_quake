@@ -1,0 +1,80 @@
+; Complete metadata-only Y qualification before any edge preparation can
+; replace the cache. Preserve authority order in a bounded pointer list. Its
+; brush-row scratch prefix retires before the row's depth/color replay begins.
+BRUSH_ROW_FILTER_LIST = GSU_BRUSH_ROW_SCRATCH_OFFSET
+.assert BRUSH_ROW_FILTER_LIST + GSU_BRUSH_ROW_STAGE_RECORDS * 2 <= GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET, error, "Filtered candidates overlap brush depth state"
+.ifdef QC_BASIC_GAMEPLAY
+.if !BSP_BRUSH_REMAP_SCRATCH
+.assert GSU_BRUSH_ROW_STAGE_RECORDS <= 75, error, "Basic filtered pointer list exceeds its proven bound"
+.endif
+.else
+.assert GSU_BRUSH_ROW_STAGE_RECORDS <= 72, error, "Filtered pointer list exceeds its proven bound"
+.endif
+
+.segment "GSU_LIGHTMAP_UNPACK_ROM_CODE"
+GSU_CACHE_KERNEL_BEGIN BrushArbiterFilterRowROM
+        lm      R12, (BRUSH_ARB_METADATA_COUNT)
+        iwt     R0, #GSU_BRUSH_ROW_STAGE_RECORDS+1
+        with    R12
+        cmp     R0
+        bcs     BrushArbiterFilterFallback
+        nop
+        lm      R2, (BRUSH_ARB_ROW)
+        iwt     R0, #256
+        with    R2
+        cmp     R0
+        bcs     BrushArbiterFilterFallback
+        nop
+        move    R3, #0
+        move    R1, R2
+        with    R1
+        swap
+        move    R4, #16
+        iwt     R8, #GSU_BRUSH_ARBITER_METADATA_OFFSET+BRUSH_ARB_META_Y_RANGE
+        iwt     R9, #BRUSH_ROW_FILTER_LIST
+        moves   R12, R12
+        beq     BrushArbiterFilterComplete
+        nop
+        iwt     R13, #BrushArbiterFilterLoop
+BrushArbiterFilterLoop:
+        movew   R0, (R8)
+        ; Packed(maxY,minY) >= row<<8 is exactly maxY >= row. The second
+        ; comparison retains the original inclusive unsigned minY test.
+        cmp     R1
+        bcc     BrushArbiterFilterAdvance
+        nop
+        lob
+        with    R2
+        cmp     R0
+        bcc     BrushArbiterFilterAdvance
+        nop
+        from    R8
+        sub     #BRUSH_ARB_META_Y_RANGE
+        movew   (R9), R0
+        inc     R9
+        inc     R9
+        inc     R3
+BrushArbiterFilterAdvance:
+        with    R8
+        add     R4
+        loop
+        nop
+BrushArbiterFilterComplete:
+        move    R12, R3
+        iwt     R10, #BRUSH_ROW_FILTER_LIST
+        move    R11, #$70
+        iwt     R0, #BrushArbiterStageCandidateLoop
+        from    R0
+        ljmp    R11
+        nop
+BrushArbiterFilterFallback:
+        ; No staged record or edge was published. Mode zero selects the
+        ; existing unstaged row arbiter without reading a partial list.
+        move    R0, #0
+        move    R11, #$70
+        iwt     R1, #BrushArbiterStageReturn
+        from    R1
+        ljmp    R11
+        nop
+GSU_CACHE_KERNEL_END BrushArbiterFilterRowROM
+.segment "GSU_AUX_CODE"

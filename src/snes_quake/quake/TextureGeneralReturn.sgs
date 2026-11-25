@@ -1,0 +1,13 @@
+; T4 edge overlays return attributes in registers; the general edge helper
+; already publishes them in scratch. Both entries retain the returned X.
+TextureGeneralT4ReturnToROM:
+        sm      (TEXTURE_EDGE_S), R8
+        sm      (TEXTURE_EDGE_T), R9
+        sm      (TEXTURE_EDGE_SHADE), R12
+TextureGeneralReturnToROM:
+        sm      (CONVEX_INTER_RIGHT), R0
+        lm      R0, (CONVEX_INTERPOLATE_RETURN)
+        move    R12, #BSP_GSU_ROM3_BANK
+        from    R0
+        ljmp    R12
+        nop

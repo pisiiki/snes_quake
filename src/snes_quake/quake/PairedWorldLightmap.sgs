@@ -1,0 +1,762 @@
+; Closed-grid, ordinary power-of-two world spans only. The canonical byte grid remains
+; at the front of the existing cache for every fallback and brush consumer.
+PAIR_LIGHTMAP_STRIDE = TEXTURE_SIGN_SHADE
+PAIR_LIGHTMAP_BASE = TEXTURE_PROJECTIVE_RESULT_T
+PAIR_TEXTURE_ROW = TEXTURE_PROJECTIVE_RESULT_S
+PAIR_INLINE_GRID_LIMIT = GSU_LIGHTMAP_CACHE_BYTES / 3
+
+.ifdef PLAYABLE_PAIRED_EXPANDED_GRID
+; The fixed T4 raster rewrites only the first 23 records of this arena
+; across chunks of one face. Larger pairs fit beyond those staged rows.
+PAIR_EXTENDED_GRID = GSU_LIGHTMAP_ROW_STAGE_OFFSET + GSU_LIGHTMAP_TALL_CHUNK_ROWS * 16
+.assert (PAIR_EXTENDED_GRID & 1) = 0, error, "Paired grid must stay word aligned"
+.assert PAIR_EXTENDED_GRID + GSU_LIGHTMAP_CACHE_BYTES <= GSU_LIGHTMAP_ROW_STAGE_OFFSET + GSU_LIGHTMAP_ROW_STAGE_BYTES, error, "Paired grid exceeds idle T4 row scratch"
+.endif
+
+.ifndef PLAYABLE_PAIRED_MIN_SPAN_WIDTH
+PLAYABLE_PAIRED_MIN_SPAN_WIDTH = 33
+.endif
+
+.if .defined(PLAYABLE_PAIRED_CACHED_SHORT_SPANS) && .defined(PLAYABLE_PAIRED_TEXEL_REUSE) && (BSP_COMPOSED_CACHE_SELECTED_FACE_COUNT = 0)
+PAIR_LATE_COLD_SPAN_GUARD = 1
+.endif
+
+.if .defined(PLAYABLE_PAIRED_TEXEL_REUSE) && !.defined(PLAYABLE_PAIRED_NO_PIXEL_REPEAT)
+PAIR_PIXEL_REPEAT = 1
+.endif
+
+.macro PAIR_GRID_SIZE reject
+        lm      R5, (LIGHTMAP_WIDTH)
+        ibt     R1, #64
+        from    R5
+        cmp     R1
+        bcs     reject
+        nop
+        lm      R6, (LIGHTMAP_HEIGHT)
+        from    R5
+        umult   R6
+        ; Raw bytes, alignment and two bytes per sample fit at N <= 170.
+.ifdef PLAYABLE_PAIRED_EXPANDED_GRID
+        iwt     R1, #(GSU_LIGHTMAP_CACHE_BYTES / 2 + 1)
+.else
+        iwt     R1, #(PAIR_INLINE_GRID_LIMIT + 1)
+.endif
+        cmp     R1
+        bcs     reject
+        nop
+.ifdef PLAYABLE_PAIRED_EXPANDED_GRID
+        iwt     R1, #(PAIR_INLINE_GRID_LIMIT + 1)
+        cmp     R1
+        bcc     :+
+        nop
+        iwt     R1, #T4WorldPreparedSpanReturn
+        from    R11
+        cmp     R1
+        bne     reject
+        nop
+:
+.endif
+        move    R12, R0
+.endmacro
+
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+  .define PAIR_PLOT_X R7
+.else
+  .define PAIR_PLOT_X R13
+  .define PAIR_REUSE_KEY R7
+.endif
+
+.macro PAIR_PLOT_POINTERS
+        iwt     R0, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    PAIR_PLOT_X
+        add     R0
+        with    R11
+        add     R0
+.endmacro
+
+.macro PAIR_PUBLISH_TEXTURE_ROW
+        lm      R0, (TEXTURE_STEP_SHADE_Q8)
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        ; The cached row ladder uses one byte per doubling.
+        iwt     R1, #.loword(TextureSamplePowerOfTwoRowShift3)
+        sub     R1
+        lsr
+        iwt     R1, #.loword(PairedTextureRowShift3)
+.else
+        iwt     R1, #.loword(PairedTextureRowShift3-TextureSamplePowerOfTwoRowShift3)
+.endif
+        add     R1
+        sm      (PAIR_TEXTURE_ROW), R0
+.endmacro
+
+.segment "GSU_PAIRED_WORLD_CODE"
+
+WorldPairedCache:
+        cache
+.if !((BSP_COMPOSED_CACHE_SELECTED_FACE_COUNT = 0) && .defined(PLAYABLE_PAIRED_TEXEL_REUSE))
+        PAIR_PUBLISH_TEXTURE_ROW
+.endif
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        jal     PairedReadEndpoint
+        nop
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+        lm      R0, (TEXTURE_SPAN_X)
+PairedBlockSetup:
+        to      R4
+        add     #8
+        lm      R1, (TEXTURE_SPAN_END_X)
+        from    R4
+        cmp     R1
+        bcc     PairedFullBlock
+        nop
+        ; Reuse the original short/final coordinate builder. Its proven
+        ; world continuation reloads this route without changing CBR.
+        iwt     R1, #PairedPixelBegin
+        sm      (TEXTURE_ERR_T), R1
+        GSU_ABSOLUTE_GOTO TextureLightmapBlockSetupCurrentX
+PairedFullBlock:
+        sm      (TEXTURE_SIGN_S), R4
+        jal     PairedReadEndpoint
+        nop
+        ; Exact ordinary eight-step register DDA, including the ninth endpoint.
+        iwt     R3, #$2000
+        lm      R1, (TEXTURE_SPAN_S)
+        from    R5
+        sub     R1
+.ifdef PAIR_PIXEL_REPEAT
+        ; Only reuse within a monotone eight-step block with one integer T.
+        ; A signed endpoint delta within [-63, 63] moves at most eight
+        ; Q4 units per pixel. The low seven bits identify the same texel
+        ; without ambiguity even across a wrapped texture edge.
+        move    R4, R0
+        ibt     R11, #0
+        ibt     R7, #63
+        add     R7
+        ibt     R7, #127
+        cmp     R7
+        bcs     @OrdinaryStep
+        nop
+        lm      R7, (TEXTURE_SPAN_T)
+        from    R6
+        xor     R7
+        ibt     R7, #16
+        cmp     R7
+        bcs     @OrdinaryStep
+        nop
+        inc     R11
+@OrdinaryStep:
+        move    R0, R4
+.endif
+        move    R5, R1
+        move    R10, R6
+        move    R6, R3
+        to      R7
+        lmult
+        move    R9, R4
+        move    R1, R7
+        lm      R2, (TEXTURE_SPAN_T)
+        from    R10
+        sub     R2
+        to      R8
+        lmult
+        move    R6, R2
+        move    R3, R4
+        move    R2, R8
+        move    R12, #8
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        iwt     R13, #PairedCoordinateLoop
+        with    R1
+PairedCoordinateLoop:
+        add     R9
+        with    R5
+        adc     R7
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        with    R2
+        add     R3
+        with    R6
+        adc     R8
+        movew   (R10), R6
+        inc     R10
+        inc     R10
+        loop
+        with    R1
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+.ifdef PAIR_PIXEL_REPEAT
+        moves   R11, R11
+        bne     PairedRepeatBegin
+        nop
+.endif
+PairedPixelBegin:
+        lm      PAIR_PLOT_X, (TEXTURE_SPAN_X)
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        lm      R2, (TEXTURE_PLOT_Y)
+.else
+        lm      R7, (TEXTURE_PLOT_Y)
+.endif
+        lm      R11, (TEXTURE_SIGN_S)
+        ibt     R1, #$FF                ; The stock final-block sentinel is $FFFF.
+        from    R11
+        cmp     R1
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        bne     @PlotRange
+        nop
+        lm      R11, (TEXTURE_SPAN_END_X)
+        inc     R11
+@PlotRange:
+        PAIR_PLOT_POINTERS
+  .ifdef PAIR_PIXEL_REPEAT
+        bra     PairedPixelInit
+        nop
+  .endif
+.else
+        bne     PairedPixel
+        nop
+        lm      R11, (TEXTURE_SPAN_END_X)
+.ifdef PAIR_PIXEL_REPEAT
+        bra     PairedPixel
+        inc     R11
+.endif
+  .ifndef PAIR_PIXEL_REPEAT
+        inc     R11
+        sm      (TEXTURE_SIGN_S), R11
+  .endif
+.endif
+.ifdef PAIR_PIXEL_REPEAT
+PairedRepeatBegin:
+        lm      PAIR_PLOT_X, (TEXTURE_SPAN_X)
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        lm      R2, (TEXTURE_PLOT_Y)
+.else
+        lm      R7, (TEXTURE_PLOT_Y)
+.endif
+        lm      R11, (TEXTURE_SIGN_S)
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        PAIR_PLOT_POINTERS
+.endif
+PairedRepeatRemember:
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        ; PLOT consumes only the low byte of R2.
+        iwt     R1, #$8000
+        with    R2
+        or      R1
+.else
+        ; R7's low byte remains PLOT Y. Its high byte holds the S key
+        ; and a sign bit that identifies the reuse route.
+        ibt     R1, #$80
+        from    R5
+        or      R1
+        lob
+        to      R1
+        swap
+        from    R7
+        lob
+        to      R7
+        or      R1
+.endif
+.endif
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+PairedPixelInit:
+        lm      R13, (PAIR_TEXTURE_ROW)
+        ibt     R12, #$80
+.endif
+PairedPixel:
+.ifndef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        move    R8, R5
+        move    R9, R6
+.endif
+PairedTextureSample:
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+        from    R5
+        and     R1
+  .repeat 3
+        lsr
+  .endrepeat
+        .ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        to      R8
+        lsr
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+        from    R6
+        and     R1
+        jmp     R13
+        nop
+        .else
+        to      R5
+        lsr
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+        with    R6
+        and     R1
+        lm      R12, (PAIR_TEXTURE_ROW)
+        jmp     R12
+        with    R6
+        .endif
+PairedTextureRowShift3:
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        add     R0
+.else
+        add     R6
+        with    R6
+.endif
+PairedTextureRowShift2:
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        add     R0
+.else
+        add     R6
+        with    R6
+.endif
+PairedTextureRowShift1:
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        add     R0
+.else
+        add     R6
+        with    R6
+.endif
+PairedTextureRowReady:
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        add     R8
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R0
+.else
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R6
+.endif
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+PairedTexelReady:
+
+        ; Fractions are bits 7:4, shifted once for signed byte multiply.
+        ibt     R1, #$78
+        from    R5
+        lsr
+        to      R3
+        and     R1
+        from    R6
+        lsr
+        to      R9
+        and     R1
+        ; Keep the signed doubled S block in R8 while R0 combines both axes.
+        from    R5
+        hib
+        sex
+        to      R8
+        add     R0
+        from    R6
+        hib
+        lm      R1, (PAIR_LIGHTMAP_STRIDE)
+        mult    R1
+        add     R8
+        lm      R4, (PAIR_LIGHTMAP_BASE)
+        with    R4
+        add     R0
+        movew   R8, (R4)
+PairedLightSamplesReady:
+        ; Each word holds shade and signed horizontal delta. Only the low
+        ; byte of either interpolation result reaches the palette lookup.
+        from    R8
+        hib
+        mult    R3
+        add     R0
+        sub     R12
+        hib
+        to      R8
+        add     R8
+        moves   R9, R9
+        beq     PairedPaletteShade
+        from    R8
+        ; The zero-T route needs only the top interpolation already in R8.
+        with    R4
+        add     R1
+        movew   R6, (R4)
+        from    R6
+        hib
+        mult    R3
+        add     R0
+        sub     R12
+        hib
+        to      R6
+        add     R6
+        from    R6
+        sub     R8
+        mult    R9
+        add     R0
+        sub     R12
+        hib
+        add     R8
+PairedPaletteShade:
+        ; GETBL keeps the high byte and inserts the buffered texture byte.
+        swap
+        to      R4
+        getbl
+        moveb   R0, (R4)
+        color
+.else
+        getb
+PairedTexelReady:
+        move    R12, R0
+
+        iwt     R1, #$00F0
+        to      R3
+        from    R8
+        and     R1
+        with    R3
+        lsr
+        to      R5
+        from    R9
+        and     R1
+        with    R5
+        lsr
+        with    R8
+        hib
+        with    R8
+        sex
+        with    R8
+        add     R8
+        with    R9
+        hib
+        lm      R1, (PAIR_LIGHTMAP_STRIDE)
+        with    R9
+        mult    R1
+        to      R6
+        from    R8
+        add     R9
+        lm      R4, (PAIR_LIGHTMAP_BASE)
+        with    R4
+        add     R6
+        movew   R8, (R4)
+        move    R6, R8
+        moves   R5, R5
+        beq     PairedLightSamplesReady
+        with    R4
+        add     R1
+        movew   R6, (R4)
+PairedLightSamplesReady:
+        ; Each even word holds shade and signed horizontal delta. The high
+        ; bytes carried by ADD are immaterial to the later signed MULT.
+        iwt     R2, #128
+        from    R8
+        hib
+        mult    R3
+        add     R0
+        add     R2
+        hib
+        to      R4
+        add     R8
+        from    R6
+        hib
+        mult    R3
+        add     R0
+        add     R2
+        hib
+        to      R6
+        add     R6
+        from    R6
+        sub     R4
+        mult    R5
+        add     R0
+        add     R2
+        hib
+        add     R4
+        to      R4
+        lob
+        with    R4
+        swap
+        with    R4
+        add     R12
+        moveb   R0, (R4)
+        color
+.endif
+.ifdef PAIR_PIXEL_REPEAT
+PairedRepeatPlot:
+.endif
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        moveb   R1, (PAIR_PLOT_X)
+.else
+        iwt     R8, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R8
+        add     R13
+        moveb   R1, (R8)
+        move    R2, R7
+.endif
+        plot
+        inc     PAIR_PLOT_X
+        from    PAIR_PLOT_X
+        cmp     R11
+        beq     PairedBoundary
+        nop
+.if .defined(PAIR_PIXEL_REPEAT) && .defined(PLAYABLE_PAIRED_FAST_INTERPOLATION)
+        ; R5 still holds the previous S even when its color was reused.
+        move    R8, R5
+.endif
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+.ifdef PAIR_PIXEL_REPEAT
+  .ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        moves   R2, R2
+        bmi     PairedRepeatCheck
+        from    R8
+  .else
+        moves   PAIR_REUSE_KEY, PAIR_REUSE_KEY
+        bmi     PairedRepeatCheck
+        from    PAIR_REUSE_KEY
+  .endif
+.endif
+        GSU_ABSOLUTE_GOTO PairedPixel
+.ifdef PAIR_PIXEL_REPEAT
+PairedRepeatCheck:
+.ifndef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        hib
+.endif
+        xor     R5
+        ibt     R1, #$70
+        and     R1
+        beq     PairedRepeatPlot
+        nop
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        GSU_ABSOLUTE_GOTO PairedPixel
+.else
+        GSU_ABSOLUTE_GOTO PairedRepeatRemember
+.endif
+.endif
+PairedBoundary:
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+        ; Restore logical X before comparing the span end or saving it.
+        iwt     R0, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    PAIR_PLOT_X
+        sub     R0
+.endif
+        lm      R1, (TEXTURE_SPAN_END_X)
+        from    PAIR_PLOT_X
+        cmp     R1
+        bcc     PairedNextBlock
+        nop
+        iwt     R0, #TextureLightmapInteriorSpanLoop
+        sm      (TEXTURE_ERR_T), R0
+        lm      R11, (TEXTURE_SPAN_RETURN)
+        ret
+        nop
+PairedNextBlock:
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        sm      (TEXTURE_SPAN_X), PAIR_PLOT_X
+        sm      (TEXTURE_SPAN_S), R5
+        sm      (TEXTURE_SPAN_T), R6
+        move    R0, PAIR_PLOT_X
+        GSU_ABSOLUTE_GOTO PairedBlockSetup
+
+PairedReadEndpoint:
+        lm      R10, (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET)
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R10
+        ret
+        nop
+
+.ifdef PLAYABLE_PAIRED_FAST_INTERPOLATION
+.assert (PairedTextureRowShift2-PairedTextureRowShift3)*2 = TextureSamplePowerOfTwoRowShift2-TextureSamplePowerOfTwoRowShift3, error, "Paired texture row offsets differ"
+.assert (PairedTextureRowShift1-PairedTextureRowShift3)*2 = TextureSamplePowerOfTwoRowShift1-TextureSamplePowerOfTwoRowShift3, error, "Paired texture row offsets differ"
+.assert (PairedTextureRowReady-PairedTextureRowShift3)*2 = TextureSamplePowerOfTwoRowReady-TextureSamplePowerOfTwoRowShift3, error, "Paired texture row offsets differ"
+.else
+.assert PairedTextureRowShift2-PairedTextureRowShift3 = TextureSamplePowerOfTwoRowShift2-TextureSamplePowerOfTwoRowShift3, error, "Paired texture row offsets differ"
+.assert PairedTextureRowReady-PairedTextureRowShift3 = TextureSamplePowerOfTwoRowReady-TextureSamplePowerOfTwoRowShift3, error, "Paired texture row offsets differ"
+.endif
+
+.macro PAIR_REUSE_GRID reject, prepare
+        lm      R0, (PAIR_LIGHTMAP_STRIDE)
+.ifdef PLAYABLE_PAIRED_TEXEL_REUSE
+        asr                             ; Positive strides are always even.
+        bmi     reject
+        nop
+.else
+        moves   R0, R0
+.endif
+        beq     prepare
+        nop
+        GSU_ABSOLUTE_GOTO WorldPairedCache
+.endmacro
+
+WorldPairedSpanAdmit:
+        ; The prepared draw entry preserves the logical first and last X.
+        from    R3
+        sub     R1
+.ifdef PAIR_LATE_COLD_SPAN_GUARD
+        ibt     R1, #8                   ; Reuse warm grids for nine or more pixels.
+.else
+        ibt     R1, #(PLAYABLE_PAIRED_MIN_SPAN_WIDTH - 1)
+.endif
+.ifdef PAIR_LATE_COLD_SPAN_GUARD
+        move    R6, R0                   ; Keep width minus one across the proof loads.
+.endif
+        cmp     R1
+        bcc     @Ordinary
+        nop
+        ; Staged world replay owns a positive proof and fixed ordinary route.
+        lm      R0, (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET)
+        moves   R0, R0
+        beq     @Ordinary
+        nop
+.if (BSP_COMPOSED_CACHE_SELECTED_FACE_COUNT = 0) && .defined(PLAYABLE_PAIRED_TEXEL_REUSE)
+        ; Both raw grid decoders and the MSU resume reset the stride. A
+        ; published grid can reuse material admission under this batch's proof.
+        PAIR_REUSE_GRID @Ordinary, @CheckMaterial
+@CheckMaterial:
+  .ifdef PAIR_LATE_COLD_SPAN_GUARD
+        ; Keep the original minimum when the grid still needs conversion.
+        ibt     R1, #(PLAYABLE_PAIRED_MIN_SPAN_WIDTH - 1)
+        from    R6
+        cmp     R1
+        bcc     @Ordinary
+        nop
+  .endif
+.endif
+        lm      R0, (TEXTURE_ERR_T)
+        iwt     R1, #TextureLightmapInteriorSpanLoop
+        cmp     R1
+        bne     @Ordinary
+        nop
+        ; A mixed-axis overlay can share the ordinary span PC.
+        ibt     R1, #(BSP_WORLD_TEXTURE_FLAG_POWER_OF_TWO_AXES | BSP_WORLD_TEXTURE_FLAG_SINGLE_BANK)
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+.ifdef PLAYABLE_PAIRED_TEXEL_REUSE
+        xor     R1
+        lm      R1, (TEXTURE_COMPOSED_ALLOWED)
+        dec     R1
+        or      R1
+.else
+        cmp     R1
+        bne     @Ordinary
+        nop
+        lm      R0, (TEXTURE_COMPOSED_ALLOWED)
+        dec     R0
+.endif
+        bne     @Ordinary
+        nop
+.if !((BSP_COMPOSED_CACHE_SELECTED_FACE_COUNT = 0) && .defined(PLAYABLE_PAIRED_TEXEL_REUSE))
+        PAIR_REUSE_GRID @Ordinary, @NeedPairs
+.endif
+@NeedPairs:
+.ifndef PLAYABLE_PAIRED_TEXEL_REUSE
+        PAIR_GRID_SIZE @Ordinary
+.endif
+        iwt     R8, #.loword(WorldPairedPrepareROM)
+        iwt     R9, #(.bankbyte(WorldPairedPrepareROM) & $7F)
+        from    R8
+        ljmp    R9
+        nop
+@Ordinary:
+        GSU_ABSOLUTE_GOTO TextureDrawSpanLightmappedDenominator
+
+.if FLY_MASK_BATCH_WORLD_CLAIMS
+        .res FLY_MASK_CLAIM_BYTES_OFFSET - (*-WorldPairedCache), $01
+FlyWorldMaskClaimBytes:
+        FLY_WORLD_MASK_CLAIM_BYTES
+.endif
+
+.assert * - WorldPairedCache <= GSU_CACHE_BYTES, error, "Paired world code exceeds one cache"
+.assert .loword(WorldPairedCache) = GSU_PAIRED_WORLD_OFFSET, lderror, "Paired world cache moved"
+
+.segment "GSU_PAIRED_WORLD_ROM_CODE"
+
+WorldPairedPrepareROM:
+.ifdef PLAYABLE_PAIRED_TEXEL_REUSE
+        PAIR_GRID_SIZE @RejectGrid
+        bra     @GridReady
+        nop
+@RejectGrid:
+        ; The raw loader clears the stride on every new face.
+        ibt     R0, #$FF
+        sm      (PAIR_LIGHTMAP_STRIDE), R0
+        move    R9, #$70
+        iwt     R0, #TextureDrawSpanLightmappedDenominator
+        from    R0
+        ljmp    R9
+        nop
+@GridReady:
+.endif
+        ; Raw bytes are immutable. Write even [shade, delta] pairs backwards
+        ; into the unused suffix; the right edge's horizontal delta is zero.
+.ifdef PLAYABLE_PAIRED_EXPANDED_GRID
+        iwt     R1, #(PAIR_INLINE_GRID_LIMIT + 1)
+        from    R12
+        cmp     R1
+        bcc     @InlineGrid
+        nop
+        iwt     R8, #PAIR_EXTENDED_GRID
+        bra     @PairDestinationReady
+        nop
+@InlineGrid:
+.endif
+        from    R12
+        add     #1
+        iwt     R1, #$FFFE
+        and     R1
+        iwt     R8, #GSU_LIGHTMAP_CACHE_OFFSET
+        with    R8
+        add     R0
+.ifdef PLAYABLE_PAIRED_EXPANDED_GRID
+@PairDestinationReady:
+.endif
+        lm      R0, (LIGHTMAP_ADJUSTED_ADDRESS)
+        iwt     R1, #GSU_LIGHTMAP_CACHE_OFFSET
+        sub     R1
+        add     R0
+        add     R8
+        sm      (PAIR_LIGHTMAP_BASE), R0
+        iwt     R10, #GSU_LIGHTMAP_CACHE_OFFSET-1
+        with    R10
+        add     R12
+        from    R12
+        add     R12
+        with    R8
+        add     R0
+        dec     R8
+        dec     R8
+@Row:
+        move    R4, R5
+        moveb   R9, (R10)
+@Column:
+        moveb   R7, (R10)
+        from    R9
+        sub     R7
+        moveb   (R8), R7
+        inc     R8
+        stb     (R8)
+        dec     R8
+        dec     R8
+        dec     R8
+        move    R9, R7
+        dec     R10
+        dec     R4
+        bne     @Column
+        nop
+        dec     R6
+        bne     @Row
+        nop
+.if (BSP_COMPOSED_CACHE_SELECTED_FACE_COUNT = 0) && .defined(PLAYABLE_PAIRED_TEXEL_REUSE)
+        PAIR_PUBLISH_TEXTURE_ROW
+.endif
+        from    R5
+        add     R5
+        sm      (PAIR_LIGHTMAP_STRIDE), R0
+        move    R11, #$70
+        iwt     R0, #WorldPairedCache
+        from    R0
+        ljmp    R11
+        nop

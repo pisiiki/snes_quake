@@ -1,0 +1,63 @@
+; Rare lightmap proof continuation displaced from the mask arithmetic cache.
+; Its sole public entry remains at the original address as a GOTO shim.
+.pushseg
+.segment "GSUCODE"
+LightmapPrepareCachedContinueCold:
+        from    R7
+        sub     R1
+        ; Unsigned SUB carry rejects negative relative blocks as well as high ones.
+        bcc     LightmapPrepareEndTInterior
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+LightmapPrepareEndTInterior:
+        to      R9
+        from    R7
+        sub     R13
+        iwt     R0, #$8000              ; Proven interior block.
+        sm      (LIGHTMAP_BLOCK_FAST), R0
+        moves   R8, R8
+        beq     LightmapPrepareSameS
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+        nop                             ; Pin the following cell-state entries.
+LightmapPrepareSameS:
+        moves   R9, R9
+        beq     LightmapPrepareSameT
+        nop
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
+LightmapPrepareSameT:
+
+        lm      R1, (LIGHTMAP_WIDTH)
+        move    R0, R13
+        umult   R1
+        add     R12
+        move    R6, R0
+        lm      R10, (LIGHTMAP_ROM_ADDRESS)
+        with    R10
+        add     R6
+        moveb   R0, (R10)
+        sm      (LIGHTMAP_BLOCK_UL), R0
+        inc     R10
+        moveb   R0, (R10)
+        sm      (LIGHTMAP_BLOCK_UR), R0
+        dec     R10
+        with    R10
+        add     R1
+        moveb   R0, (R10)
+        sm      (LIGHTMAP_BLOCK_LL), R0
+        inc     R10
+        moveb   R0, (R10)
+        sm      (LIGHTMAP_BLOCK_LR), R0
+        GSU_ABSOLUTE_GOTO LightmapClassifyCachedCell
+        ; The lightmapped edge depth hoist consumes 32 bytes of this cold gap
+        ; while keeping RenderConvexFace and every later cache kernel pinned.
+  .repeat 0
+        nop
+  .endrepeat
+; LDB zero-extends, and the classifier tail jump makes this padding cold.
+.assert * - LightmapPrepareSameT <= $34, error, "Cached lightmap cell exceeds its pinned slot"
+        .res $34 - (* - LightmapPrepareSameT), $01
+LightmapPrepareCachedContinueColdEnd:
+.assert * - LightmapPrepareCachedContinueCold = $59, error, "Cold lightmap proof changed"
+.assert * - GSU_SelectVisibility <= GSU_CODE_CAPACITY, lderror, "Cold lightmap proof exceeds GSUCODE"
+.popseg

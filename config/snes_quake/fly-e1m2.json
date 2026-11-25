@@ -1,0 +1,15 @@
+{
+  "schema": "quake-snes-rom-build-v1",
+  "target": {
+    "mode": "fly",
+    "gameplay": "basic",
+    "map": "maps/e1m2.bsp",
+    "bspSha256": "d0aff066a89cb75bcc4dc729d0130a2ac2ed93287d91e57a5b63ac26dce4fb27"
+  },
+  "bspBuild": {"source": "pak"},
+  "mesenTarget": "mesence-nightly",
+  "aliasSprites": {"halfbankCount": 18},
+  "externalBsp": {"enabled": false},
+  "sound": {"enabled": false, "sampleRateHz": 8000, "volume": 0.7},
+  "sky": {"enabled": true}
+}

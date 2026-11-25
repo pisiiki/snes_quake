@@ -1,6 +1,7 @@
 """Build planar Quake MDL billboards and compact demo entity rows."""
 
 from __future__ import annotations
+from snes_tooling.quake import quake_view_transform
 from snes_tooling.quake.quake_scene_sampling import SCENE_SAMPLING_CONTRACT, sample_scene_track
 
 from snes_tooling import Workspace
@@ -9,8 +10,9 @@ import hashlib
 import math
 import struct
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from typing import Any, Iterable
@@ -66,7 +68,7 @@ from snes_tooling.quake.quake_alias_residency import (  # noqa: E402
     usage_metadata,
     verify_alias_compaction,
 )
-from snes_tooling.quake.quake_alias_shared_states import pair_alias_snapshots
+from snes_tooling.quake.quake_alias_shared_states import pair_alias_snapshots  # noqa: E402
 from snes_tooling.quake.quake_rom_config import (  # noqa: E402
     DEFAULT_CONFIG,
     MAX_ALIAS_HALFBANK_COUNT,
@@ -76,6 +78,9 @@ from snes_tooling.quake.quake_rom_config import (  # noqa: E402
     resolve_configured_demo,
 )
 from snes_tooling.shared.host_resources import physical_core_count  # noqa: E402
+from snes_tooling.quake.quake_mdl_bakes import (  # noqa: E402
+    MdlBakeContext, retain_complete_bakes, summarize_conversion,
+)
 from snes_tooling.quake.quake_billboard_assets import (  # noqa: E402,F401
     BillboardModel,
     BillboardSprite,
@@ -461,8 +466,9 @@ def _wrap_i16(value: int) -> int:
     return ((value + 0x8000) & 0xFFFF) - 0x8000
 
 
-def _alias_mul_shift(value: int, multiplier: int, shift: int) -> int:
-    return _wrap_i16((value * multiplier) >> shift)
+def _alias_mul_shift(value: int, multiplier: int, shift: int, *, nearest=False) -> int:
+    bias = (1 << (shift-1)) if shift == 6 or nearest else 0
+    return _wrap_i16((value * multiplier + bias) >> shift)
 
 
 def _packed_camera_coordinate(
@@ -502,25 +508,8 @@ def _projected_opaque_anchors(
     source_width, source_height, source_pixels = sprite.visibility_raster
     camera = _packed_camera_coordinate(sample, bsp)
     yaw, pitch = _packed_camera_angles(sample)
-    dx = _wrap_i16(state.origin_q2[0] - camera[0] * 4)
-    dy = _wrap_i16(state.origin_q2[1] - camera[1] * 4)
-    dz = _wrap_i16(state.origin_q2[2] - camera[2] * 4)
-    forward = _wrap_i16(
-        _alias_mul_shift(dx, ANGLE_COS_Q6[yaw], 2)
-        + _alias_mul_shift(dy, ANGLE_SIN_Q6[yaw], 2)
-    )
-    right = _wrap_i16(
-        _alias_mul_shift(dy, ANGLE_COS_Q6[yaw], 2)
-        - _alias_mul_shift(dx, ANGLE_SIN_Q6[yaw], 2)
-    )
-    up = _wrap_i16(
-        _alias_mul_shift(dz, ANGLE_COS_Q6[pitch], 2)
-        - _alias_mul_shift(forward, ANGLE_SIN_Q6[pitch], 6)
-    )
-    depth = _wrap_i16(
-        _alias_mul_shift(forward, ANGLE_COS_Q6[pitch], 6)
-        + _alias_mul_shift(dz, ANGLE_SIN_Q6[pitch], 2)
-    )
+    right, up, depth = quake_view_transform.packed_view_transform(state.origin_q2, camera,
+        (ANGLE_COS_Q6[yaw], ANGLE_SIN_Q6[yaw], ANGLE_COS_Q6[pitch], ANGLE_SIN_Q6[pitch]))
     if depth < 64:
         return ()
 
@@ -910,11 +899,12 @@ def _pack_alias_structure(
     deduplicate_rows: bool = True,
     max_chunks: int = MAX_PHYSICAL_HALFBANKS,
     rotation_payload: bytes = b"",
+    physical_halfbanks: tuple[int, ...] = STORAGE_PHYSICAL_HALFBANKS,
 ) -> _PackedAliasStructure:
     """Pack every non-pixel QBA block before bounded sprite selection."""
 
     row_directory_end = HEADER.size + len(rows) * ROW_DIRECTORY.size
-    packer = HalfbankPacker(row_directory_end, max_chunks=max_chunks)
+    packer = HalfbankPacker(row_directory_end, max_chunks=max_chunks, physical_halfbanks=physical_halfbanks)
     sprite_directory_location = packer.place(
         b"\xff" * (sprite_count * SPRITE_DIRECTORY.size), alignment=2
     )
@@ -922,7 +912,7 @@ def _pack_alias_structure(
     static_location = (
         packer.place(static_payload, alignment=2)
         if static_payload
-        else Location(0, row_directory_end, *gsu_location(0, row_directory_end))
+        else packer.location(0, row_directory_end)
     )
     if len(rows) < FLY_ROW_COUNT:
         raise ValueError("alias rows omit the fly suffix")
@@ -962,8 +952,7 @@ def _pack_alias_structure(
         for payload, (blob, offset) in snapshot_blocks.items():
             if payload:
                 base = shared[blob]
-                snapshot_locations[payload] = Location(base.chunk, base.offset+offset,
-                                                      *gsu_location(base.chunk, base.offset+offset))
+                snapshot_locations[payload] = packer.location(base.chunk, base.offset + offset)
         group_locations = {payload:shared[payload] for payload in set(group_payloads) if payload}
     for row, snapshot, groups in zip(rows, snapshots, group_payloads, strict=True):
         snapshot_location = (
@@ -1022,11 +1011,13 @@ def _pack_sprites_exact(
     *,
     max_chunks: int,
     rotation_payload: bytes = b"",
+    physical_halfbanks: tuple[int, ...] = STORAGE_PHYSICAL_HALFBANKS,
 ) -> tuple[_PackedAliasStructure, dict[SpriteRaster, Location]]:
     """Pack every exact frame/view raster or reject the configured density."""
 
     structure = _pack_alias_structure(
-        rows, static_states, len(sprites), max_chunks=max_chunks, rotation_payload=rotation_payload
+        rows, static_states, len(sprites), max_chunks=max_chunks, rotation_payload=rotation_payload,
+        physical_halfbanks=physical_halfbanks,
     )
     structure_bytes = structure.row_directory_end + structure.packer.payload_bytes
     locations: dict[SpriteRaster, Location] = {}
@@ -1046,6 +1037,32 @@ def _pack_sprites_exact(
     return structure, locations
 
 
+def _managed_model_group(task):
+    # Start this process only after its coordinator has acquired a job grant.
+    # A shared process pool eagerly starts idle workers on Windows, outside the
+    # admission of their model jobs. Keep the callback and its socket in parent.
+    with ProcessPoolExecutor(max_workers=1) as executor:
+        return executor.submit(rasterize_model_variants, task).result()
+
+
+def _managed_model_groups(tasks, run_job, workers, cancel_pending):
+    if not tasks:
+        return ()
+    count = min(workers or physical_core_count(), len(tasks))
+    executor = ThreadPoolExecutor(max_workers=count, thread_name_prefix="fly-atlas")
+    try:
+        futures = [executor.submit(run_job, _managed_model_group, task) for task in tasks]
+        return tuple(future.result() for future in futures)
+    except BaseException:
+        # Denied jobs must wake before joining; running raster processes drain
+        # inside their grants before the resource controller can be closed.
+        if cancel_pending is not None:
+            cancel_pending()
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 def build_sprite_atlas(
     sampled: tuple[CameraEntitySample, ...],
     initial_entities: tuple[EntityState, ...],
@@ -1055,6 +1072,10 @@ def build_sprite_atlas(
     bsp: SpatialBsp,
     *,
     mdl_world_units_per_texel: float = 1,
+    mdl_bake_context=None,
+    run_job=None,
+    workers: int | None = None,
+    cancel_pending=None,
 ) -> tuple[dict[VariantKey, int], tuple[BillboardSprite, ...]]:
     """Project retained MDL angles and exact time-selected IDSP subframes."""
 
@@ -1147,10 +1168,12 @@ def build_sprite_atlas(
             model_ids[name],
             mdl_world_units_per_texel,
             task_variants[name],
-        )
+        ) + ((mdl_bake_context,) if mdl_bake_context is not None else ())
         for name in task_variants
     )
-    if len(ordered) >= PARALLEL_VARIANT_THRESHOLD and len(tasks) > 1:
+    if run_job is not None:
+        groups = _managed_model_groups(tasks, run_job, workers, cancel_pending)
+    elif len(ordered) >= PARALLEL_VARIANT_THRESHOLD and len(tasks) > 1:
         with ProcessPoolExecutor(
             max_workers=min(physical_core_count(), len(tasks))
         ) as executor:
@@ -1162,14 +1185,15 @@ def build_sprite_atlas(
         for name, group in zip(task_variants, groups, strict=True)
         for (frame, view), sprite in zip(task_variants[name], group, strict=True)
     }
+    dispatch = run_job or (lambda function: function())
     projected.update(
         {
-            key: rasterize_spr_billboard(
+            key: dispatch(partial(rasterize_spr_billboard,
                 models[key[0]],
                 frame_index=key[1],
                 subframe=key[2],
                 model_id=model_ids[key[0]],
-            )
+            ))
             for key in ordered
             if isinstance(models[key[0]], SprModel)
         }
@@ -1252,6 +1276,8 @@ def build_alias_assets(
         )
         for name in ordered_names
     }
+    bake_context = MdlBakeContext.from_palette(archive.read('gfx/palette.lmp'))
+    master_inventory = retain_complete_bakes(models, bake_context, density=mdl_world_units_per_texel)
     unsupported_sprites = tuple(
         name
         for name, model in models.items()
@@ -1271,6 +1297,7 @@ def build_alias_assets(
         models,
         spatial,
         mdl_world_units_per_texel=mdl_world_units_per_texel,
+        mdl_bake_context=bake_context,
     )
     all_projected_payloads = canonicalize_sprite_rasters(all_projected_sprites)
     all_ordered_variants = tuple(
@@ -1290,6 +1317,7 @@ def build_alias_assets(
                     models[name],
                     mdl_world_units_per_texel=mdl_world_units_per_texel,
                     model_id=model_ids[name],
+                    mdl_bake_context=bake_context,
                 )
             )
         )
@@ -1589,7 +1617,7 @@ def build_alias_assets(
         for row_index, row in enumerate(rows)
         if any(state.sprite_id in effect_runtime_ids for state in row.dynamic_states)
     ]
-    mdl_fidelity = summarize_mdl_raster_fidelity(
+    mdl_fidelity = summarize_conversion(
         (
             sprite
             for (name, _frame, _view), sprite in zip(
@@ -1597,7 +1625,7 @@ def build_alias_assets(
             )
             if not name.endswith(".spr")
         ),
-        mdl_world_units_per_texel,
+        tuple(models[name] for name in ordered_names), bake_context,
     )
     metadata: dict[str, Any] = {
         "schema": "quake-bsp-billboards-v8",
@@ -1620,7 +1648,7 @@ def build_alias_assets(
         "contract": {
             "sceneSampling": SCENE_SAMPLING_CONTRACT,
             "projection": "exact protocol frame; MDLs independently project all eight yaw views and IDSP view-plane-parallel effects preserve source pixels and pivot before runtime-use compaction and exact payload deduplication",
-            "scale": f"density-one MDL projections partition at exact rational multiples of {mdl_world_units_per_texel} Quake world units per texel before modal reduction while density-one opacity controls offline visibility; IDSP effects preserve exact source pixels and pivots",
+            "scale": f"retained quarter-unit MDL masters convert at {mdl_world_units_per_texel} world units per stored texel using area coverage and contrast; actual converted opacity controls offline visibility; IDSP pixels and pivots remain exact",
             "capacity": f"retain every demo/fly survivor plus each active model's exact frame 0 / view 0 raster; fail generation when the complete configured-density set exceeds {max_halfbanks} halfbanks",
             "transparency": "biased u8 texel: zero transparent and palette index plus one opaque; IDSP index 255 is source transparency and is never encoded opaque",
             "lighting": "baked MDL skin or exact IDSP palette index; world/brush lightmaps do not modify billboard texels",
@@ -1631,10 +1659,10 @@ def build_alias_assets(
         },
         "rasterDensity": {
             "mdlWorldUnitsPerTexel": mdl_world_units_per_texel,
-            "mdlVisibilityWorldUnitsPerTexel": 1,
-            "mdlReduction": "identity"
-            if mdl_world_units_per_texel == 1
-            else "opaque-block-preserving-modal-palette-v1",
+            "mdlBakeWorldUnitsPerTexel": 0.25,
+            "mdlVisibilityRaster": "actual-converted-pixels",
+            "mdlReduction": "quarter-area-coverage-contrast-v1",
+            "mdlMasters": master_inventory,
             "idspSourcePixelsPreserved": True,
             "mdlFidelity": mdl_fidelity,
         },

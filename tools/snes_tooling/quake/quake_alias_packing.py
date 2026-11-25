@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 HALFBANK_BYTES = 0x8000
 STORAGE_PHYSICAL_HALFBANKS = (
-    tuple(range(87, 94)) + (14,) + tuple(range(56, 63)) + (37, 15, 55)
+    tuple(range(87, 94)) + (14,) + tuple(range(56, 63)) + (37, 15, 55, 63, 12, 13)
 )
 FIRST_PHYSICAL_HALFBANK = STORAGE_PHYSICAL_HALFBANKS[0]
 MAX_PHYSICAL_HALFBANKS = len(STORAGE_PHYSICAL_HALFBANKS)
@@ -31,10 +31,11 @@ class HalfbankPacker:
         reserved_bytes: int,
         *,
         max_chunks: int = MAX_PHYSICAL_HALFBANKS,
+        physical_halfbanks: tuple[int, ...] = STORAGE_PHYSICAL_HALFBANKS,
     ) -> None:
         if not 0 <= reserved_bytes <= HALFBANK_BYTES:
             raise ValueError("invalid first-halfbank reservation")
-        if not 1 <= max_chunks <= MAX_PHYSICAL_HALFBANKS:
+        if not 1 <= max_chunks <= len(physical_halfbanks):
             raise ValueError("invalid alias halfbank limit")
         self.chunks = [bytearray(b"\xff" * HALFBANK_BYTES)]
         self.cursors = [reserved_bytes]
@@ -42,6 +43,11 @@ class HalfbankPacker:
         self.cursor = reserved_bytes
         self.payload_bytes = 0
         self.max_chunks = max_chunks
+        self.physical_halfbanks = physical_halfbanks
+
+    def location(self, chunk: int, offset: int) -> Location:
+        bank, address = gsu_location(chunk, offset, physical_halfbanks=self.physical_halfbanks)
+        return Location(chunk, offset, bank, address)
 
     def place(self, payload: bytes, *, alignment: int = 1) -> Location:
         if not payload:
@@ -65,8 +71,7 @@ class HalfbankPacker:
         self.cursor = cursor + len(payload)
         self.cursors[self.chunk] = self.cursor
         self.payload_bytes += len(payload)
-        bank, address = gsu_location(self.chunk, cursor)
-        return Location(self.chunk, cursor, bank, address)
+        return self.location(self.chunk, cursor)
 
     def place_compact(self, payload: bytes, *, alignment: int = 1) -> Location:
         """Best-fit one block into any existing halfbank tail, adding one if needed."""
@@ -105,18 +110,19 @@ class HalfbankPacker:
         if chunk == self.chunk:
             self.cursor = self.cursors[chunk]
         self.payload_bytes += len(payload)
-        bank, address = gsu_location(chunk, cursor)
-        return Location(chunk, cursor, bank, address)
+        return self.location(chunk, cursor)
 
 
-def gsu_location(chunk: int, offset: int = 0) -> tuple[int, int]:
+def gsu_location(
+    chunk: int, offset: int = 0, *, physical_halfbanks: tuple[int, ...] = STORAGE_PHYSICAL_HALFBANKS,
+) -> tuple[int, int]:
     """Map QBA1 physical halfbanks to FX3 GSU ROMB addresses."""
 
-    if not 0 <= chunk < MAX_PHYSICAL_HALFBANKS:
+    if not 0 <= chunk < len(physical_halfbanks):
         raise ValueError("alias chunk is outside its reserved physical halfbanks")
     if not 0 <= offset < HALFBANK_BYTES:
         raise ValueError("alias offset is outside a physical halfbank")
-    physical = STORAGE_PHYSICAL_HALFBANKS[chunk]
+    physical = physical_halfbanks[chunk]
     if physical < 64:
         return physical, 0x8000 + offset
     relative = physical - 64
@@ -142,8 +148,7 @@ def place_shared_blocks(packer: HalfbankPacker, payloads, *, alignment: int = 2)
                 offset = parent.find(payload, offset + 1)
             if offset >= 0:
                 start = location.offset + offset
-                bank, address = gsu_location(location.chunk, start)
-                locations[payload] = Location(location.chunk, start, bank, address)
+                locations[payload] = packer.location(location.chunk, start)
                 break
         else:
             location = packer.place_compact(payload, alignment=alignment)
@@ -162,12 +167,12 @@ def place_shared_blocks(packer: HalfbankPacker, payloads, *, alignment: int = 2)
     return locations
 
 
-def cpu_load_address(chunk: int) -> int:
+def cpu_load_address(chunk: int, *, physical_halfbanks: tuple[int, ...] = STORAGE_PHYSICAL_HALFBANKS) -> int:
     """Return the linker address for one GSU-direct alias halfbank."""
 
-    if not 0 <= chunk < MAX_PHYSICAL_HALFBANKS:
+    if not 0 <= chunk < len(physical_halfbanks):
         raise ValueError("alias chunk is outside its reserved physical halfbanks")
-    physical = STORAGE_PHYSICAL_HALFBANKS[chunk]
+    physical = physical_halfbanks[chunk]
     if physical < 64:
         return 0x808000 + physical * 0x10000
     if physical >= 96:

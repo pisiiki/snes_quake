@@ -15,13 +15,16 @@ from dataclasses import dataclass
 from functools import cmp_to_key
 from pathlib import Path
 
-from snes_tooling.quake.quake_release_layout import profile_identity_path
+from snes_tooling.quake.quake_release_layout import (
+    COMPOSED_CACHE_OWNER_PROFILE, COMPOSED_CACHE_PRIORITY_PROFILE, profile_identity_path,
+)
 from typing import Any, Sequence
+from snes_tooling.quake.quake_rom_config import ComposedCachePolicy, configured_composed_cache
 
 
 TOOLS = Workspace.discover().path('tools', 'snes_tooling', 'quake')
 WORKSPACE = Workspace.discover().root
-EXAMPLE = WORKSPACE / "src/snes_quake"
+EXAMPLE = Workspace.discover().quake_example
 SHARED = Workspace.discover().shared_tools
 
 
@@ -47,9 +50,9 @@ from snes_tooling.quake.quake_bsp_composed_cache_profile import (  # noqa: E402
 
 DEFAULT_OUTPUT = EXAMPLE / "Data"
 DEFAULT_DATA_DIR = EXAMPLE / "Data"
-DEFAULT_PROFILE = WORKSPACE / "config/profiles/QuakeBSPComposedCacheOwnerProfile.bin"
+DEFAULT_PROFILE = WORKSPACE / COMPOSED_CACHE_OWNER_PROFILE
 PROFILE_PATTERN = "QuakeBSPComposedCacheOwnerProfile*.bin"
-DEFAULT_PRIORITY_PROFILE = WORKSPACE / "config/profiles/QuakeBSPComposedCachePriorityProfile.json"
+DEFAULT_PRIORITY_PROFILE = WORKSPACE / COMPOSED_CACHE_PRIORITY_PROFILE
 PRIORITY_PROFILE_PATTERN = "QuakeBSPComposedCachePriorityProfile*.json"
 GSU_DIRECT_FIRST_PHYSICAL_BANK = 64
 DIRECTORY_PHYSICAL_BANK = 2
@@ -60,6 +63,19 @@ DIRECTORY_REGION_BYTES = 0x3000
 DEFAULT_FIRST_BANK = 64
 # Payload physical halfbanks 64..86 leave 87..95 for GSU-direct alias assets.
 DEFAULT_BANK_COUNT = 23
+# Fixed LoROM tails verified against the profiled E1M3 linker layout.
+E1M3_TAIL_WINDOWS = (
+    (1, 0xB400),
+    (8, 0xD000),
+    (10, 0xAC00),
+    (11, 0xC000),
+    (20, 0xA000),
+    (21, 0x9800),
+    (22, 0xC000),
+    (25, 0xC800),
+    (36, 0xB000),
+)
+DEFAULT_PRIORITY_HALFBANK_COUNT = 2
 LAST_GSU_DIRECT_PHYSICAL_BANK = 95
 BANK_BYTES = 32 * 1024
 MISS_INDEX = 0xFFFF
@@ -99,6 +115,7 @@ class PriorityProfile:
     owner_pixel_total: int
     owner_counts: tuple[int, ...]
     payload_sha256: str
+    priority_halfbank_count: int = DEFAULT_PRIORITY_HALFBANK_COUNT
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +173,9 @@ class PackedCache:
     directory_bank_bytes: int
     profile: OwnerPixelProfile
     priority_profile: PriorityProfile | None
+    tail_chunks: tuple[tuple[int, int, bytes], ...]
+    demo_weight: int = DEMO_SELECTION_WEIGHT
+    fly_weight: int = FLY_SELECTION_WEIGHT
 
     @property
     def payload_bytes(self) -> int:
@@ -164,8 +184,17 @@ class PackedCache:
     @property
     def main_payload_bytes(self) -> int:
         return sum(
-            placement.size for placement in self.placements[: self.main_placement_count]
+            placement.size for placement in self.placements
+            if self.first_bank <= placement.physical_bank < self.first_bank + self.bank_count
         )
+
+    @property
+    def supplemental_payload_bytes(self) -> int:
+        return sum(len(payload) for _, _, payload in self.tail_chunks)
+
+    @property
+    def supplemental_allocated_bytes(self) -> int:
+        return sum(0x10000 - start for _, start, _ in self.tail_chunks)
 
     @property
     def directory_used_bytes(self) -> int:
@@ -222,6 +251,12 @@ def derive_cache_surfaces(
             )
         )
     return tuple(output)
+
+
+def _validate_priority_halfbank_count(value: object) -> int:
+    if type(value) is not int or not 2 <= value <= 32:
+        raise CacheGenerationError("priority halfbank count must be an integer in 2..32")
+    return value
 
 
 def load_priority_profile(
@@ -287,6 +322,9 @@ def load_priority_profile(
         owner_pixel_total=owner_total,
         owner_counts=tuple(counts),
         payload_sha256=_sha256(payload),
+        priority_halfbank_count=_validate_priority_halfbank_count(
+            document.get("priorityHalfbankCount", DEFAULT_PRIORITY_HALFBANK_COUNT)
+        ),
     )
 
 
@@ -424,23 +462,29 @@ def compare_profile_scores(
     left: CacheSurface,
     right: CacheSurface,
     profile: OwnerPixelProfile,
+    demo_weight: int = DEMO_SELECTION_WEIGHT,
+    fly_weight: int = FLY_SELECTION_WEIGHT,
 ) -> int:
-    """Compare exact normalized 3:1 demo/fly benefit per composed byte."""
+    """Compare exact configured demo/fly benefit per composed byte."""
 
-    left_weight = normalized_selection_weight(profile, left.face)
-    right_weight = normalized_selection_weight(profile, right.face)
+    left_weight = normalized_selection_weight(profile, left.face, demo_weight, fly_weight)
+    right_weight = normalized_selection_weight(profile, right.face, demo_weight, fly_weight)
     cross = left_weight * right.size - right_weight * left.size
     if cross:
         return -1 if cross > 0 else 1
     return (left.face > right.face) - (left.face < right.face)
 
 
-def normalized_selection_weight(profile: OwnerPixelProfile, face: int) -> int:
-    """Return the exact common-denominator 3:1 normalized corpus weight."""
+def normalized_selection_weight(
+    profile: OwnerPixelProfile, face: int,
+    demo_weight: int = DEMO_SELECTION_WEIGHT,
+    fly_weight: int = FLY_SELECTION_WEIGHT,
+) -> int:
+    """Return the exact common-denominator configured corpus weight."""
 
     return (
-        DEMO_SELECTION_WEIGHT * profile.demo_counts[face] * profile.fly_total
-        + FLY_SELECTION_WEIGHT * profile.fly_counts[face] * profile.demo_total
+        demo_weight * profile.demo_counts[face] * profile.fly_total
+        + fly_weight * profile.fly_counts[face] * profile.demo_total
     )
 
 
@@ -472,15 +516,29 @@ def pack_cache(
     bank_bytes: int = BANK_BYTES,
     directory_bank_bytes: int = DIRECTORY_REGION_BYTES,
     priority_profile: PriorityProfile | None = None,
+    tail_windows: Sequence[tuple[int, int]] = (),
+    demo_weight: int = DEMO_SELECTION_WEIGHT,
+    fly_weight: int = FLY_SELECTION_WEIGHT,
 ) -> PackedCache:
-    """Pack the balanced banks, then use directory slack for the limiter."""
+    """Pack profile-configured priority halfbanks, then balanced banks and slack."""
 
+    if any(type(value) is not int or not 0 <= value <= 65535
+           for value in (demo_weight, fly_weight)) or demo_weight + fly_weight == 0:
+        raise CacheGenerationError("selection weights must be unsigned 16-bit integers with positive sum")
     _validate_pack_request(
         surfaces, face_count, profile, first_bank, bank_count, bank_bytes
     )
     if not 0 < directory_bank_bytes <= BANK_BYTES:
         raise CacheGenerationError("directory bank size must be in 1..32768")
+    priority_halfbanks = DEFAULT_PRIORITY_HALFBANK_COUNT
     if priority_profile is not None:
+        priority_halfbanks = _validate_priority_halfbank_count(
+            priority_profile.priority_halfbank_count
+        )
+        # Preserve the legacy one-halfbank directory-tail-only fallback. An
+        # expanded priority policy must fit the unchanged total payload budget.
+        if priority_halfbanks > max(DEFAULT_PRIORITY_HALFBANK_COUNT, bank_count):
+            raise CacheGenerationError("priority halfbank count exceeds total bank count")
         if priority_profile.face_count != face_count:
             raise CacheGenerationError("priority profile lost exact face identity")
         if len(priority_profile.owner_counts) != face_count:
@@ -501,70 +559,96 @@ def pack_cache(
         raise CacheGenerationError(
             "a limiting-frame spanning surface needs an even low halfbank pair"
         )
-    spanning_faces = {surface.face for surface in spanning_candidates}
-    oversized = sum(
-        surface.size > bank_bytes and surface.face not in spanning_faces
-        for surface in surfaces
-    )
+    has_aligned_pair = bank_bytes == BANK_BYTES and bank_count - (first_bank & 1) >= 2
+    max_span = 2 * bank_bytes if has_aligned_pair else bank_bytes
+    oversized = sum(surface.size > max_span for surface in surfaces)
     width_over_255 = sum(surface.width > 255 for surface in surfaces)
     height_over_256 = sum(surface.height > 256 for surface in surfaces)
-    eligible = [surface for surface in surfaces if 0 < surface.size <= bank_bytes]
-
-    spanning_candidates.sort(
-        key=cmp_to_key(
-            lambda left, right: compare_priority_scores(left, right, priority_profile)
-        )
-    )
-
+    eligible = [surface for surface in surfaces if 0 < surface.size <= max_span]
     eligible.sort(
-        key=cmp_to_key(lambda left, right: compare_profile_scores(left, right, profile))
+        key=cmp_to_key(lambda left, right: compare_profile_scores(left, right, profile, demo_weight, fly_weight))
     )
     chunks: list[bytearray] = []
     chunk_used: list[int] = []
     placements: list[Placement] = []
 
-    if spanning_candidates:
-        surface = spanning_candidates[0]
-        chunks.extend((bytearray(bank_bytes), bytearray(bank_bytes)))
-        chunks[0][:bank_bytes] = surface.pixels[:bank_bytes]
-        tail_bytes = surface.size - bank_bytes
-        chunks[1][:tail_bytes] = surface.pixels[bank_bytes:]
-        chunk_used.extend((bank_bytes, tail_bytes))
-        bank, address = gsu_location_for_physical_halfbank(first_bank)
-        placements.append(
-            Placement(
-                descriptor=0,
-                face=surface.face,
-                physical_bank=first_bank,
-                bank=bank,
-                address=address,
-                minimum_s=surface.minimum_s,
-                minimum_t=surface.minimum_t,
-                width=surface.width,
-                height=surface.height,
-                size=surface.size,
-            )
-        )
+    priority_selected: set[int] = set()
+    if priority_profile is not None and bank_count >= 2:
+        priority_candidates = [
+            surface for surface in eligible
+            if priority_profile.owner_counts[surface.face] > 0
+        ]
+        priority_candidates.sort(key=cmp_to_key(
+            lambda left, right: compare_priority_scores(left, right, priority_profile)
+        ))
+        if priority_candidates:
+            chunks.extend(bytearray(bank_bytes) for _ in range(priority_halfbanks))
+            chunk_used.extend([0] * priority_halfbanks)
+        for surface in priority_candidates:
+            if surface.size > bank_bytes:
+                # A spanning descriptor must remain in the first aligned GSU
+                # bank. Its suffix is contiguous only while halfbank one is empty.
+                if chunk_used[1] or surface.size > 2 * bank_bytes - chunk_used[0]:
+                    continue
+                offset = chunk_used[0]
+                first_bytes = bank_bytes - offset
+                chunks[0][offset:] = surface.pixels[:first_bytes]
+                tail_bytes = surface.size - first_bytes
+                chunks[1][:tail_bytes] = surface.pixels[first_bytes:]
+                chunk_used[:2] = (bank_bytes, tail_bytes)
+                chunk_index = 0
+            else:
+                chunk_index = next((index for index, used in enumerate(chunk_used)
+                    if surface.size <= bank_bytes - used), None)
+                if chunk_index is None:
+                    continue
+                offset = chunk_used[chunk_index]
+                end = offset + surface.size
+                chunks[chunk_index][offset:end] = surface.pixels
+                chunk_used[chunk_index] = end
+            physical_bank = first_bank + chunk_index
+            bank, address = gsu_location_for_physical_halfbank(physical_bank, offset)
+            placements.append(Placement(
+                descriptor=len(placements), face=surface.face,
+                physical_bank=physical_bank, bank=bank, address=address,
+                minimum_s=surface.minimum_s, minimum_t=surface.minimum_t,
+                width=surface.width, height=surface.height, size=surface.size,
+            ))
+            priority_selected.add(surface.face)
 
     for surface in eligible:
-        chunk_index = next(
-            (
-                index
-                for index, used in enumerate(chunk_used)
-                if surface.size <= bank_bytes - used
-            ),
-            None,
-        )
-        if chunk_index is None:
-            if len(chunks) == bank_count:
-                continue
+        if surface.face in priority_selected:
+            continue
+        for chunk_index in range(bank_count):
+            offset = chunk_used[chunk_index] if chunk_index < len(chunks) else 0
+            end = offset + surface.size
+            if end <= bank_bytes:
+                break
+            # Larger faces can cross an aligned pair only while its upper
+            # half is empty, so every byte remains in one GSU ROM bank.
+            if (
+                has_aligned_pair
+                and surface.size > bank_bytes
+                and offset < bank_bytes
+                and not ((first_bank + chunk_index) & 1)
+                and chunk_index + 1 < bank_count
+                and (chunk_index + 1 >= len(chunks) or not chunk_used[chunk_index + 1])
+                and end <= 2 * bank_bytes
+            ):
+                break
+        else:
+            continue
+        last_index = chunk_index + (end > bank_bytes)
+        while len(chunks) <= last_index:
             chunks.append(bytearray(bank_bytes))
             chunk_used.append(0)
-            chunk_index = len(chunks) - 1
-        offset = chunk_used[chunk_index]
-        end = offset + surface.size
-        chunks[chunk_index][offset:end] = surface.pixels
-        chunk_used[chunk_index] = end
+        first_bytes = min(surface.size, bank_bytes - offset)
+        chunks[chunk_index][offset:offset + first_bytes] = surface.pixels[:first_bytes]
+        chunk_used[chunk_index] = offset + first_bytes
+        if last_index != chunk_index:
+            tail_bytes = surface.size - first_bytes
+            chunks[last_index][:tail_bytes] = surface.pixels[first_bytes:]
+            chunk_used[last_index] = tail_bytes
         physical_bank = first_bank + chunk_index
         bank, address = gsu_location_for_physical_halfbank(physical_bank, offset)
         placement = Placement(
@@ -581,13 +665,30 @@ def pack_cache(
         )
         placements.append(placement)
 
+    selected_faces = {item.face for item in placements}
+    tail_chunks = [bytearray() for _ in tail_windows]
+    for surface in eligible:
+        if surface.face in selected_faces:
+            continue
+        for (bank, start), payload in zip(tail_windows, tail_chunks, strict=True):
+            address = start + len(payload)
+            if address + surface.size > 0x10000:
+                continue
+            payload.extend(surface.pixels)
+            placements.append(Placement(
+                descriptor=len(placements), face=surface.face,
+                physical_bank=bank, bank=bank, address=address,
+                minimum_s=surface.minimum_s, minimum_t=surface.minimum_t,
+                width=surface.width, height=surface.height, size=surface.size,
+            ))
+            break
     main_placement_count = len(placements)
     directory_payload = bytearray()
     if priority_profile is not None:
         selected_faces = {placement.face for placement in placements}
         priority_candidates = [
             surface
-            for surface in (*eligible, *spanning_candidates)
+            for surface in eligible
             if surface.face not in selected_faces
             and priority_profile.owner_counts[surface.face] > 0
         ]
@@ -656,18 +757,22 @@ def pack_cache(
         tuple(placements),
         main_placement_count,
         len(surfaces),
-        len(eligible) + len(spanning_candidates),
+        len(eligible),
         zero_sized,
         oversized,
         width_over_255,
         height_over_256,
-        len(eligible) + len(spanning_candidates) - len(placements),
+        len(eligible) - len(placements),
         first_bank,
         bank_count,
         bank_bytes,
         directory_bank_bytes,
         profile,
         priority_profile,
+        tuple((bank, start, bytes(payload))
+              for (bank, start), payload in zip(tail_windows, tail_chunks, strict=True)),
+        demo_weight,
+        fly_weight,
     )
 
 
@@ -704,6 +809,19 @@ def metadata_for(
         }
         for index, payload in enumerate(packed.chunks)
     ]
+    chunks.extend(
+        {
+            "index": packed.bank_count + index,
+            "physicalBank": bank,
+            "gsuBank": bank,
+            "gsuAddress": start,
+            "file": chunk_path(packed.bank_count + index).as_posix(),
+            "bytes": len(payload),
+            "sha256": _sha256(payload),
+        }
+        for index, (bank, start, payload) in enumerate(packed.tail_chunks)
+        if payload
+    )
     placements = [
         {
             "descriptor": item.descriptor,
@@ -723,9 +841,9 @@ def metadata_for(
                 priority.owner_counts[item.face] if priority is not None else 0
             ),
             "storageTier": (
-                "mainBanks"
-                if item.descriptor < packed.main_placement_count
-                else "directoryTail"
+                "directoryTail" if item.descriptor >= packed.main_placement_count
+                else "mainBanks" if packed.first_bank <= item.physical_bank < packed.first_bank + packed.bank_count
+                else "supplementalWindow"
             ),
         }
         for item in packed.placements
@@ -739,17 +857,22 @@ def metadata_for(
         else 0
     )
     weighted_coverage_numerator = (
-        DEMO_SELECTION_WEIGHT * selected_demo * profile.fly_total
-        + FLY_SELECTION_WEIGHT * selected_fly * profile.demo_total
+        packed.demo_weight * selected_demo * profile.fly_total
+        + packed.fly_weight * selected_fly * profile.demo_total
     )
     weighted_coverage_denominator = (
-        (DEMO_SELECTION_WEIGHT + FLY_SELECTION_WEIGHT)
+        (packed.demo_weight + packed.fly_weight)
         * profile.demo_total
         * profile.fly_total
     )
     used_last_bank = (
         packed.first_bank + len(packed.chunks) - 1 if packed.chunks else None
     )
+    priority_halfbanks = (
+        priority.priority_halfbank_count if priority is not None
+        else 0
+    )
+    priority_halfbank_name = "two" if priority_halfbanks == 2 else str(priority_halfbanks)
     return {
         "schema": "quake-bsp-composed-cache-v1",
         "source": {
@@ -759,23 +882,30 @@ def metadata_for(
         "contract": {
             "composition": "exact technique-4 albedo plus static lightmap",
             "selectionOrder": (
-                "descending exact (3*demo/demoTotal + fly/flyTotal)/surfaceBytes; "
+                (f"after the {priority_halfbank_name}-bank priority pass, " if priority else "")
+                + "descending exact "
+                + f"({packed.demo_weight}*demo/demoTotal + {packed.fly_weight}*fly/flyTotal)/surfaceBytes; "
                 "source face ID ascending breaks ties; comparisons use integer "
                 "cross-products"
             ),
             "directoryTailSelectionOrder": (
                 "descending limiting-frame ownerPixels/(surfaceBytes+descriptorBytes); "
                 "source face ID ascending breaks ties; main-bank selections remain "
-                "unchanged"
+                "unchanged" if priority else "disabled"
+            ),
+            "priorityMainBankBudget": priority_halfbanks,
+            "prioritySelectionOrder": (
+                "descending limiting-frame ownerPixels/(surfaceBytes+descriptorBytes); "
+                "source face ID ascending breaks ties; first-fit within the first "
+                f"{priority_halfbank_name} halfbanks before unchanged balanced selection" if priority else "disabled"
             ),
             "spanningSelectionOrder": (
-                "highest limiting-frame ownerPixels/(surfaceBytes+descriptorBytes) "
-                "surface in 32769..65536 bytes occupies the first paired low/high "
-                "GSU ROM bank before balanced first-fit selection"
+                "surfaces in 32769..65536 bytes may occupy a contiguous tail of "
+                "an aligned low/high GSU ROM bank pair; the priority pass uses the first pair"
             ),
             "selectionWeights": {
-                "demo": DEMO_SELECTION_WEIGHT,
-                "fly": FLY_SELECTION_WEIGHT,
+                "demo": packed.demo_weight,
+                "fly": packed.fly_weight,
             },
             "selectionNormalization": "each corpus is divided by its owner-pixel total",
             "packing": "deterministic first-fit in ranking order",
@@ -857,13 +987,24 @@ def metadata_for(
             "lastBank": packed.first_bank + packed.bank_count - 1,
             "bankCount": packed.bank_count,
             "bankBytes": packed.bank_bytes,
-            "budgetBytes": packed.bank_count * packed.bank_bytes,
+            "budgetBytes": packed.bank_count * packed.bank_bytes
+            + sum(0x10000 - start for _, start, _ in packed.tail_chunks),
+            "supplementalWindows": [
+                {"physicalBank": bank, "gsuAddress": start, "usedBytes": len(payload)}
+                for bank, start, payload in packed.tail_chunks
+            ],
         },
         "selection": {
             "sourceFaceCount": len(assets.faces),
             "eligibleFaceCount": packed.eligible_faces,
             "selectedFaceCount": len(packed.placements),
-            "mainSelectedFaceCount": packed.main_placement_count,
+            "mainSelectedFaceCount": sum(
+                packed.first_bank <= item.physical_bank < packed.first_bank + packed.bank_count
+                for item in packed.placements),
+            "supplementalSelectedFaceCount": sum(
+                item.descriptor < packed.main_placement_count
+                and not packed.first_bank <= item.physical_bank < packed.first_bank + packed.bank_count
+                for item in packed.placements),
             "directoryTailSelectedFaceCount": (
                 len(packed.placements) - packed.main_placement_count
             ),
@@ -900,6 +1041,12 @@ def metadata_for(
             "mainPaddingBytes": (
                 len(packed.chunks) * packed.bank_bytes - packed.main_payload_bytes
             ),
+            "supplementalPayloadBytes": packed.supplemental_payload_bytes,
+            "supplementalAllocatedBytes": packed.supplemental_allocated_bytes,
+            "supplementalPaddingBytes": packed.supplemental_allocated_bytes - packed.supplemental_payload_bytes,
+            "totalAllocatedBytes": len(packed.chunks) * packed.bank_bytes
+                + packed.supplemental_allocated_bytes + packed.directory_bank_bytes,
+            "totalUsedBytes": packed.main_payload_bytes + packed.supplemental_payload_bytes + packed.directory_used_bytes,
             "directoryPayloadBytes": len(packed.directory_payload),
             "directoryUsedBytes": packed.directory_used_bytes,
             "directoryPaddingBytes": (
@@ -1018,6 +1165,17 @@ def assembly_assets_for(packed: PackedCache) -> bytes:
                 f'.assert __{segment}_LOAD__ = ${load:06X}, lderror, "Composed-cache physical halfbank {packed.first_bank + index} moved"',
             )
         )
+    for index, (bank, start, payload) in enumerate(packed.tail_chunks, packed.bank_count):
+        if not payload:
+            continue
+        segment = f"BSP_COMPOSED_{index}"
+        load = ((0x80 + bank) << 16) | start
+        lines.extend((
+            f'.segment "{segment}"',
+            f'        .incbin "Data/{chunk_path(index).as_posix()}"',
+            f'.assert __{segment}_LOAD__ = ${load:06X}, lderror, "Composed-cache tail moved"',
+            f'.assert __{segment}_SIZE__ = {len(payload)}, lderror, "Composed-cache tail size changed"',
+        ))
     lines.append("")
     return "\n".join(lines).encode("ascii")
 
@@ -1061,6 +1219,11 @@ def outputs_for(
     )
     outputs.update(
         (chunk_path(index), payload) for index, payload in enumerate(reserved_chunks)
+    )
+    outputs.update(
+        (chunk_path(index), payload)
+        for index, (_, _, payload) in enumerate(packed.tail_chunks, packed.bank_count)
+        if payload
     )
     return outputs
 
@@ -1132,7 +1295,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--profile", type=Path)
-    parser.add_argument("--priority-profile", type=Path)
+    parser.add_argument("--config", type=Path, help="ROM configuration declaring composedCache policy")
+    parser.add_argument("--demo-weight", type=int)
+    parser.add_argument("--fly-weight", type=int)
+    priority = parser.add_mutually_exclusive_group()
+    priority.add_argument("--priority-profile", type=Path)
+    priority.add_argument("--no-priority-profile", action="store_true")
     parser.add_argument("--profile-dir", type=Path, default=DEFAULT_PROFILE.parent)
     parser.add_argument("--first-bank", type=_parse_integer, default=DEFAULT_FIRST_BANK)
     parser.add_argument("--bank-count", type=_parse_integer, default=DEFAULT_BANK_COUNT)
@@ -1140,10 +1308,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def selection_policy(args: argparse.Namespace) -> ComposedCachePolicy:
+    policy = configured_composed_cache(args.config) if args.config else ComposedCachePolicy()
+    demo = policy.demo_weight if args.demo_weight is None else args.demo_weight
+    fly = policy.fly_weight if args.fly_weight is None else args.fly_weight
+    enabled = policy.priority and not args.no_priority_profile
+    if args.priority_profile and not enabled:
+        raise CacheGenerationError("explicit priority profile conflicts with disabled priority policy")
+    if any(type(value) is not int or not 0 <= value <= 65535 for value in (demo, fly)) or demo + fly == 0:
+        raise CacheGenerationError("selection weights must be unsigned 16-bit integers with positive sum")
+    return ComposedCachePolicy(demo, fly, enabled)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     started = time.perf_counter()
     args = parse_args(argv)
     try:
+        policy = selection_policy(args)
         assets = load_assets(args.data_dir.resolve())
         map_entry = _configured_map_entry(args.data_dir.resolve())
         profile_dir = args.profile_dir.resolve()
@@ -1160,8 +1341,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if map_entry == "maps/e1m3.bsp" and configured_profile is not None:
             profile = configured_profile
-            priority_profile, selected_priority_profile_path = select_priority_profile(
-                priority_paths, assets
+            priority_profile, selected_priority_profile_path = (
+                select_priority_profile(priority_paths, assets) if policy.priority else (None, None)
             )
             surfaces, source = build_surfaces(assets)
             cache_surfaces = derive_cache_surfaces(assets, surfaces)
@@ -1187,6 +1368,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             first_bank=args.first_bank,
             bank_count=args.bank_count,
             priority_profile=priority_profile,
+            demo_weight=policy.demo_weight, fly_weight=policy.fly_weight,
+            tail_windows=E1M3_TAIL_WINDOWS
+            if cache_surfaces and (args.first_bank, args.bank_count) == (DEFAULT_FIRST_BANK, DEFAULT_BANK_COUNT)
+            else (),
         )
         sync_generated_outputs(
             outputs_for(

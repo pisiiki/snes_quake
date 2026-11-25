@@ -1,0 +1,23 @@
+; Exact signed two-axis plane distance. Inputs use registers only.
+; R1/R2 are coordinates, R6/R7 coefficients, R8/R9 the distance.
+; Return the low word in R4 and the high word in R0.
+.segment "BSP_WEAPON_FX3_CODE"
+.export CollisionFx3PlaneDistanceGSU
+CollisionFx3PlaneDistanceGSU:
+        move    R0, R1
+        lmult
+        move    R10, R4
+        move    R11, R0
+        move    R6, R7
+        move    R0, R2
+        lmult
+        with    R4
+        add     R10
+        with    R0
+        adc     R11
+        with    R4
+        sub     R8
+        with    R0
+        sbc     R9
+        stop
+        nop

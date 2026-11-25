@@ -1,0 +1,25 @@
+; The 65816 publishes all actor origins atomically in bank $70 before launch.
+; Other renderer state and all callers use data bank $71.
+NailReadPose:
+        move    R0, #0
+        ramb
+        movew   R4, (R10)
+        move    R0, #1
+        ramb
+        move    R0, R4
+        ret
+        nop
+NailReadOrigin:
+        move    R0, #0
+        ramb
+        movew   R1, (R10)
+        inc     R10
+        inc     R10
+        movew   R2, (R10)
+        inc     R10
+        inc     R10
+        movew   R3, (R10)
+        move    R0, #1
+        ramb
+        ret
+        nop

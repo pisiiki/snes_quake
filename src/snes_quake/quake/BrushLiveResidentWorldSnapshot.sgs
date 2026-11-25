@@ -1,0 +1,92 @@
+; A repeated opaque key earns a snapshot if an alias will modify the buffer.
+.export AliasResidentWorldSaveResume:far, BrushResidentWorldRestoreResume:far
+
+RESIDENT_VALID = 1
+RESIDENT_DIRTY = 2
+RESIDENT_SAVED = 4
+RESIDENT_WARM = 8
+
+BrushRenderResidentWorld:
+        lm      R0, (GSU_RESIDENT_WORLD_COMMAND)
+        dec     R0
+        beq     @Enabled
+        nop
+        GSU_ABSOLUTE_GOTO BrushRenderMixedTokens
+@Enabled:
+        move    R0, #2
+        sm      (GSU_RESIDENT_WORLD_COMMAND), R0
+        lm      R3, (GSU_RESIDENT_WORLD_STATUS)
+        move    R2, R3
+        with    R2
+        and     #RESIDENT_VALID
+        dec     R2
+        COMPARE_RESIDENT_WORLD_WORD WEAPON_OBJ_CORE_FLAG, GSU_RESIDENT_WORLD_MASK
+        COMPARE_RESIDENT_WORLD_WORD BRUSH_OVERLAY_FLAGS, GSU_BRUSH_MERGE_CACHE_FLAGS
+        COMPARE_RESIDENT_WORLD_WORD GSU_TELEMETRY_BRUSH_VISUAL_STATE, GSU_BRUSH_MERGE_CACHE_VISUAL
+        COMPARE_RESIDENT_WORLD_WORD COMMAND+14, GSU_BRUSH_MERGE_CACHE_ACTIVE
+        moves   R2, R2
+        beq     @Matching
+        nop
+        move    R0, #RESIDENT_VALID
+        sm      (GSU_RESIDENT_WORLD_STATUS), R0
+        GSU_ABSOLUTE_GOTO BrushRenderMixedTokens
+@Matching:
+        move    R0, R3
+        and     #RESIDENT_DIRTY
+        bne     ResidentWorldDirtyHit
+        nop
+        with    R3
+        or      #RESIDENT_WARM
+        sm      (GSU_RESIDENT_WORLD_STATUS), R3
+ResidentWorldDrawAliasSuffix:
+        lm      R0, (BRUSH_TOKEN_COUNT)
+        lm      R1, (ALIAS_TOKEN_COUNT)
+        sub     R1
+        GSU_ABSOLUTE_GOTO BrushRenderMixedTokensAtCursor
+ResidentWorldDirtyHit:
+        move    R0, R3
+        and     #RESIDENT_SAVED
+        bne     @Restore
+        nop
+        move    R0, #(RESIDENT_VALID | RESIDENT_WARM)
+        sm      (GSU_RESIDENT_WORLD_STATUS), R0
+        GSU_ABSOLUTE_GOTO BrushRenderMixedTokens
+@Restore:
+        move    R0, #RESIDENT_WORLD_RESTORE
+        sm      (GSU_RESIDENT_WORLD_COMMAND), R0
+        stop
+        nop
+BrushResidentWorldRestoreResume:
+        move    R0, #(RESIDENT_VALID | RESIDENT_SAVED | RESIDENT_WARM)
+        sm      (GSU_RESIDENT_WORLD_STATUS), R0
+        GSU_ABSOLUTE_GOTO ResidentWorldDrawAliasSuffix
+
+AliasInvalidateResidentWorldAndPrepareSteps:
+        lm      R3, (GSU_RESIDENT_WORLD_STATUS)
+        move    R0, R3
+        and     #(RESIDENT_VALID | RESIDENT_DIRTY)
+        dec     R0
+        bne     ResidentWorldPrepareAlias
+        nop
+        move    R0, R3
+        sub     #(RESIDENT_VALID | RESIDENT_WARM)
+        bne     ResidentWorldMarkAliasDirty
+        nop
+        lm      R0, (GSU_TURBULENCE_PRESENT_OFFSET)
+        lm      R1, (GSU_SKY_PRESENT_OFFSET)
+        or      R1
+        bne     ResidentWorldMarkAliasDirty
+        nop
+        GSU_FLUSH_PLOT 0, 0
+        move    R0, #RESIDENT_WORLD_SAVE
+        sm      (GSU_RESIDENT_WORLD_COMMAND), R0
+        stop
+        nop
+AliasResidentWorldSaveResume:
+        move    R3, #(RESIDENT_VALID | RESIDENT_SAVED | RESIDENT_WARM)
+ResidentWorldMarkAliasDirty:
+        with    R3
+        or      #RESIDENT_DIRTY
+        sm      (GSU_RESIDENT_WORLD_STATUS), R3
+ResidentWorldPrepareAlias:
+        GSU_ABSOLUTE_GOTO AliasPrepareRasterSteps

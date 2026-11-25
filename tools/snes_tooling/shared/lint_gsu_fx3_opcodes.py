@@ -74,6 +74,16 @@ IMMEDIATE_MOVE_PATTERN = re.compile(
     r"^\s*move\s+r(?:1[0-5]|[0-9])\s*,\s*#.+$",
     re.IGNORECASE,
 )
+ZERO_REGISTER_LOGICAL_PATTERN = re.compile(
+    r"^\s*(and|or)\s+r0\s*$", re.IGNORECASE
+)
+COMPARE_OPCODES = {"cmp", "mcmp"}
+INDIRECT_MEMORY_OPCODES = {
+    "moveb", "movew", "ldb", "ldw", "stb", "stw", "mldb", "mldw", "mstb", "mstw",
+}
+INVALID_ADDRESS_REGISTER = re.compile(
+    r"(?:^|,)\s*\(\s*(r1[2-5])\s*\)\s*(?=,|$)", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -174,6 +184,36 @@ def _unsafe_delay_slot_pseudo(text: str, opcode: str) -> str | None:
     return "MOVE" if REGISTER_MOVE_PATTERN.fullmatch(code) else None
 
 
+def _unencodable_zero_register_logical(text: str) -> str | None:
+    code = _strip_comment(text).strip()
+    while True:
+        label = LABEL_PATTERN.match(code)
+        if not label:
+            break
+        code = code[label.end() :]
+    match = ZERO_REGISTER_LOGICAL_PATTERN.fullmatch(code)
+    return match.group(1).upper() if match else None
+
+
+def _unencodable_operand(code: str, opcode: str) -> str | None:
+    if opcode not in COMPARE_OPCODES and opcode not in INDIRECT_MEMORY_OPCODES:
+        return None
+    while label := LABEL_PATTERN.match(code):
+        code = code[label.end() :]
+    operands = code.strip()[len(opcode) :].lstrip()
+    if opcode in COMPARE_OPCODES and operands.startswith("#"):
+        return "CMP requires a register operand from R0 through R15"
+    if opcode in INDIRECT_MEMORY_OPCODES:
+        match = INVALID_ADDRESS_REGISTER.search(operands)
+        if match:
+            register = match.group(1).upper()
+            return (
+                f"{opcode.upper()} cannot use {register} as an indirect address. "
+                "Use R0 through R11 for the address register"
+            )
+    return None
+
+
 def _unsafe_delay_slot_operand_bytes(text: str, opcode: str) -> str | None:
     """Name statements whose opcode needs bytes after a taken transfer."""
     if opcode in OPERAND_BYTE_DELAY_OPCODES:
@@ -264,6 +304,26 @@ def _scan(
             reason = None
         if reason:
             violations.append(Fx3OpcodeViolation(path, number, opcode.upper(), reason))
+        zero_logical = (
+            None
+            if is_scpu_macros or opcode not in ("and", "or")
+            else _unencodable_zero_register_logical(code)
+        )
+        if zero_logical:
+            violations.append(
+                Fx3OpcodeViolation(
+                    path,
+                    number,
+                    zero_logical,
+                    f"{zero_logical} R0 has no GSU register encoding; "
+                    "use a register from R1 through R15",
+                )
+            )
+        operand_error = None if is_scpu_macros else _unencodable_operand(code, opcode)
+        if operand_error:
+            violations.append(
+                Fx3OpcodeViolation(path, number, opcode.upper(), operand_error)
+            )
         loop_literal = _unsafe_loop_literal(code)
         if loop_literal:
             violations.append(

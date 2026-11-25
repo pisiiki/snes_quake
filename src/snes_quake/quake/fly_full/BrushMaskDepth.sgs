@@ -23,14 +23,48 @@ FlyBrushMaskDepth:
         bra     @FactorReady
         nop
 @Divide:
-        jal     TextureDivideQ12Prepared
+        ; Anchor the Q12 window in the real jump delay; keep the return NOP.
+        link    #4
+        GSU_ABSOLUTE_GOTO TextureDivideQ12Prepared, shared_delay
+        cache
         nop
 @FactorReady:
-        jal     TexturePerspectiveFactorQ12
+        ; The factor returns directly to its byte-identical cached finish.
+        iwt     R11, #FlyBrushMaskDepthFinishCached
+        GSU_ABSOLUTE_GOTO FlyMaskPerspectiveFactorQ12
+; The caller has published the exact endpoint depths and denominator.
+; Positive endpoints bound every clamped perspective depth. If both are
+; strictly behind the alias, no pixel can change a mask bit/count/ceiling.
+; R2 and the caller's R11 remain intact for the ordinary prepare tail call.
+; The caller's MOVES R2 flags survive its branch/LINK/IWT/NOP call sequence.
+; R0/R1/R3/R4 are scratch before the pixel's exact divide overwrites them.
+; Zero/sentinel endpoints and unsigned-negative thresholds fall back; the
+; caller already bypasses this helper for a zero denominator.
+FlyBrushMaskPrepareRowDepth:
+        bmi     @Prepare
         nop
-        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
-        with    R5
-        add     R0
-        lm      R11, (FLY_MASK_DEPTH_RETURN)
-        ret
+        lm      R0, (TEXTURE_BASE_DEPTH)
+        lm      R3, (TEXTURE_RIGHT_SHADE)
+        to      R4
+        from    R0
+        or      R3
+        bmi     @Prepare
         nop
+        lm      R1, (FLY_MASK_DEPTH)
+        from    R1
+        sub     R0
+        bcs     @Prepare
+        from    R1
+        sub     R3
+        bcs     @Prepare
+        nop
+        ; Match the old rejected-row exit's inclusive cursor exactly.
+        lm      R0, (FLY_MASK_LAST_X)
+        sm      (FLY_MASK_X), R0
+        GSU_ABSOLUTE_GOTO FlyBrushMaskNextRow
+@Prepare:
+        GSU_ABSOLUTE_GOTO TexturePrepareDivideQ12
+FlyBrushMaskPrepareRowDepthEnd:
+.assert * - FlyBrushMaskPrepareRowDepth <= $2C, error, "Mask row guard exceeds retired depth padding"
+.assert * - FlyBrushMaskDepth <= $58, error, "Mask depth entry exceeds its pinned slot"
+.res $58 - (* - FlyBrushMaskDepth), $01

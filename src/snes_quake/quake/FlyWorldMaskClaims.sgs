@@ -1,0 +1,66 @@
+; Full and Flat each install this helper at the same overlay offset.
+FLY_MASK_CLAIM_BYTES_OFFSET = $01A5
+
+; A certified behind-world span writes painter ownership only. R1 is its
+; first bit, R2 its first byte index, and R6 its row-relative mask offset.
+.macro FLY_WORLD_MASK_CLAIM_BYTES
+        .local ClipLast, LoadNext, Claim, Count, Advance
+        lm      R7, (FLY_MASK_LAST_X)
+        iwt     R0, #$0100
+        to      R11
+        sub     R1
+        from    R7
+        and     #7
+        iwt     R10, #GSU_PACKET_BIT_MASK_OFFSET
+        with    R10
+        add     R0
+        moveb   R0, (R10)
+        add     R0
+        to      R12
+        sub     #1
+        iwt     R10, #FLY_MASK_WORLD_BITS
+        with    R10
+        add     R6
+        from    R7
+  .repeat 3
+        lsr
+  .endrepeat
+        to      R13
+        sub     R2
+        lm      R5, (FLY_MASK_WORLD_REMAINING)
+        move    R2, R11
+        bra     ClipLast
+        nop
+LoadNext:
+        inc     R10
+        iwt     R2, #$00FF
+        dec     R13
+ClipLast:
+        bne     Claim
+        nop
+        with    R2
+        and     R12
+Claim:
+        moveb   R0, (R10)
+        move    R3, R0
+        not
+        and     R2
+        beq     Advance
+        nop
+        to      R3
+        or      R3
+        moveb   (R10), R3
+Count:
+        to      R3
+        sub     #1
+        and     R3
+        bne     Count
+        dec     R5
+Advance:
+        moves   R13, R13
+        bne     LoadNext
+        nop
+        sm      (FLY_MASK_WORLD_REMAINING), R5
+        sm      (FLY_MASK_X), R7
+        GSU_ABSOLUTE_GOTO FlyBrushMaskNextRow
+.endmacro

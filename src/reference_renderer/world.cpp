@@ -1,4 +1,5 @@
 #include "world.hpp"
+#include "packed_material_chunks.hpp"
 
 namespace quake_bsp_reference {
 
@@ -1224,6 +1225,97 @@ SourceWorld build_source_world(const BspData& bsp)
     return world;
 }
 
+std::vector<std::uint8_t> authored_world_visibility(
+    std::span<const std::uint8_t> bytes, const BspData& bsp, const Vec3& eye)
+{
+    const auto lump = [&](int index) {
+        const auto offset = read_i32(bytes, 4 + index * 8);
+        const auto size = read_i32(bytes, 8 + index * 8);
+        if (offset < 0 || size < 0)
+            fail("authored visibility lump has negative bounds");
+        return lump_bytes(bytes, {static_cast<std::size_t>(offset), static_cast<std::size_t>(size)});
+    };
+    const auto nodes = lump(kLumpNodes);
+    const auto leaves = lump(kLumpLeaves);
+    const auto marks = lump(kLumpMarkSurfaces);
+    const auto visibility = lump(kLumpVisibility);
+    const auto model_bytes = lump(kLumpModels);
+    const auto& world = bsp.models.at(0);
+    const auto visible_leaf_count = read_i32(model_bytes, 52);
+    if (visible_leaf_count < 0 || static_cast<std::size_t>(visible_leaf_count) >= leaves.size() / 28)
+        fail("authored world visibility has an invalid leaf count");
+    std::vector<std::uint8_t> faces(world.face_count);
+    std::vector<std::uint8_t> visible(visible_leaf_count + 1);
+    std::vector<int> pending{read_i32(model_bytes, 36)};
+    std::set<int> visited;
+    bool any_open = false;
+    while (!pending.empty())
+    {
+        const int child = pending.back();
+        pending.pop_back();
+        if (!visited.insert(child).second)
+            continue;
+        if (child >= 0)
+        {
+            const auto offset = static_cast<std::size_t>(child) * 24;
+            const auto& plane = bsp.planes.at(read_i32(nodes, offset));
+            const auto distance = dot(eye, plane.normal) - plane.distance;
+            if (distance >= 0)
+                pending.push_back(read_i16(nodes, offset + 4));
+            if (distance <= 0)
+                pending.push_back(read_i16(nodes, offset + 6));
+            continue;
+        }
+        const auto leaf = static_cast<std::size_t>(~child);
+        const auto offset = leaf * 28;
+        if (read_i32(leaves, offset) == -2)
+            continue;
+        if (leaf == 0 || leaf >= visible.size())
+            fail("authored camera contact escapes the world VIS domain");
+        any_open = true;
+        visible[leaf] = 1;
+        const auto vis_offset = read_i32(leaves, offset + 4);
+        if (vis_offset < 0)
+            return {};
+        auto cursor = static_cast<std::size_t>(vis_offset);
+        for (int first = 1; first <= visible_leaf_count;)
+        {
+            require_range(visibility, cursor, 1, "authored visibility row");
+            const auto value = visibility[cursor++];
+            if (value == 0)
+            {
+                require_range(visibility, cursor, 1, "authored visibility run");
+                const auto run = visibility[cursor++];
+                if (run == 0 || run > (visible_leaf_count - first + 8) / 8)
+                    fail("authored visibility has an invalid zero run");
+                first += 8 * run;
+            }
+            else
+            {
+                for (int bit = 0; bit < 8 && first + bit <= visible_leaf_count; ++bit)
+                    visible[first + bit] |= (value >> bit) & 1;
+                first += 8;
+            }
+        }
+    }
+    if (!any_open)
+        return {};
+    for (std::size_t leaf = 1; leaf < visible.size(); ++leaf)
+    {
+        if (!visible[leaf])
+            continue;
+        const auto first = read_u16(leaves, leaf * 28 + 20);
+        const auto count = read_u16(leaves, leaf * 28 + 22);
+        for (int i = 0; i < count; ++i)
+        {
+            const auto face = read_u16(marks, 2 * (first + i)) - world.first_face;
+            if (face >= 0 && face < world.face_count)
+                faces[face] = 1;
+        }
+    }
+    return faces;
+}
+
 SourceWorld build_quantized_world(const fs::path& data_dir, const SourceWorld& source)
 {
     const auto vertex_bytes = read_file(data_dir / "QuakeBSPWorldVertices.bin");
@@ -1233,21 +1325,25 @@ SourceWorld build_quantized_world(const fs::path& data_dir, const SourceWorld& s
     const auto face_bytes = read_file(data_dir / "QuakeBSPWorldFaces.bin");
     const auto plane_bytes = read_file(data_dir / "QuakeBSPWorldFacePlanes.bin");
     const auto reciprocal_bytes = read_file(data_dir / "QuakeBSPReciprocal.bin");
-    auto texture_coordinate_bytes = read_file(data_dir / "QuakeBSPWorldTextureCoordinates0.bin");
-    for (int chunk = 1; chunk < 3; ++chunk)
-    {
-        const auto next = read_file(data_dir / ("QuakeBSPWorldTextureCoordinates" + std::to_string(chunk) + ".bin"));
-        texture_coordinate_bytes.insert(texture_coordinate_bytes.end(), next.begin(), next.end());
-    }
+    // Metadata owns the material layout: demo uses 3/6 banks, standalone
+    // playable maps use 4/12. Never infer a chunk count from directory globs.
+    const auto metadata_bytes = read_file(data_dir / "QuakeBSPMetadata.json");
+    const auto metadata = Json::parse(metadata_bytes.begin(), metadata_bytes.end());
+    std::vector<std::string> available;
+    for (const auto& entry : fs::directory_iterator(data_dir))
+        available.push_back(entry.path().filename().string());
+    auto materials = read_packed_material_streams(metadata, available,
+        [&](const std::string& name, std::size_t expected_bytes) {
+            const auto path = data_dir / name;
+            if (!fs::is_regular_file(path) || fs::file_size(path) != expected_bytes)
+                fail("packed material chunk byte count differs from metadata: " + name);
+            return read_file(path);
+        });
+    auto texture_coordinate_bytes = std::move(materials.coordinates);
     const auto face_texture_id_bytes = read_file(data_dir / "QuakeBSPWorldFaceTextureIds.bin");
     const auto texture_directory_bytes = read_file(data_dir / "QuakeBSPWorldTextureDirectory.bin");
     const auto turbulence_table_bytes = read_file(data_dir / "QuakeBSPTurbulenceTable.bin");
-    std::vector<std::uint8_t> texture_pixel_bytes;
-    for (int chunk = 0; chunk < 6; ++chunk)
-    {
-        const auto next = read_file(data_dir / ("QuakeBSPWorldTexturePixels" + std::to_string(chunk) + ".bin"));
-        texture_pixel_bytes.insert(texture_pixel_bytes.end(), next.begin(), next.end());
-    }
+    const auto texture_pixel_bytes = std::move(materials.pixels);
     if (vertex_bytes.empty() || vertex_bytes.size() % 4 != 0 || index_bytes.empty() || index_bytes.size() % 2 != 0 ||
         face_bytes.size() != static_cast<std::size_t>(source.face_count) * kPackedFaceRecordBytes ||
         plane_bytes.size() != static_cast<std::size_t>(source.face_count) * kPackedFacePlaneRecordBytes ||
@@ -1284,6 +1380,27 @@ SourceWorld build_quantized_world(const fs::path& data_dir, const SourceWorld& s
     world.texture_colormap = source.texture_colormap;
     world.face_lightmaps = source.face_lightmaps;
     world.lighting = source.lighting;
+    // Packed Q4 UVs can subtract whole texture repeats to fit int16.
+    // Read the matching origins; compute light levels from the source BSP.
+    const auto lightmap_directory = read_file(data_dir / "QuakeBSPWorldLightmapDirectory.bin");
+    constexpr std::size_t lightmap_record_bytes = 7;
+    if (lightmap_directory.size() != world.face_lightmaps.size() * lightmap_record_bytes)
+        fail("packed world lightmap directory has the wrong face count");
+    for (std::size_t face = 0; face < world.face_lightmaps.size(); ++face)
+    {
+        const auto offset = face * lightmap_record_bytes;
+        auto& lightmap = world.face_lightmaps[face];
+        const bool missing = lightmap_directory[offset] == 0xff;
+        if (missing != (lightmap.light_offset == -1))
+            fail("packed world lightmap presence differs from the source BSP");
+        if (missing)
+            continue;
+        if (lightmap.width != lightmap_directory[offset + 3] ||
+            lightmap.height != lightmap_directory[offset + 4])
+            fail("packed world lightmap dimensions differ from the source BSP");
+        lightmap.texture_min_s = decode_i8(lightmap_directory[offset + 5]) * 16;
+        lightmap.texture_min_t = decode_i8(lightmap_directory[offset + 6]) * 16;
+    }
     std::ranges::copy(turbulence_table_bytes, world.turbulence_table.begin());
     world.colors = source.colors;
     world.visibility_planes = source.visibility_planes;

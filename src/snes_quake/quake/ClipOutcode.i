@@ -9,11 +9,6 @@
         lm      R5, (CLIP_RIGHT)
         with    R5
         asr
-.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
-right_scale:
-        nop
-        nop
-.endif
         move    R6, R4
         with    R6
         add     R5
@@ -33,11 +28,6 @@ Plane1Inside:
         lm      R5, (CLIP_UP)
         with    R5
         asr
-.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
-up_scale:
-        nop
-        nop
-.endif
         move    R6, R4
         with    R6
         sub     R5
@@ -54,4 +44,24 @@ Plane2Inside:
         with    R0
         or      #8
 Plane3Inside:
+.endmacro
+
+; Set a proof bit for a Q6 plane score <= -3. R3 and axis are halved,
+; R0 accumulates bits and R5 is scratch. Packed Q2 and the Q6 matrix
+; bound the score away from signed overflow, including the +2.
+.macro BSP_CLASSIFY_CLIP_MARGIN_PLANE axis, subtract_axis, flag_bit
+        .local Inside
+        move    R5, R3
+        with    R5
+  .if subtract_axis
+        sub     axis
+  .else
+        add     axis
+  .endif
+        with    R5
+        add     #2
+        bpl     Inside
+        nop
+        or      #flag_bit
+Inside:
 .endmacro

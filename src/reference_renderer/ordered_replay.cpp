@@ -403,11 +403,14 @@ std::vector<std::uint8_t> encode_ordered_alias_visibility(
     const auto dictionary_offset = directory_offset + directory_bytes;
     const auto dictionary_bytes = dictionary.size() * 2U;
     const auto payload_offset = dictionary_offset + dictionary_bytes;
-    if (payload_offset > kAliasVisibilityHalfbankBytes)
+    // QAV2 is the host input to the compressed cartridge archive. Keep
+    // legacy padding, but allow every offset that fits its 16-bit dictionary.
+    constexpr std::size_t corpus_limit = 0x10000;
+    if (payload_offset > corpus_limit)
     {
-        fail("alias visibility directory exceeds one GSU halfbank");
+        fail("alias visibility directory exceeds the QAV2 offset range");
     }
-    std::vector<std::uint8_t> bytes(kAliasVisibilityHalfbankBytes, 0xffU);
+    std::vector<std::uint8_t> bytes(std::max(kAliasVisibilityHalfbankBytes, payload_offset), 0xffU);
     std::fill(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(payload_offset), 0);
     std::copy_n("QAV2", 4, bytes.begin());
     alias_visibility_store_u16(bytes, 4, kAliasVisibilityVersion);
@@ -429,13 +432,18 @@ std::vector<std::uint8_t> encode_ordered_alias_visibility(
     for (std::size_t index = 0; index < dictionary.size(); ++index)
     {
         const auto& payload = dictionary[index];
-        if (cursor + payload.size() > bytes.size() || cursor > 0xffffU)
+        const auto end = cursor + payload.size();
+        if (end > corpus_limit || cursor >= corpus_limit)
         {
-            fail("alias visibility corpus exceeds one GSU halfbank");
+            fail("alias visibility corpus exceeds the QAV2 offset range");
+        }
+        if (end > bytes.size())
+        {
+            bytes.resize(end);
         }
         alias_visibility_store_u16(bytes, dictionary_offset + index * 2U, static_cast<std::uint16_t>(cursor));
         std::copy(payload.begin(), payload.end(), bytes.begin() + static_cast<std::ptrdiff_t>(cursor));
-        cursor += payload.size();
+        cursor = end;
     }
     for (std::size_t pose = 0; pose < payloads.size(); ++pose)
     {
@@ -513,7 +521,11 @@ int run_realtime_demo(
     float sound_volume,
     const ParticleReplay* particles,
     bool particles_enabled,
-    bool inspect_external_visibility
+    bool inspect_external_visibility,
+    const BrushReplay* fly_brush_replay,
+    const SourceFlyAliases* fly_aliases,
+    const X2WeaponAssets* x2_weapon,
+    const FullPrecisionReplay* full_precision
 )
 {
     if (!ordered_3hz)
@@ -543,7 +555,11 @@ int run_realtime_demo(
             sound_volume,
             std::move(instrumentation),
             particles,
-            particles_enabled
+            particles_enabled,
+            fly_brush_replay,
+            fly_aliases,
+            x2_weapon,
+            full_precision
         );
     }
     if (initial_legacy_material)
@@ -565,6 +581,10 @@ int run_realtime_demo(
     {
         fail("live ordered playback requires the complete source-rate QOR1 replay");
     }
+    if (x2_weapon != nullptr && x2_weapon->pose_count() != replay.source_pose_count)
+    {
+        fail("X2 weapon and ordered replay source pose counts disagree");
+    }
     auto brush_assets = load_packed_brush_assets(data_dir);
     std::optional<PackedExternalVisibilityInspection> visibility_probe;
     if (inspect_external_visibility)
@@ -573,7 +593,12 @@ int run_realtime_demo(
             fail("external visibility inspection requires loaded models and enabled packed brushes");
         visibility_probe.emplace(*external_scene, *external_replay);
     }
-    const auto precise_cameras = load_precise_demo_track(camera_track_path);
+    const auto full_camera = [&](std::size_t pose) {
+        auto camera = full_precision->rows.at(replay.frames.at(pose).source_pose).camera;
+        const auto view = source_view_transform(camera);
+        camera.capture_basis = std::array{view.forward, view.screen_right * -1.0, view.up};
+        return camera;
+    };
     const double ordered_source_rate = replay.source_rate;
     const double duration_seconds = constant_step_duration(replay.frames.size(), ordered_source_rate);
     return run_live_demo(
@@ -584,17 +609,37 @@ int run_realtime_demo(
         [&](std::size_t pose) { return static_cast<double>(replay.frames.at(pose).source_pose) / replay.source_rate; },
         [&](std::size_t pose) { return packed_view_transform(quantized_world, replay.frames.at(pose).camera); },
         [&](std::size_t pose,
-            std::size_t,
+            std::size_t scene_pose,
             RenderMode mode,
             bool legacy_material,
             bool brushes,
             bool entities,
             bool,
-            bool show_particles) {
+            bool show_particles,
+            bool use_full_precision) {
             if (legacy_material)
             {
                 fail("ordered packed playback cannot select legacy material");
             }
+            if (use_full_precision)
+                return render_full_precision_live_frame(
+                    world,
+                    bvh,
+                    brush_scene,
+                    brush_replay,
+                    alias_assets,
+                    *full_precision,
+                    full_camera(pose),
+                    replay.frames.at(scene_pose).source_pose,
+                    mode,
+                    flat,
+                    brushes,
+                    entities,
+                    false,
+                    brushes && entities ? external_scene : nullptr,
+                    external_replay,
+                    show_particles ? particles : nullptr
+                );
             AliasCoverage coverage;
             const bool inspect_aliases = entities;
             Json surface_inspection{
@@ -665,12 +710,12 @@ int run_realtime_demo(
             .initial_entities = entities_enabled,
             .initial_external_bsp_models = false,
             .initial_particles = particles_enabled,
-            .camera_at_pose = [&](std::size_t pose) {
-                auto view = source_view_transform(precise_cameras.at(pose));
-                // Exact recorded orientation, in the packed renderer's screen convention.
-                view.screen_right = view.screen_right * -1.0;
-                return view;
-            }
+            .x2_weapon = x2_weapon,
+            .x2_weapon_source_pose = [&](std::size_t pose) { return replay.frames.at(pose).source_pose; },
+            .full_precision_view = full_precision ? std::function<ViewTransform(std::size_t)>([&](std::size_t pose) {
+                return source_view_transform(full_camera(pose));
+            })
+                                                  : nullptr
         }
     );
 }

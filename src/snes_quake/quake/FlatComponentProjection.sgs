@@ -1,0 +1,55 @@
+.if .defined(PLAYABLE_FLAT_COMPONENT_PROJECTOR) && (BSP_RENDER_SCALE = 2)
+        .export FlatProjectComponent
+  .ifdef PLAYABLE_FLAT_MONOTONE_RASTER
+    .if PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID
+FLAT_LIVE_PROJECTION_RECIPROCAL = 1
+    .endif
+  .endif
+; The Flat polygon sites consume only the signed Q7 screen delta in R0.
+; Preserve R10 for the upper component's live screen record cursor.
+FlatProjectComponent:
+        move    R9, R2                  ; positive clipped depth
+        move    R2, R1                  ; original sign survives division
+        moves   R0, R1
+        bpl     @Magnitude
+        nop
+        not
+        inc     R0
+@Magnitude:
+        cmp     R9
+        bcc     @Divide
+        nop
+        iwt     R0, #12288              ; 3 * 4096 at the component clamp.
+        bra     @Sign
+        nop
+@Divide:
+        move    R8, R0
+  .ifdef FLAT_LIVE_PROJECTION_RECIPROCAL
+        GSU_ABSOLUTE_GOTO FlatDivideProjectionQ12
+  .else
+        lm      R12, (TEXTURE_RECIPROCAL_HIGH)
+        lm      R13, (TEXTURE_RECIPROCAL_LOW)
+        move    R7, R11
+        jal     TextureDivideQ12LoadedCold
+        nop
+        move    R11, R7
+        move    R0, R3
+        add     R0
+        add     R3
+  .endif
+@Sign:
+        moves   R2, R2
+        bpl     @Done
+        nop
+        not
+        inc     R0
+@Done:
+        ret
+        nop
+  .ifdef FLAT_LIVE_PROJECTION_RECIPROCAL
+FlatProjectionSign = @Sign
+  .endif
+  .if !(.defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV))
+        .include "FlatProjectionEdgeCode.sgs"
+  .endif
+.endif

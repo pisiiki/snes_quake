@@ -1,0 +1,103 @@
+; Exact RN-even reduction for a normalized24x24 significand product.
+; SF_W2:W1:W0 is in [2^46,2^48), so only shifts23/24 are possible.
+SkyFloatRoundProduct48:
+        lm      R4, (SF_W0)
+        lm      R5, (SF_W1)
+        lm      R6, (SF_W2)
+        lm      R10, (SF_EXP)
+        move    R8, R4
+        move    R9, R5
+        ; Extract product>>24 without a serial24-bit shift loop.
+        move    R4, R5
+        with    R4
+        hib
+        move    R1, R6
+        with    R1
+        lob
+        with    R1
+        swap
+        with    R4
+        or      R1
+        move    R5, R6
+        with    R5
+        hib
+        iwt     R1, #$8000
+        with    R6
+        and     R1
+        bne     @Shift24
+        nop
+        ; The missing23rd bit becomes retained bit0, not a rounding bit.
+        with    R4
+        add     R4
+        with    R5
+        adc     R5
+        move    R0, R9
+        iwt     R1, #$0080
+        with    R0
+        and     R1
+        beq     @Shift23LowReady
+        nop
+        inc     R4
+@Shift23LowReady:
+        iwt     R0, #23
+        with    R10
+        add     R0
+        move    R7, R9
+        iwt     R1, #$0040
+        with    R7
+        and     R1
+        iwt     R1, #$003F
+        with    R9
+        and     R1
+        bra     @Sticky
+        nop
+@Shift24:
+        iwt     R0, #24
+        with    R10
+        add     R0
+        move    R7, R9
+        iwt     R1, #$0080
+        with    R7
+        and     R1
+        iwt     R1, #$007F
+        with    R9
+        and     R1
+@Sticky:
+        with    R8
+        or      R9
+        moves   R7, R7
+        beq     @Publish
+        nop
+        move    R0, R4
+        with    R0
+        and     #1
+        with    R0
+        or      R8
+        beq     @Publish
+        nop
+        move    R0, #1
+        with    R4
+        add     R0
+        move    R0, #0
+        with    R5
+        adc     R0
+        iwt     R0, #$0100
+        with    R5
+        cmp     R0
+        bcc     @Publish
+        nop
+        with    R5
+        lsr
+        with    R4
+        ror
+        inc     R10
+@Publish:
+        sm      (SF_W0), R4
+        sm      (SF_W1), R5
+        move    R0, #0
+        sm      (SF_W2), R0
+        sm      (SF_EXP), R10
+        ret
+        nop
+SkyFloatRoundProduct48End:
+.assert SkyFloatRoundProduct48End-(SkyFloatRoundProduct48 & $FFFFF0)<=512, lderror, "Float product rounder escaped one cache window"

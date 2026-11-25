@@ -1,0 +1,67 @@
+; First, second, and previous vertices share the unchanged fan state.
+; The cached X2 fan keeps this tail in the projection lookup cache.
+PacketFanFirst:
+        lm      R0, (PACKET_PROJ_X)
+        sm      (PACKET_FAN_X0), R0
+        lm      R0, (PACKET_PROJ_Y)
+        sm      (PACKET_FAN_Y0), R0
+        lm      R0, (PACKET_PROJ_VALID)
+        sm      (PACKET_FAN_VALID), R0
+        bra     PacketFanNext
+        nop
+PacketFanSecond:
+        lm      R0, (PACKET_PROJ_X)
+        sm      (PACKET_FAN_X1), R0
+        lm      R0, (PACKET_PROJ_Y)
+        sm      (PACKET_FAN_Y1), R0
+        lm      R0, (PACKET_PROJ_VALID)
+        moves   R0, R0
+        beq     PacketFanNext
+        nop
+        lm      R0, (PACKET_FAN_VALID)
+        with    R0
+        or      #2
+        sm      (PACKET_FAN_VALID), R0
+        bra     PacketFanNext
+        nop
+PacketFanAdvancePrevious:
+        lm      R0, (PACKET_PROJ_X)
+        sm      (PACKET_FAN_X1), R0
+        lm      R0, (PACKET_PROJ_Y)
+        sm      (PACKET_FAN_Y1), R0
+        lm      R0, (PACKET_FAN_VALID)
+        iwt     R2, #$FFFD
+        with    R0
+        and     R2
+        move    R1, R0
+        lm      R0, (PACKET_PROJ_VALID)
+        moves   R0, R0
+        beq     PacketFanStoreValidity
+        nop
+        with    R1
+        or      #2
+PacketFanStoreValidity:
+        sm      (PACKET_FAN_VALID), R1
+PacketFanNext:
+        lm      R0, (PACKET_INDEX_CURSOR)
+        inc     R0
+        sm      (PACKET_INDEX_CURSOR), R0
+        lm      R0, (PACKET_FAN_ORDINAL)
+        inc     R0
+        sm      (PACKET_FAN_ORDINAL), R0
+        lm      R1, (PACKET_FACE_VERTICES)
+        with    R0
+        cmp     R1
+        beq     PacketFaceOffscreen
+        nop
+.if .defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO PacketProjectFaceLoopCached
+.else
+        PACKET_FAN_NEXT_LEGACY
+.endif
+PacketFaceOffscreen:
+.if .defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO PacketNearStraddlerKeepCache
+.else
+        GSU_ABSOLUTE_GOTO PacketNearStraddler
+.endif

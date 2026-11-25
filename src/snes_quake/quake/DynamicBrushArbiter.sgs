@@ -42,11 +42,17 @@ BRUSH_ARB_LIGHTMAP_REF         = BRUSH_STATE + $C8
 BRUSH_ARB_STAGE_COUNT          = BRUSH_STATE + $CA
 BRUSH_ARB_ACTIVE_LIGHTMAP      = BRUSH_STATE + $CC
 BRUSH_ARB_ROW_STAGE_MODE       = BRUSH_STATE + $CE
-BRUSH_ARB_POOL_BASE            = GSU_FACE_PLANES_OFFSET + $03F8
-BRUSH_ARB_POOL_LIMIT           = GSU_FACE_PLANES_GUARD_OFFSET
+BRUSH_ARB_POOL_BASE            = GSU_BRUSH_MATERIAL_POOL_OFFSET
+BRUSH_ARB_POOL_LIMIT           = GSU_BRUSH_MATERIAL_POOL_LIMIT
 BRUSH_ARB_LIGHTMAP_MISSING_BASE = $0200
 BRUSH_ARB_LIGHTMAP_FALLBACK    = $03FF
 .assert (BRUSH_ARB_POOL_LIMIT - BRUSH_ARB_POOL_BASE) / 2 <= BRUSH_ARB_LIGHTMAP_MISSING_BASE, error, "Brush lightmap pool references overlap missing-sample references"
+
+.if .defined(PLAYABLE_MAP_ID) && .defined(BSP_QUAKEC_GAMEPLAY) && .defined(PLAYABLE_EMPTY_COMPOSED) && .defined(PLAYABLE_E1M1_MAP_ID)
+  .if BSP_QUAKEC_GAMEPLAY && (BSP_RENDER_SCALE = 3) && (PLAYABLE_MAP_ID = PLAYABLE_E1M1_MAP_ID)
+PLAYABLE_BRUSH_PROJECTED_X_BOUNDS = 1
+  .endif
+.endif
 
 BRUSH_ARB_META_SCREEN_START    = 0
 BRUSH_ARB_META_SCREEN_END      = 2
@@ -60,7 +66,11 @@ BRUSH_ARB_META_BYTES           = GSU_BRUSH_ARBITER_METADATA_RECORD_BYTES
 
 .assert BRUSH_ARB_ACTIVE_LIGHTMAP + 2 <= BRUSH_STATE + $D0, error, "Brush arbiter driver state overlaps span state"
 .assert BSP_WORLD_TEXTURE_COUNT + BSP_BRUSH_TEXTURE_COUNT < 256, error, "Brush material texture no longer fits one byte"
+.if BSP_BRUSH_REMAP_SCRATCH
+.assert BRUSH_SLOT_TABLE + BRUSH_SLOT_COUNT * BRUSH_SLOT_RECORD_BYTES <= GSU_BRUSH_ARBITER_SCREEN_OFFSET, error, "Brush screen storage overlaps live slot records"
+.else
 .assert BRUSH_SLOT_TABLE + BRUSH_SLOT_COUNT * BRUSH_SLOT_RECORD_BYTES <= BRUSH_ARB_POOL_BASE, error, "Brush slot records overlap material pool"
+.endif
 .assert BRUSH_ARB_POOL_BASE < BRUSH_ARB_POOL_LIMIT, error, "Brush material pool is empty"
 .assert BRUSH_ARB_META_BYTES = 16, error, "Brush arbiter metadata layout changed"
 .assert BSP_BRUSH_ENTITY_ID_MAX < 65536, error, "Brush authority entity IDs no longer fit metadata words"
@@ -125,13 +135,21 @@ BrushArbiterCollectFragmentPresent:
         sm      (BRUSH_CURRENT_LINK), R0
         jal     BrushLoadCurrentFragment
         nop
-        jal     BrushFaceFrontFacing
+        jal     BrushFaceLazyFacing
         nop
         moves   R0, R0
         beq     BrushArbiterCollectAdvance
         nop
+.if .defined(PLAYABLE_FLAT_BRUSH_MATERIAL) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushCollectMaterialTarget
+FlatBrushCollectMaterialTarget = *+2
+.endif
         jal     BrushLoadFaceMaterial
         nop
+.if .defined(PLAYABLE_FLAT_BRUSH_MATERIAL) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushCollectViewTarget
+FlatBrushCollectViewTarget = *+2
+.endif
         jal     BrushBuildFragmentView
         nop
         jal     BrushArbiterProjectCurrent
@@ -155,8 +173,8 @@ BrushArbiterCollected:
         dec     R0
         bne     BrushArbiterMultiple
         nop
-        ; A single admitted polygon cannot conflict. Reuse the established
-        ; direct face renderer and its optimized projective span unchanged.
+        ; A single admitted polygon cannot conflict. Retain the normal
+        ; direct material setup and its optimized rasterizer.
         iwt     R10, #GSU_BRUSH_ARBITER_METADATA_OFFSET+BRUSH_ARB_META_LINK_COUNT
         movew   R0, (R10)
         iwt     R1, #$03FF
@@ -164,12 +182,17 @@ BrushArbiterCollected:
         and     R1
         sm      (BRUSH_CURRENT_LINK), R0
         jal     BrushRenderFragment
+BrushArbiterRenderSingleReturn:
         nop
         GSU_ABSOLUTE_GOTO BrushArbiterDone
 
 BrushArbiterMultiple:
         jal     BrushTryDirectSafeGroup
         nop
+.if .defined(PLAYABLE_FLAT_BRUSH_MATERIAL) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushPrepareMaterialsTarget
+FlatBrushPrepareMaterialsTarget = *+2
+.endif
         jal     BrushArbiterPrepareMaterials
         nop
         jal     BrushArbiterRenderRows
@@ -188,7 +211,9 @@ BrushArbiterProjectCurrent:
         moves   R0, R0
         beq     BrushArbiterProjectDone
         nop
+BrushArbiterProjectAfterClip:
         jal     TextureProjectPolygonShaded
+BrushArbiterCurrentProjected:
         nop
 BrushArbiterProjectDone:
         lm      R11, (BRUSH_ARB_PROJECT_RETURN)
@@ -270,7 +295,11 @@ BrushArbiterStoreCurrent:
         movew   (R3), R0
         ; Token/link construction already preserves the authority order. Keep
         ; the full raw uint16 entity ID here until material preparation reuses
-        ; this word.
+        ; this word. Flat stores the packed face directly and skips that pass.
+.if .defined(PLAYABLE_FLAT_BRUSH_MATERIAL) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushStoreFaceSite
+FlatBrushStoreFaceSite = *
+.endif
         lm      R0, (BRUSH_CURRENT_ENTITY)
         inc     R3
         inc     R3
@@ -298,9 +327,26 @@ BrushArbiterStoreCurrent:
         with    R10
         sub     R0
         lm      R12, (CONVEX_SCREEN_COUNT)
+.ifdef PLAYABLE_BRUSH_PROJECTED_X_BOUNDS
+        movew   R6, (R9)                ; Per-polygon projected X extrema.
+        move    R7, R6
+.endif
         iwt     R13, #BrushArbiterCopyScreenLoop
 BrushArbiterCopyScreenLoop:
         movew   R0, (R9)
+.ifdef PLAYABLE_BRUSH_PROJECTED_X_BOUNDS
+        from    R0
+        cmp     R6
+        bpl     BrushArbiterCopyMinXReady
+        nop
+        move    R6, R0
+BrushArbiterCopyMinXReady:
+        from    R7
+        cmp     R0
+        bpl     BrushArbiterCopyMaxXReady
+        nop
+        move    R7, R0
+.else
         lm      R4, (BRUSH_ARB_GROUP_MIN_X)
         move    R5, R0
         with    R5
@@ -316,6 +362,7 @@ BrushArbiterCopyMinXReady:
         bpl     BrushArbiterCopyMaxXReady
         nop
         sm      (BRUSH_ARB_GROUP_MAX_X), R0
+.endif
 BrushArbiterCopyMaxXReady:
         movew   (R10), R0
   .repeat 4
@@ -333,6 +380,10 @@ BrushArbiterCopyMaxXReady:
         loop
         nop
 
+.ifdef PLAYABLE_BRUSH_PROJECTED_X_BOUNDS
+        jal     BrushPublishProjectedXBounds
+        nop
+.endif
         lm      R0, (CONVEX_RASTER_Y)
         lm      R1, (BRUSH_ARB_GROUP_MIN_Y)
         with    R0
@@ -356,8 +407,16 @@ BrushArbiterMaxReady:
         ret
         nop
 
+.ifdef PLAYABLE_BRUSH_PROJECTED_X_BOUNDS
+        ; Technique 4 installs a fixed-address preparation overlay below.
+        .res $10C - (* - BrushArbiterStoreCurrent), $01
+.endif
+
 ; Resolve each admitted polygon's immutable material once after sorting.
 ; Technique 4 also packs the mapped light grid into a compact per-group pool.
+.if .defined(PLAYABLE_FLAT_BRUSH_MATERIAL) && (BSP_RENDER_SCALE = 2)
+        .export BrushArbiterPrepareMaterials, BrushArbiterCandidateSpanPresent
+.endif
 BrushArbiterPrepareMaterials:
         sm      (BRUSH_ARB_PREPASS_RETURN), R11
         iwt     R0, #GSU_BRUSH_ARBITER_METADATA_OFFSET
@@ -504,7 +563,7 @@ BrushArbiterPrepareMaterialsDone:
 
 BrushArbiterRenderRows:
         sm      (BRUSH_ARB_PROJECT_RETURN), R11
-        iwt     R0, #$FFFF
+        ibt     R0, #$FF                 ; IBT sign-extends the encoded byte.
         sm      (BRUSH_ARB_ACTIVE_TEXTURE), R0
         sm      (BRUSH_ARB_ACTIVE_LIGHTMAP), R0
         iwt     R0, #BrushArbiterCandidateAdvance
@@ -514,6 +573,7 @@ BrushArbiterRenderRows:
         move    R0, #0
         sm      (LIGHTMAP_BLOCK_FAST), R0
         sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+        sm      (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET), R0
         ; Every edge intersection lies between the projected vertex extrema.
         ; Convert that conservative group bound once and clear only depth
         ; cells that a candidate span can touch.
@@ -538,8 +598,7 @@ BrushArbiterClearFirstReady:
         move    R3, #0
 BrushArbiterClearLastPositive:
         move    R0, #BSP_VIEW_WIDTH-1
-        move    R4, R0
-        with    R4
+        to      R4
         sub     R3
         bpl     BrushArbiterClearLastReady
         nop
@@ -649,7 +708,7 @@ BrushArbiterClearDepthQuads:
         with    R12
         lsr
         beq     BrushArbiterClearDepthDone
-        nop
+        cache                           ; Reuse the quad loop's two lines.
         iwt     R13, #BrushArbiterClearDepthLoop
 BrushArbiterClearDepthLoop:
         movew   (R10), R0
@@ -749,7 +808,11 @@ BrushArbiterTextureReady:
         dec     R0
         beq     BrushArbiterMaterialLightmapped
         nop
+.ifdef PLAYABLE_MAP_ID
+        GSU_ABSOLUTE_GOTO BakedPrepareArbiterFace
+.else
         GSU_ABSOLUTE_GOTO BrushArbiterMaterialReady
+.endif
 
 BrushArbiterMaterialLightmapped:
         lm      R0, (BRUSH_ARB_LIGHTMAP_REF)
@@ -884,6 +947,7 @@ BrushArbiterPrepareCandidateSpan:
         lm      R10, (BRUSH_ARB_CANDIDATE_CURSOR)
         movew   R0, (R10)
         sm      (BRUSH_ARB_SCREEN_START), R0
+        sm      (TEXTURE_EDGE_WALK_SCREEN_START), R0
         inc     R10
         inc     R10
         movew   R0, (R10)
@@ -910,50 +974,42 @@ BrushArbiterPrepareCandidateSpan:
         lm      R0, (BRUSH_ARB_SCREEN_END)
         sm      (CONVEX_SCREEN_END_PTR), R0
 
+        jal     TextureCacheActiveEdgeShaded
+        nop
         lm      R10, (CONVEX_FORWARD_PTR)
-        lm      R12, (CONVEX_SCREEN_COUNT)
 BrushArbiterForwardAdvance:
-        move    R9, R10
-        with    R9
-        add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
-        lm      R0, (BRUSH_ARB_SCREEN_END)
-        with    R9
-        cmp     R0
-        bne     BrushArbiterForwardNextReady
-        nop
-        lm      R9, (BRUSH_ARB_SCREEN_START)
-BrushArbiterForwardNextReady:
-        move    R8, R9
-        inc     R8
-        inc     R8
-        movew   R1, (R8)
-        lm      R0, (CONVEX_SAMPLE_Y)
-        move    R2, R1
-        with    R2
-        sub     R0
-        moves   R2, R2
-        bmi     BrushArbiterForwardStep
-        nop
-        beq     BrushArbiterForwardStep
+        jal     TextureEdgeWalkForward
+        bpl     BrushArbiterForwardStep
         nop
         sm      (CONVEX_FORWARD_PTR), R10
+        GSU_ABSOLUTE_GOTO BrushArbiterForwardIntersect
+        ; Keep the CPU-installed technique-4 mode window at its old anchor.
+        .res GSU_T4_BRUSH_FORWARD_OFFSET - GSU_BRUSH_CODE_OFFSET - (* - DynamicBrushOverlayStart)
+BrushArbiterForwardIntersect:
         lm      R0, (TEXTURE_RENDER_MODE)
         move    R1, #2
         with    R0
         cmp     R1
-        bcs     BrushArbiterForwardProjective
-        nop
-        jal     TextureCacheActiveEdgeShaded
+        bcs     BrushArbiterForwardProjectiveCached
         nop
         iwt     R13, #GSU_TEXTURE_EDGE_DIVIDE_CACHE_OFFSET
         jal     TextureIntersectActiveEdgeShaded
         nop
         bra     BrushArbiterForwardIntersected
         nop
+        .res 6
 BrushArbiterForwardProjective:
-        jal     TextureCacheActiveEdgeShaded
-        nop
+        .res 6
+BrushArbiterForwardProjectiveCached:
+.if .defined(PLAYABLE_FLAT_BRUSH_PROJECTIVE_EDGE) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushForwardEdgeTarget
+FlatBrushForwardEdgeTarget = *+2         ; JAL emits LINK then IWT R15 before its word operand.
+.endif
+.ifdef BAKED_BRUSH_X3_EDGE
+        jal     BakedBrushProjectiveEdge
+.else
         jal     TextureIntersectActiveEdgeProjective
+.endif
         nop
 BrushArbiterForwardIntersected:
         sm      (CONVEX_MIN_X), R0
@@ -963,6 +1019,7 @@ BrushArbiterForwardIntersected:
         sm      (TEXTURE_LEFT_T), R0
         lm      R0, (TEXTURE_EDGE_SHADE)
         sm      (TEXTURE_LEFT_SHADE), R0
+BrushArbiterForwardAttributesReady:
         lm      R10, (BRUSH_ARB_CANDIDATE_CURSOR)
         with    R10
         add     #BRUSH_ARB_META_FORWARD
@@ -983,30 +1040,8 @@ BrushArbiterReverseBegin:
         lm      R12, (CONVEX_SCREEN_COUNT)
 BrushArbiterReverseAdvance:
         lm      R0, (BRUSH_ARB_SCREEN_START)
-        with    R10
-        cmp     R0
-        bne     BrushArbiterReverseNoWrap
-        nop
-        lm      R9, (BRUSH_ARB_SCREEN_END)
-        with    R9
-        sub     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
-        bra     BrushArbiterReverseNextReady
-        nop
-BrushArbiterReverseNoWrap:
-        move    R9, R10
-        with    R9
-        sub     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
-BrushArbiterReverseNextReady:
-        move    R8, R9
-        inc     R8
-        inc     R8
-        movew   R1, (R8)
-        lm      R0, (CONVEX_SAMPLE_Y)
-        move    R2, R1
-        with    R2
-        sub     R0
-        moves   R2, R2
-        bpl     BrushArbiterReverseNonNegative
+        jal     TextureEdgeWalkReverse
+        bmi     BrushArbiterReverseNonNegative
         nop
 BrushArbiterReverseStep:
         move    R10, R9
@@ -1015,9 +1050,8 @@ BrushArbiterReverseStep:
         nop
         move    R0, #0
         GSU_ABSOLUTE_GOTO BrushArbiterPrepareSpanDone
+        .res GSU_T4_BRUSH_REVERSE_OFFSET - GSU_BRUSH_CODE_OFFSET - 3 - (* - DynamicBrushOverlayStart)
 BrushArbiterReverseNonNegative:
-        beq     BrushArbiterReverseStep
-        nop
         sm      (CONVEX_REVERSE_PTR), R10
         lm      R0, (TEXTURE_RENDER_MODE)
         move    R1, #2
@@ -1031,7 +1065,15 @@ BrushArbiterReverseNonNegative:
         bra     BrushArbiterReverseIntersected
         nop
 BrushArbiterReverseProjective:
+.if .defined(PLAYABLE_FLAT_BRUSH_PROJECTIVE_EDGE) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushReverseEdgeTarget
+FlatBrushReverseEdgeTarget = *+2
+.endif
+.ifdef BAKED_BRUSH_X3_EDGE
+        jal     BakedBrushProjectiveEdge
+.else
         jal     TextureIntersectActiveEdgeProjective
+.endif
         nop
 BrushArbiterReverseIntersected:
         sm      (CONVEX_MAX_X), R0
@@ -1041,6 +1083,7 @@ BrushArbiterReverseIntersected:
         sm      (TEXTURE_RIGHT_T), R0
         lm      R0, (TEXTURE_EDGE_SHADE)
         sm      (TEXTURE_RIGHT_SHADE), R0
+BrushArbiterReverseAttributesReady:
         lm      R10, (BRUSH_ARB_CANDIDATE_CURSOR)
         with    R10
         add     #BRUSH_ARB_META_REVERSE
@@ -1073,7 +1116,7 @@ BrushArbiterXOrderReady:
         iwt     R0, #59
         with    R1
         add     R0
-        BSP_ARITH_SHIFT7 R1, R2
+        BSP_ARITH_SHIFT7_R0 R1
         moves   R1, R1
         bpl     BrushArbiterFirstReady
         nop
@@ -1083,7 +1126,7 @@ BrushArbiterFirstReady:
         iwt     R0, #60
         with    R3
         sub     R0
-        BSP_ARITH_SHIFT7 R3, R4
+        BSP_ARITH_SHIFT7_R0 R3
         move    R0, #BSP_VIEW_WIDTH-1
         move    R4, R0
         with    R4
@@ -1108,3 +1151,4 @@ BrushArbiterPrepareSpanDone:
         lm      R11, (BRUSH_ARB_SPAN_RETURN)
         ret
         nop
+        .res 8, $01                    ; Unreachable; retain the next source entry.

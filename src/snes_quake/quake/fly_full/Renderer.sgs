@@ -71,3 +71,103 @@ FlyRenderFallbackWorld:
 
 .assert * - FlyAliasTestVisibility <= GSU_ALIAS_FLY_CODE_CAPACITY, error, "Fused fly renderer exceeds the deferred overlay"
 .endif
+
+; Gameplay always installs EnsureFlyAliasCode during InitFlyViewport and
+; LoadFramePipelineImage before a brush job can select entrance variants.
+; Append after the existing fly entries/cache anchors, inside their
+; permanent deferred alias tail. Ordered/demo count0 emits no bytes.
+.pushseg
+.segment "GSU_ALIAS_FLY_CODE"
+.if BRUSH_ENTRANCE_VARIANTS
+; Cold descriptor/entrance selection leaves R14 at the next descriptor
+; field, R1 at the resolved global variant and the caller link intact.
+BrushLoadEntranceTransform:
+        BSP_ROM_LOAD_WORD R0
+        sm      (BRUSH_CURRENT_ENTITY), R0
+        BSP_ROM_LOAD_BYTE R0
+        sm      (BRUSH_CURRENT_INLINE_MODEL), R0
+.if BSP_QUAKEC_GAMEPLAY
+  .if QC_ENTRANCE_COUNT > 0 .or .defined(QC_EXIT_MOVER_COUNT)
+    .ifdef QC_EXIT_MOVER_COUNT
+        ; Unlisted models retain their canonical replay variant.
+        ibt     R1, #QC_EXIT_VARIANT_SLOTS
+        cmp     R1
+        bcs     BrushEntranceVariantUnchanged
+        nop
+        iwt     R1, #GSU_ENTRANCE_VARIANTS_OFFSET
+        to      R1
+        add     R1
+        moveb   R0, (R1)
+        dec     R0
+        bmi     BrushEntranceVariantUnchanged
+        nop
+        sm      (BRUSH_CURRENT_LOCAL_VARIANT), R0
+BrushEntranceVariantUnchanged:
+    .else
+        ; Each entrance leaf may be on a different opening/closing phase.
+        lm      R0, (BRUSH_CURRENT_ENTITY)
+        iwt     R1, #QC_ENTRANCE_RENDER_ENTITY_0
+        with    R0
+        cmp     R1
+        bne     BrushEntranceCheckSecond
+        nop
+        lm      R0, (GSU_ENTRANCE_VARIANTS_OFFSET)
+        bra     BrushEntranceVariantReady
+        nop
+BrushEntranceCheckSecond:
+        iwt     R1, #QC_ENTRANCE_RENDER_ENTITY_1
+        with    R0
+        cmp     R1
+        bne     BrushEntranceVariantUnchanged
+        nop
+        lm      R0, (GSU_ENTRANCE_VARIANTS_OFFSET+2)
+BrushEntranceVariantReady:
+        sm      (BRUSH_CURRENT_LOCAL_VARIANT), R0
+BrushEntranceVariantUnchanged:
+    .endif
+  .endif
+.endif
+        ; Skip the alignment byte and offline-validated variant count.
+        ; Folding the header offset and skipping these unused reads also
+        ; preserves the downstream address-sensitive technique-4 windows.
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        BSP_ROM_LOAD_WORD R1
+        lm      R0, (BRUSH_CURRENT_LOCAL_VARIANT)
+        with    R1
+        add     R0
+        sm      (BRUSH_CURRENT_GLOBAL_VARIANT), R1
+        ret
+        nop
+.endif
+
+.if BRUSH_ENTRANCE_VARIANTS
+.assert BSP_QUAKEC_GAMEPLAY, error, "Entrance helper requires gameplay fly-overlay installation"
+.assert * - FlyAliasTestVisibility <= GSU_ALIAS_FLY_CODE_CAPACITY, error, "Entrance helper exceeds the deferred alias tail"
+.endif
+.popseg
+
+.if .defined(PLAYABLE_E1M1_X3_WORLD_CLIP) && (BSP_RENDER_SCALE = 3)
+; The fly pipeline installs this tail before the static world pass.
+.pushseg
+.segment "GSU_ALIAS_FLY_CODE"
+BakedClipX3StaticWorld:
+        moves   R7, R7
+        bne     @Touched
+        nop
+        GSU_ABSOLUTE_GOTO TextureClipFaceProject
+@Touched:
+        iwt     R0, #TEXTURE_VIEW_B
+        sm      (CONVEX_OUTPUT_PTR), R0
+        ibt     R0, #$FF
+@FindPlane:
+        with    R7
+        lsr
+        bcc     @FindPlane
+        inc     R0
+        sm      (CONVEX_PLANE), R0
+        GSU_ABSOLUTE_GOTO TexturePlaneLoop
+.assert * - FlyAliasTestVisibility <= GSU_ALIAS_FLY_CODE_CAPACITY, error, "Flat world clip dispatch exceeds the deferred overlay"
+.popseg
+.endif

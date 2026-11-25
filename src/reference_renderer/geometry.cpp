@@ -6,9 +6,9 @@ namespace quake_bsp_reference {
 
 PacketSelection parse_packet_selection(std::span<const std::uint8_t> bytes, const SourceWorld& world)
 {
-    if (bytes.empty() || (bytes.size() & 1U) != 0)
+    if ((bytes.size() & 1U) != 0)
     {
-        fail("packet source-face sidecar must contain non-empty u16 records");
+        fail("packet source-face sidecar must contain complete u16 records");
     }
     PacketSelection packet;
     packet.selected_faces.resize(static_cast<std::size_t>(world.face_count));
@@ -86,8 +86,10 @@ ViewTransform packed_view_transform(const SourceWorld& world, const Camera& came
     const double yaw_cos = kCosTable[table_index(camera.yaw)] / 64.0;
     const double pitch_sin = kSinTable[table_index(camera.pitch)] / 64.0;
     const double pitch_cos = kCosTable[table_index(camera.pitch)] / 64.0;
+    const auto position = camera.position_q2();
     return {
-        world.origin + Vec3{camera.x * kWorldScale, camera.y * kWorldScale, camera.z * kWorldScale},
+        world.origin +
+            Vec3{position[0] * (kWorldScale / 4), position[1] * (kWorldScale / 4), position[2] * (kWorldScale / 4)},
         {pitch_cos * yaw_cos, pitch_cos * yaw_sin, pitch_sin},
         {-yaw_sin, yaw_cos, 0.0},
         {-pitch_sin * yaw_cos, -pitch_sin * yaw_sin, pitch_cos},
@@ -129,6 +131,62 @@ Ray view_ray(const ViewTransform& view, int x, int y)
     return {view.origin, view.forward + view.screen_right * right + view.up * up};
 }
 
+Ray inverse_projection_view_ray(const ViewTransform& view, int x, int y)
+{
+    const double right = (static_cast<double>(x) + 0.5 - render_center_x()) / render_focal_length();
+    const double up = (render_center_y() - (static_cast<double>(y) + 0.5)) / render_focal_length();
+    // These are reciprocal row vectors of the actual view matrix, not its
+    // transpose. Q6 sine/cosine rounding makes that distinction observable.
+    const auto inverse_forward = cross(view.screen_right, view.up);
+    const auto inverse_right = cross(view.up, view.forward);
+    const auto inverse_up = cross(view.forward, view.screen_right);
+    const double determinant = dot(view.forward, inverse_forward);
+    if (!std::isfinite(determinant) || std::abs(determinant) <= 1e-15)
+        fail("projection-ray diagnostic requires an invertible view basis");
+    return {view.origin, (inverse_forward + inverse_right * right + inverse_up * up) * (1.0 / determinant)};
+}
+
+ProjectionRayOwnerPlanes projection_ray_owner_planes(
+    const SourceWorld& world,
+    const ViewTransform& view,
+    std::span<const std::uint8_t> allowed_faces
+)
+{
+    if (world.face_count < 0 || world.face_count > kMissFace ||
+        (!allowed_faces.empty() && allowed_faces.size() != static_cast<std::size_t>(world.face_count)))
+        fail("projection-ray diagnostic has an invalid face filter");
+    // Test each real fan triangle. A rounded Q2 polygon need not be planar,
+    // so neither its first fan normal nor a stored packed plane is enough.
+    std::vector<Triangle> front_triangles;
+    front_triangles.reserve(world.triangles.size());
+    for (const auto& triangle : world.triangles)
+    {
+        if (triangle.face >= world.face_count)
+            fail("projection-ray triangle escapes its world");
+        if (!allowed_faces.empty() && allowed_faces[triangle.face] == 0)
+            continue;
+        const auto normal = cross(triangle.second - triangle.first, triangle.third - triangle.first);
+        if (dot(normal, view.origin - triangle.first) < -1e-9)
+            front_triangles.push_back(triangle);
+    }
+    const Bvh front_bvh(front_triangles);
+    const std::vector<std::uint8_t> visible_faces(static_cast<std::size_t>(world.face_count), 1);
+    ProjectionRayOwnerPlanes result;
+    result.nominal_transposed.assign(kLogicalPixels, kMissFace);
+    result.inverse_projection.assign(kLogicalPixels, kMissFace);
+    for (int y = 0; y < render_height(); ++y)
+    {
+        for (int x = 0; x < render_width(); ++x)
+        {
+            const auto pixel = logical_pixel_index(x, y);
+            result.nominal_transposed[pixel] = front_bvh.nearest(view_ray(view, x, y), visible_faces).face;
+            result.inverse_projection[pixel] =
+                front_bvh.nearest(inverse_projection_view_ray(view, x, y), visible_faces).face;
+        }
+    }
+    return result;
+}
+
 namespace {
 } // namespace
 
@@ -142,9 +200,11 @@ bool face_is_visible(const SourceWorld& world, const Camera& camera, const Vec3&
         }
         const auto& plane = world.packed_visibility_planes.at(face);
         const int coordinate_scale = 1 << world.packed_vertex_fraction_bits;
-        auto camera_dot = wrap_i16(static_cast<int>(plane.x) * camera.x * coordinate_scale);
-        camera_dot = wrap_i16(static_cast<int>(camera_dot) + static_cast<int>(plane.y) * camera.y * coordinate_scale);
-        camera_dot = wrap_i16(static_cast<int>(camera_dot) + static_cast<int>(plane.z) * camera.z * coordinate_scale);
+        const auto position = coordinate_scale == 4 ? camera.position_q2() :
+            std::array{camera.x * coordinate_scale, camera.y * coordinate_scale, camera.z * coordinate_scale};
+        auto camera_dot = wrap_i16(static_cast<int>(plane.x) * position[0]);
+        camera_dot = wrap_i16(static_cast<int>(camera_dot) + static_cast<int>(plane.y) * position[1]);
+        camera_dot = wrap_i16(static_cast<int>(camera_dot) + static_cast<int>(plane.z) * position[2]);
         return wrap_i16(static_cast<int>(camera_dot) - plane.distance) <= 0;
     }
     const auto& plane = world.visibility_planes.at(face);
@@ -412,6 +472,11 @@ sample_packed_bsp_lightmap_level(const SourceWorld& world, std::uint16_t face, s
         int accumulated = 0;
         for (int style = 0; style < lightmap.style_count; ++style)
         {
+            const auto id = lightmap.styles[static_cast<std::size_t>(style)];
+            if ((id == 10 && (world.switched_light_mask & 32U)) ||
+                (id == 32 && (world.switched_light_mask & 16U)) ||
+                (id >= 33 && id <= 36 && (world.switched_light_mask & (1U << (id - 33))) == 0))
+                continue;
             accumulated += world.lighting[offset + static_cast<std::size_t>(style) * sample_count + sample] *
                            kQuakeNeutralLightStyleScale;
         }
@@ -761,29 +826,34 @@ ReferenceFrame render_source_reference(
     return frame;
 }
 
-namespace {
-int signed_shift6(int value)
+ViewVertex transform_packed_delta(int dx, int dy, int dz,
+    int cy, int sy, int cp, int sp, int fraction_bits)
 {
-    return wrap_i16(value >> 6);
+    dx = wrap_i16(dx);
+    dy = wrap_i16(dy);
+    dz = wrap_i16(dz);
+    const auto nearest = [](std::int64_t value, int shift) {
+        const auto rounded = shift ? (value + (std::int64_t{1} << (shift - 1))) >> shift : value;
+        return wrap_i16(static_cast<int>(rounded));
+    };
+    const std::int64_t forward = std::int64_t{dx} * cy + std::int64_t{dy} * sy;
+    return {
+        nearest(std::int64_t{dy} * cy - std::int64_t{dx} * sy, fraction_bits),
+        nearest(std::int64_t{dz} * cp * 64 - forward * sp, fraction_bits + 6),
+        nearest(forward * cp + std::int64_t{dz} * sp * 64, fraction_bits + 6)};
 }
-} // namespace
 
 ViewVertex transform_packed_vertex(const SourceWorld& world, const PackedVertex& vertex, const Camera& camera)
 {
     const int yaw = table_index(camera.yaw);
     const int pitch = table_index(camera.pitch);
-    const int coordinate_scale = 1 << world.packed_vertex_fraction_bits;
-    const int dx = vertex.x - camera.x * coordinate_scale;
-    const int dy = vertex.y - camera.y * coordinate_scale;
-    const int dz = vertex.z - camera.z * coordinate_scale;
-    const auto to_q6 = [&](int value) {
-        return world.packed_vertex_fraction_bits == 0 ? value : value >> world.packed_vertex_fraction_bits;
-    };
-    const int forward_q6 = to_q6(dx * kCosTable[yaw]) + to_q6(dy * kSinTable[yaw]);
-    const int right_q6 = to_q6(dy * kCosTable[yaw]) - to_q6(dx * kSinTable[yaw]);
-    const int up_q6 = to_q6(dz * kCosTable[pitch]) - signed_shift6(forward_q6 * kSinTable[pitch]);
-    const int depth_q6 = signed_shift6(forward_q6 * kCosTable[pitch]) + to_q6(dz * kSinTable[pitch]);
-    return {right_q6, up_q6, depth_q6};
+    const int scale = 1 << world.packed_vertex_fraction_bits;
+    const auto position = scale == 4 ? camera.position_q2() :
+        std::array{camera.x * scale, camera.y * scale, camera.z * scale};
+    return transform_packed_delta(vertex.x - position[0],
+        vertex.y - position[1], vertex.z - position[2],
+        kCosTable[yaw], kSinTable[yaw], kCosTable[pitch], kSinTable[pitch],
+        world.packed_vertex_fraction_bits);
 }
 
 ProjectedVertex project_packed_vertex(const SourceWorld& world, const PackedVertex& vertex, const Camera& camera)
@@ -799,7 +869,8 @@ ProjectedVertex project_packed_vertex(const SourceWorld& world, const PackedVert
     {
         return result;
     }
-    const int depth_q4 = std::max(4, (view.depth_q6 + 8) >> 4);
+    // PacketProjectInRange clamps the eight Q6 depths that round to entry 1024.
+    const int depth_q4 = std::clamp((view.depth_q6 + 8) >> 4, 4, 1023);
     const int reciprocal_q12 = world.reciprocal_table.at(static_cast<std::size_t>(depth_q4));
     result.screen.x = wrap_i16(
         render_center_x() +
@@ -1085,6 +1156,16 @@ int ceil_divide(int numerator, int denominator)
     return -floor_divide(-numerator, denominator);
 }
 
+std::int16_t interpolate_view_nearest_q12(int base, int other, int factor)
+{
+    if (factor < 0 || factor > 2048)
+        fail("frustum geometry factor escaped its nearer-endpoint interval");
+    const int delta = wrap_i16(other - base);
+    // Round the final coordinate, independently of the chosen integer base.
+    // Unlike signed truncation this has at most half a Q6 unit of error.
+    return wrap_i16(base + floor_divide(delta * factor + 2048, 4096));
+}
+
 int frustum_distance(const ViewVertex& point, int plane)
 {
     const int axis = plane < 2 ? point.right_q6 : point.up_q6;
@@ -1113,6 +1194,8 @@ ViewVertex interpolate_frustum_edge(const ViewVertex& inside, const ViewVertex& 
     const auto interpolate = [&](int inside_component, int outside_component) {
         const int base = inside_base ? inside_component : outside_component;
         const int other = inside_base ? outside_component : inside_component;
+        if (active_render_scale == RenderScale::X2)
+            return interpolate_view_nearest_q12(base, other, factor);
         const int product = (other - base) * factor;
         return wrap_i16(base + product / 4096);
     };
@@ -1182,9 +1265,7 @@ void raster_fixed_convex_polygon(RasterResult& result, std::span<const ViewVerte
     {
         const int depth = std::max(1, point.depth_q6);
         const auto projected_delta = [&](int component) {
-            const int magnitude = std::min(std::abs(component), depth * (render_wide_frustum() ? 2 : 1));
-            const int ratio_q11 = (magnitude << 11) / depth;
-            return render_project_q7(component < 0 ? -ratio_q11 : ratio_q11);
+            return render_project_world_q7(component, depth);
         };
         polygon.push_back(
             {render_center_x() * 128 + projected_delta(point.right_q6),

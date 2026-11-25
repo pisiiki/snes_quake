@@ -14,6 +14,10 @@ BRUSH_ARBITER_BLOCK_END_T       = BRUSH_STATE + $DE
 BRUSH_ARBITER_CACHED_DEPTH      = BRUSH_STATE + $E0
 BRUSH_ARBITER_CACHED_ROW_SHIFT  = BRUSH_STATE + $E2
 BRUSH_ARBITER_SCREEN_DEN         = BRUSH_STATE + $EA
+BRUSH_UNIFORM_COLOR              = BRUSH_STATE + $E4
+BRUSH_UNIFORM_ROM_RETURN         = BRUSH_STATE + $E6
+BRUSH_UNIFORM_LEVEL              = BRUSH_STATE + $E8
+.assert BRUSH_UNIFORM_LEVEL + 2 <= BRUSH_ARBITER_SCREEN_DEN, error, "Uniform state overlaps screen denominator"
 
 .assert BRUSH_ARBITER_SCREEN_DEN + 2 <= BRUSH_STATE + $100, error, "Brush span state exceeds its private tail"
 
@@ -150,7 +154,7 @@ BrushArbiterSpanPrepareReciprocal:
         ; retain exact per-pixel depth ownership.
         bne     BrushArbiterSpanContestedAnchor
         nop
-        GSU_ABSOLUTE_GOTO BrushArbiterSpanNoDepthAnchor
+        GSU_ABSOLUTE_GOTO BrushArbiterPrimeDisjointLightmap
 BrushArbiterSpanContestedAnchor:
         GSU_ABSOLUTE_GOTO BrushArbiterSpanLegacyDepthAnchor
 BrushArbiterSpanLegacyAnchor:
@@ -160,7 +164,7 @@ BrushArbiterSpanLegacyAnchor:
         cmp     R1
         bne     BrushArbiterSpanLegacyDepthAnchor
         nop
-        GSU_ABSOLUTE_GOTO BrushArbiterSpanNoDepthAnchor
+        GSU_ABSOLUTE_GOTO BrushArbiterPrimeDisjointLightmap
 BrushArbiterSpanLegacyDepthAnchor:
         ; Select the exact constant/+1 shortcuts once per contested span,
         ; before sampling S/T.
@@ -168,6 +172,10 @@ BrushArbiterSpanLegacyDepthAnchor:
   .repeat 7 - (* - BrushArbiterSpanLegacyDepthAnchor)
         nop
   .endrepeat
+.if .defined(PLAYABLE_FLAT_BRUSH_DEPTH) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushAnchorSite
+FlatBrushAnchorSite:
+.endif
         lm      R0, (TEXTURE_SPAN_X)
         jal     TexturePerspectiveSampleSpan
         nop
@@ -266,8 +274,11 @@ BrushArbiterSpanBlockCoordinatesReady:
         ; proof pay the exact per-block classifier. Every other span preserves
         ; the established setup and LIGHTMAP_BLOCK_FAST selection.
         lm      R0, (BRUSH_ARBITER_BLOCK_PROOF)
-        moves   R0, R0
-        beq     BrushArbiterSpanBlockLightmapReady
+        ; 1 requests an exact per-block proof. Zero and the negative cached
+        ; continuation token both retain the span-invariant classification.
+        dec     R0
+        nop                             ; Retain established following entries.
+        bne     BrushArbiterSpanBlockLightmapReady
         nop
         iwt     R10, #BrushArbiterSpanBlockLightmapReady
         GSU_ABSOLUTE_GOTO BrushArbiterSpanPrepareBlockLightmap
@@ -323,7 +334,7 @@ BrushArbiterSpanTPositive:
         move    R8, R2
         move    R13, R3
         move    R4, R10
-        GSU_ABSOLUTE_GOTO BrushCachedSpanAdmit
+        GSU_ABSOLUTE_GOTO BrushCachedSpanContinueOrAdmit
         ; Preserve the established Pixel/depth/T4 overlay addresses.
         .repeat 3
         nop
@@ -377,6 +388,9 @@ BrushArbiterSpanWinner:
         lm      R0, (BRUSH_ARB_CANDIDATE_CURSOR)
         movew   (R2), R0
 BrushArbiterSpanCompose:
+.if .defined(PLAYABLE_FLAT_BRUSH_DEPTH) && (BSP_RENDER_SCALE = 2)
+        .export BrushArbiterSpanCompose
+.endif
         ; Perspective reciprocal lookup changes ROMB.  Restore the packed
         ; texture bank before either generic winner sampler reads a texel.
         lm      R0, (TEXTURE_ROM_BANK)
@@ -397,9 +411,35 @@ BrushArbiterSpanAlbedo:
 
 ; Keep later technique-4 overlay windows stable after deleting an obsolete
 ; winner-compositor slot.
-.repeat $2B
+BrushUniformPrepareDepthBridge:
+.if BSP_RENDER_SCALE = 2
+        jal     TexturePrepareDivideQ12
         nop
-.endrepeat
+        jal     BrushArbiterSelectDepthRoutine
+        nop
+        lm      R8, (BRUSH_UNIFORM_ROM_RETURN)
+        move    R9, #BSP_GSU_ROM2_BANK
+        from    R8
+        ljmp    R9
+        nop
+; Lit/fallback references retain the ordinary RAM path and its cache. LM R0
+; resets the default source/destination, so HIB needs no WITH prefix here.
+BrushUniformMissingGateRAM:
+        lm      R0, (BRUSH_ARB_LIGHTMAP_REF)
+        hib
+        dec     R0
+        dec     R0
+        beq     @Missing
+        nop
+        ret
+@Missing:
+        move    R9, #BSP_GSU_ROM2_BANK
+        iwt     R8, #.loword(BrushUniformMaterialGate)
+        from    R8
+        ljmp    R9
+        nop
+.endif
+        .res $2B - (* - BrushUniformPrepareDepthBridge), $01
 
 BrushArbiterSpanLightmapped:
         ; Technique 4: reconstruct the exact lightmap result from the same
@@ -408,11 +448,16 @@ BrushArbiterSpanLightmapped:
         ; and checked. LightmapSample preserves R12, so keep albedo in R12.
         move    R12, R0
         jal     LightmapSample
+.ifdef PLAYABLE_TEXTURELESS_WHITE
+.export BrushArbiterLightmapPalette:far
+.endif
+BrushArbiterLightmapPalette:
         with    R4
         swap
         with    R4
         add     R12
         moveb   R0, (R4)
+.assert * - BrushArbiterLightmapPalette = 6, error, "Brush lightmap mapper extent changed"
         color
 
 BrushArbiterSpanPlot:
@@ -435,6 +480,10 @@ BrushArbiterSpanAdvance:
         sm      (TEXTURE_SPAN_X), R0
 
         ; Advance the established block DDA even for a losing candidate.
+.if .defined(PLAYABLE_FLAT_BRUSH_DEPTH) && (BSP_RENDER_SCALE = 2)
+        .export FlatBrushAdvanceSite
+FlatBrushAdvanceSite:
+.endif
         lm      R10, (TEXTURE_COORD_PTR)
         movew   R5, (R10)
         inc     R10
@@ -533,11 +582,17 @@ BrushArbiterSelectProjectiveDepth:
         nop
         sm      (GSU_TEXTURE_ENDPOINT_RETURN_OFFSET), R11
         sm      (GSU_TEXTURE_ENDPOINT_ROW_PTR_OFFSET), R2
-        iwt     R0, #GSU_TEXTURE_ENDPOINT_STAGE_OFFSET
+        iwt     R0, #GSU_BRUSH_ROW_SCRATCH_OFFSET
         sm      (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET), R0
+.export BrushArbiterDepthMathCall
+BrushArbiterDepthMathCall:
         jal     TextureEndpointBatchMath
+.assert * - BrushArbiterDepthMathCall = 5, error, "Depth math JAL operand changed"
         nop
+.export BrushArbiterDepthBatchCall, TextureEndpointDepthBatch
+BrushArbiterDepthBatchCall:
         GSU_ABSOLUTE_GOTO TextureEndpointDepthBatch
+.assert * - BrushArbiterDepthBatchCall = 4, error, "Depth batch target operand changed"
 BrushArbiterPreparedDepthReady:
         ; The math pass displaced this window. Restore it before the color
         ; anchors, coordinate DDA and lightmap lookup consume it again.
@@ -545,7 +600,7 @@ BrushArbiterPreparedDepthReady:
         nop
         lm      R0, (GSU_TEXTURE_ENDPOINT_ROW_PTR_OFFSET)
         sm      (TEXTURE_SPAN_X), R0
-        iwt     R0, #GSU_TEXTURE_ENDPOINT_STAGE_OFFSET
+        iwt     R0, #GSU_BRUSH_ROW_SCRATCH_OFFSET
         sm      (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET), R0
         iwt     R0, #BrushArbiterDepthBuffered
         lm      R11, (GSU_TEXTURE_ENDPOINT_RETURN_OFFSET)
@@ -561,4 +616,4 @@ BrushArbiterDepthBuffered:
 BrushArbiterDepthBufferedEnd:
 .assert .loword(BrushArbiterDepthBufferedEnd) <= $A790, lderror, "Buffered brush depth exceeds its loser cache line"
 
-.assert GSU_TEXTURE_ENDPOINT_STAGE_OFFSET + BSP_VIEW_WIDTH * 2 <= GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET, error, "Buffered brush depths overlap the ownership row"
+.assert GSU_BRUSH_ROW_SCRATCH_OFFSET + BSP_VIEW_WIDTH * 2 <= GSU_BRUSH_ARBITER_DEPTH_ROW_OFFSET, error, "Buffered brush depths overlap the ownership row"

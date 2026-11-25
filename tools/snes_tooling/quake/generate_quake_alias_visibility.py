@@ -26,6 +26,7 @@ SHARED_TOOLS = Workspace.discover().shared_tools
 
 
 import snes_tooling.quake.build_quake_bsp_reference as reference_build  # noqa: E402
+from snes_tooling.quake.quake_target_layout import alias_halfbank_limit
 from snes_tooling.shared.generated_outputs import (  # noqa: E402
     GeneratedOutputError,
     OwnedFileFamily,
@@ -36,14 +37,13 @@ import snes_tooling.quake.generate_quake_bsp_ordered_replay as ordered_replay  #
 from snes_tooling.quake.quake_brush_replay import fnv1a64  # noqa: E402
 from snes_tooling.quake.quake_alias_packing import HALFBANK_BYTES, gsu_location  # noqa: E402
 from snes_tooling.quake.quake_rom_config import MESEN_TARGETS  # noqa: E402
-from snes_tooling.quake.quake_rom_config import configured_warp_source_focal
-from snes_tooling.quake import quake_alias_visibility_projection as projection_archive
-from snes_tooling.shared.host_resources import physical_core_count
+from snes_tooling.quake import quake_alias_visibility_projection as projection_archive  # noqa: E402
+from snes_tooling.shared.host_resources import physical_core_count  # noqa: E402
 
 
 DEFAULT_OUTPUT = EXAMPLE / "Data"
 DEFAULT_PREDECESSOR_REUSE_CONTRACT = (
-    WORKSPACE / "config/ordered30-predecessor-reuse.json"
+    WORKSPACE / "config/snes_quake/ordered30-predecessor-reuse.json"
 )
 ENABLED_NAME = Path("QuakeBSPAliasVisibilityEnabled.bin")
 DISABLED_NAME = Path("QuakeBSPAliasVisibilityDisabled.bin")
@@ -61,6 +61,7 @@ QAV_VERSION = 2
 QAV_HEADER_BYTES = 56
 QAV_ROW_BYTES = 2
 QAV_HALFBANK_BYTES = 0x8000
+QAV_HOST_MAX_BYTES = 0x10000
 QAV_ROW_RECORD_BITS = 4
 QAV_ROW_RECORD_MASK = (1 << QAV_ROW_RECORD_BITS) - 1
 QAV_DICTIONARY_MAXIMUM = (1 << (16 - QAV_ROW_RECORD_BITS)) - 1
@@ -255,7 +256,7 @@ def _read_alias_package(data_dir: Path) -> tuple[tuple[Path, ...], bytes, int]:
         or type(maximum_bank) is not int
         or type(actual_bank) is not int
         or type(chunk_count) is not int
-        or not 0 < chunk_count <= configured_count <= target.max_alias_halfbank_count
+        or not 0 < chunk_count <= configured_count <= alias_halfbank_limit(target, format_metadata.get("storagePhysicalHalfbanks", ()))
         or maximum_bank != target.max_gsu_rom_bank
         or not 0 <= actual_bank <= maximum_bank
     ):
@@ -303,8 +304,8 @@ def _dynamic_brush_replay_supported(data_dir: Path) -> bool:
 def _world_only_enabled_payload(disabled_payload: bytes) -> bytes:
     """Mirror a brush-disabled QAV2 corpus while retaining its world visibility."""
 
-    if len(disabled_payload) != QAV_HALFBANK_BYTES:
-        raise AliasVisibilityError("QAV2 output is not one 32 KiB halfbank")
+    if not QAV_HALFBANK_BYTES <= len(disabled_payload) <= QAV_HOST_MAX_BYTES:
+        raise AliasVisibilityError("QAV2 output escapes its host corpus size range")
     if struct.unpack_from("<H", disabled_payload, QAV_BRUSHES_ENABLED_OFFSET) != (0,):
         raise AliasVisibilityError("world-only QAV2 source still enables brushes")
     enabled_payload = bytearray(disabled_payload)
@@ -319,8 +320,8 @@ def parse_visibility(
     expected_camera_fingerprint: int,
     expected_alias_fingerprint: int,
 ) -> VisibilityCorpus:
-    if len(payload) != QAV_HALFBANK_BYTES:
-        raise AliasVisibilityError("QAV2 output is not one 32 KiB halfbank")
+    if not QAV_HALFBANK_BYTES <= len(payload) <= QAV_HOST_MAX_BYTES:
+        raise AliasVisibilityError("QAV2 output escapes its host corpus size range")
     (
         magic,
         version,
@@ -356,7 +357,7 @@ def parse_visibility(
         or directory_offset != QAV_HEADER_BYTES
         or payload_offset
         != directory_offset + source_rows * QAV_ROW_BYTES + dictionary_count * 2
-        or payload_offset + payload_bytes > len(payload)
+        or len(payload) != max(QAV_HALFBANK_BYTES, payload_offset + payload_bytes)
     ):
         raise AliasVisibilityError("QAV2 header contract is invalid")
     if bool(brushes_enabled) != expected_brushes:
@@ -641,7 +642,6 @@ def _export(
     map_entry: str,
     brushes_enabled: bool,
     render_scale: int = 2,
-    source_focal: int = 64,
 ) -> str:
     command = [
         str(executable),
@@ -665,7 +665,7 @@ def _export(
     if not brushes_enabled:
         command.append("--no-brushes")
     if render_scale == 3:
-        command.extend(("--render-scale", "x3", "--visibility-source-focal", str(source_focal)))
+        command.extend(("--render-scale", "x3"))
     completed = subprocess.run(
         command,
         cwd=EXAMPLE,
@@ -679,11 +679,15 @@ def _export(
         "aliasVisibilityContract=QAV2",
         f"brushes={'enabled' if brushes_enabled else 'disabled'}",
         f"renderScale=x{render_scale}",
-        f"sourceFocal={96 if render_scale == 2 else source_focal}",
+        f"sourceFocal={96 if render_scale == 2 else 64}",
     )
     if completed.returncode or any(value not in completed.stdout for value in expected):
+        status = completed.returncode & 0xFFFFFFFF
+        hint = ('\nA native DLL is missing; retain the verified SDL3.dll beside the reference executable.'
+                if status == 0xC0000135 else '')
         raise AliasVisibilityError(
-            "reference alias-visibility export failed:\n" + completed.stdout
+            f"reference alias-visibility export failed (exit={completed.returncode}, 0x{status:08X}):\n"
+            + (completed.stdout or '<no native output>') + hint
         )
     return completed.stdout.strip()
 
@@ -784,6 +788,11 @@ def build_outputs(
     with tempfile.TemporaryDirectory(prefix="quake-alias-visibility-") as temporary:
         root = Path(temporary)
         full_rate_replay = ordered_replay.build_replay(data_dir, stride=1, workers=workers)
+        # Reject stale alias/replay contracts before launching native exports.
+        # The final check below still binds the reference-reported row count.
+        _load_predecessor_reuse_contract(
+            predecessor_contract, data_dir, expected_rows=len(full_rate_replay.frames)
+        )
         full_rate_payload = ordered_replay.encode_replay(full_rate_replay)
         full_rate_path = root / "QuakeBSPFullRateReplay.bin"
         full_rate_path.write_bytes(full_rate_payload)
@@ -827,7 +836,7 @@ def build_outputs(
         )
         archive_outputs, archive_metadata, projection_corpora = projection_archive.build_projection_archive(
             executable=executable, pak=pak, data=data_dir, temporary=root,
-            focal=configured_warp_source_focal(config), codec=codec, enabled=enabled, disabled=disabled,
+            codec=codec, enabled=enabled, disabled=disabled,
             workers=workers)
     if (
         enabled.source_rows,
@@ -902,7 +911,7 @@ def build_outputs(
             "ordering": "QBA1 far-to-near token order; masks retain that token's opaque destination-texel order",
             "fastPath": "fully visible tokens have no record; fully hidden tokens skip projection; only partial tokens consume bitmasks",
             "deduplication": "exact row payloads use first-occurrence dictionary IDs; source-row lookup remains direct",
-            "temporalIdentity": "joint first-occurrence IDs bind exact painter groups, raster-reachable QBA1 states and all three projection row payloads; camera/focal and brush guards remain mandatory",
+            "temporalIdentity": "joint first-occurrence IDs bind exact painter groups, raster-reachable QBA1 states and both projection row payloads; camera/focal and brush guards remain mandatory",
             "predecessorReuse": "a hash-bound canonical ORDER 30HZ bitset proves exact equality with the circular preceding presentation",
         },
         "schedule": {
@@ -965,7 +974,6 @@ def build_outputs(
         INCLUDE_NAME: _render_include(
             enabled, disabled, reuse_bytes=len(predecessor_reuse)
         ) + (f"BSP_ALIAS_ARCHIVE_VERSION = 3\n"
-             f"BSP_ALIAS_ARCHIVE_WARP_FOCAL = {configured_warp_source_focal(config)}\n"
              f"BSP_ALIAS_ARCHIVE_MAX_DECODED_BYTES = {archive_metadata['maximumDecodedBytes']}\n"
              f"BSP_ALIAS_ARCHIVE_PAYLOAD_BYTES = {archive_metadata['payloadBytes']}\n").encode("ascii"),
         ASSEMBLY_NAME: projection_archive.assembly(),
@@ -984,7 +992,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--codec", choices=("auto", "raw"), default="auto")
     parser.add_argument("--workers", type=int, default=physical_core_count())
-    parser.add_argument("--reference", type=Path, help="prebuilt reference; avoids shared build output in parallel focal preparation")
+    parser.add_argument("--reference", type=Path, help="prebuilt reference; avoids shared build output in parallel corpus preparation")
     parser.add_argument(
         "--predecessor-reuse-contract",
         type=Path,

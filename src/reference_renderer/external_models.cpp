@@ -419,7 +419,13 @@ void compose_source_external_bsp_models(
         auto& entity_coverage = coverage.entity_coverage(entity.entity);
         const auto& model = scene.models[entity.model_slot];
         const auto& world = *model.world;
-        const auto basis = external_bsp_basis(entity.angles);
+        const auto basis = [&]() {
+            if (!entity.source_angles)
+                return external_bsp_basis(entity.angles);
+            const auto& angles = *entity.source_angles;
+            const auto transform = source_view_transform({{}, angles[0], angles[1], angles[2]});
+            return ExternalBspBasis{transform.forward, transform.screen_right * -1.0, transform.up};
+        }();
         const Vec3 local_camera = external_bsp_world_to_local(basis, view.origin - entity.origin);
         std::vector<std::uint8_t> visible_faces(world.face_count);
         for (int face = 0; face < world.face_count; ++face)

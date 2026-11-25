@@ -1,0 +1,64 @@
+; Stock MesenCE maps FX3 SRAM into the R14/GETB address decoder. The
+; experimental pages therefore reuse the ordinary composed-span fetch.
+.segment "GSU_MSU_CODE"
+TextureSelectMsuSurface:
+        lm      R0, (MSU_SURFACE_READY)
+        moves   R0, R0
+        beq     @Miss
+        nop
+        lm      R1, (PACKET_SOURCE_INDEX)
+        move    R0, R1
+        lob
+        iwt     R4, #MSU_SURFACE_INDEX
+        with    R4
+        add     R0
+        ldb     (R4)
+        moves   R0, R0
+        beq     @Miss
+        nop
+        iwt     R2, #MSU_SURFACE_COLLISION
+        cmp     R2
+        beq     @Collision
+        nop
+        iwt     R4, #MSU_SURFACE_TAG_BASE - 1
+        with    R4
+        add     R0
+        movew   R0, (R4)
+        cmp     R1
+        beq     @Hit
+        nop
+        bra     @Miss
+        nop
+@Collision:
+        iwt     R4, #MSU_SURFACE_TAG_BASE
+        move    R2, #MSU_SURFACE_SLOT_COUNT
+@Slot:
+        movew   R0, (R4)
+        cmp     R1
+        beq     @Hit
+        nop
+        with    R4
+        add     #MSU_SURFACE_TAG_BYTES
+        dec     R2
+        bne     @Slot
+        nop
+@Miss:
+        move    R0, #0
+        moves   R0, R0
+        ret
+        nop
+@Hit:
+        inc     R4
+        inc     R4
+        movew   R0, (R4)
+        sm      (TEXTURE_WIDTH), R0
+        inc     R4
+        inc     R4
+        movew   R0, (R4)
+        sm      (TEXTURE_ROM_ADDRESS), R0
+        iwt     R0, #$70
+        sm      (TEXTURE_ROM_BANK), R0
+        move    R0, #1
+        moves   R0, R0
+        ret
+        nop

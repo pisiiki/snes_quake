@@ -1,0 +1,89 @@
+; The required-sidecar X2 renderer keeps composed block control and exact
+; coordinate carries in its existing resident window. No CACHE transition.
+TextureComposedSampleSpanBuffered:
+        lm      R10, (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET)
+        moves   R10, R10
+        beq     TextureComposedSampleSpanBufferedFallback
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R10
+        ret
+        nop
+TextureComposedSampleSpanBufferedFallback:
+        GSU_ABSOLUTE_GOTO TexturePerspectiveSampleSpan
+
+TextureComposedBlockSetupCurrentX:
+        to      R4
+        add     #8
+        lm      R1, (TEXTURE_SPAN_END_X)
+        to      R2
+        from    R4
+        sub     R1
+        bmi     TextureComposedLightmapBlock8Setup
+        nop
+        GSU_ABSOLUTE_GOTO TextureLightmapBlockFinalSetup
+TextureComposedLightmapBlock8Setup:
+        move    R0, R4
+        jal     TextureComposedSampleSpanBuffered
+        move    R10, R6
+TextureComposedBlock8CoordinatesReady:
+        iwt     R6, #$2000
+        lm      R1, (TEXTURE_SPAN_S)
+        from    R5
+        sub     R1
+        move    R5, R1
+        to      R7
+        lmult
+        move    R9, R4
+        ; The signed step itself is an exact bias for $2000-spaced carries.
+        move    R1, R7
+        lm      R2, (TEXTURE_SPAN_T)
+        from    R10
+        sub     R2
+        to      R8
+        lmult
+        move    R6, R2
+        move    R3, R4
+        move    R2, R8
+        move    R12, #8
+        iwt     R11, #TextureComposedSpanStart
+TextureComposedCarryStart:
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        iwt     R13, #TextureComposedCarryLoop
+        jmp     R13
+        with    R1
+TextureComposedCarryLoop:
+        add     R9
+        with    R5
+        adc     R7
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        with    R2
+        add     R3
+        with    R6
+        adc     R8
+        movew   (R10), R6
+        inc     R10
+        inc     R10
+        loop
+        with    R1
+        ret
+        nop
+
+TextureComposedCarryFinish:
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        iwt     R11, #TextureComposedCarryGenericReturn
+        bra     TextureComposedCarryStart
+        nop
+TextureComposedCarryGenericReturn:
+        iwt     R0, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        sm      (TEXTURE_COORD_PTR), R0
+        lm      R11, (TEXTURE_COORD_RETURN)
+        ret
+        nop

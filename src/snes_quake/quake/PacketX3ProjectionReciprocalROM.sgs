@@ -1,0 +1,28 @@
+; The shared divide table contains ceil(2^27 / d), stored in two base-2^15
+; limbs. Round that reciprocal down to X3's 2^14 projection numerator.
+; R5 is twice the Q2 depth index. All 1024 indices fit the first ROM bank.
+PacketX3ProjectionRomReciprocal:
+        with    R5
+        add     R5
+        iwt     R4, #GSU_DIVIDE_Q12_RECIPROCAL_ROM_ADDRESS-4
+        with    R4
+        add     R5
+        move    R0, #GSU_DIVIDE_Q12_RECIPROCAL_FIRST_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R9
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        to      R0                      ; Only bits 8..14 of the low limb matter.
+        getb
+        move    R10, #16
+        add     R10
+        .repeat 5
+        lsr
+        .endrepeat
+        with    R9
+        add     R9
+        with    R9
+        add     R9
+        to      R9
+        add     R9
+        GSU_ABSOLUTE_GOTO PacketProjectionReciprocalReady

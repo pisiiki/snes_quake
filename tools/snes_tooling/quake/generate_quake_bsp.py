@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ruff: noqa: E402, F405
-"""Pack one configured Quake demo and its announced BSP for SuperFX."""
+"""Pack a configured Quake level and optional demo for SuperFX."""
 
 from __future__ import annotations
 
@@ -25,6 +25,13 @@ from snes_tooling.shared.generated_outputs import (
     sync_generated_outputs,
 )  # noqa: E402
 from snes_tooling.quake.quake_bsp_fly_collision import build_collision_assets  # noqa: E402
+from snes_tooling.quake.quake_bsp_edge_refinement import (
+    PACKED_AFFINE_REFINEMENT_POLICY, packed_world_edge_candidates,
+    refine_packed_face_coordinates, refine_world_face_edges,
+)
+from snes_tooling.quake.quake_bsp_cull_planes import (
+    CAMERA_Q2_DOMAIN, WORLD_CULL_POLICY, derive_world_cull_plane,
+)
 from snes_tooling.quake.quake_camera_sampling import CAMERA_SAMPLING_CONTRACT, sample_camera_track
 from snes_tooling.quake.quake_scene_sampling import SCENE_SAMPLING_CONTRACT
 from snes_tooling.quake.quake_demo import (  # noqa: E402
@@ -37,6 +44,7 @@ from snes_tooling.quake.quake_rom_config import (  # noqa: E402
     DEFAULT_PLAYBACK_SAMPLE_RATE_HZ,
     DemoSource,
     configured_playback_sample_rate,
+    configured_target,
     configured_sky,
     resolve_configured_demo,
     resolve_demo_source,
@@ -46,43 +54,67 @@ from snes_tooling.quake.quake_rom_config import (  # noqa: E402
 from snes_tooling.quake.quake_bsp_assets import *  # noqa: E402,F401,F403
 
 
+def require_world_geometry(directory, payloads, *, origin, scale):
+    """Reject a changed saved-corpus geometry before starting a visibility bake."""
+    directory = Path(directory)
+    quantization = json.loads((directory / 'QuakeBSPMetadata.json').read_bytes())['world']['quantization']
+    if (list(origin) != quantization['origin']
+            or scale / 4 != quantization['world_units_per_quantized_unit']
+            or quantization['fraction_bits'] != 2):
+        raise ValueError('world coordinate frame differs before visibility bake')
+    changed = [name for name, value in payloads.items()
+               if (directory / name).read_bytes() != value]
+    if changed:
+        raise ValueError('world geometry differs before visibility bake: ' + ', '.join(changed))
+    print(f'world geometry preflight: {len(payloads)} binary files match {directory}',
+          file=sys.stderr, flush=True)
+
+
 def generate(
     pak_path: Path,
     demo_path: Path | None = None,
     *,
     config_path: Path | None = None,
+    packed_edge_scope: str = "eligible-world",
+    require_world_geometry_from: Path | None = None,
 ) -> tuple[dict[Path, bytes], dict[str, object]]:
+    if packed_edge_scope not in ("eligible-world", "bsp-all-exact"):
+        raise ValueError(f"unknown packed edge refinement scope: {packed_edge_scope}")
     if demo_path is not None and config_path is not None:
         raise ValueError("demo_path and config_path are mutually exclusive")
     pak_bytes = pak_path.read_bytes()
     archive = PakArchive(pak_path)
-    if config_path is not None:
-        selected_demo = resolve_configured_demo(archive.read, config_path)
+    if demo_path is None:
+        config_path = config_path or DEFAULT_CONFIG
+        target = configured_target(config_path)
+        selected_demo = (resolve_configured_demo(archive.read, config_path)
+                         if target["mode"] == "demo" else None)
         playback_sample_rate_hz = configured_playback_sample_rate(config_path)
         sky_enabled = configured_sky(config_path).enabled
-    elif demo_path is not None:
+    else:
+        target = {}
         selected_demo = resolve_demo_source(
             DemoSource("file", str(demo_path.resolve()), DEFAULT_CONFIG),
             archive.read,
         )
         playback_sample_rate_hz = DEFAULT_PLAYBACK_SAMPLE_RATE_HZ
         sky_enabled = True
-    else:
-        selected_demo = resolve_demo_source(
-            DemoSource("pak", DEMO_ENTRY, DEFAULT_CONFIG), archive.read
-        )
-        playback_sample_rate_hz = DEFAULT_PLAYBACK_SAMPLE_RATE_HZ
-        sky_enabled = True
     if playback_sample_rate_hz % DEMO_STEP_SAMPLE_RATE_HZ:
         raise ValueError("ordered playback rate must divide the configured rate")
     demo_ordered_pose_stride = playback_sample_rate_hz // DEMO_STEP_SAMPLE_RATE_HZ
-    demo = selected_demo.payload
-    map_entry = selected_demo.map_entry
+    demo = selected_demo.payload if selected_demo is not None else b""
+    map_entry = selected_demo.map_entry if selected_demo is not None else target["map"]
     bsp = archive.read(map_entry)
+    bsp_sha256 = hashlib.sha256(bsp).hexdigest()
+    if selected_demo is None and target.get("bspSha256", bsp_sha256) != bsp_sha256:
+        raise ValueError(f"PAK {map_entry} does not match the configured original BSP SHA-256")
     canonical_demo = (
-        selected_demo.source.kind == "pak"
+        selected_demo is not None
+        and selected_demo.source.kind == "pak"
         and selected_demo.source.locator == DEMO_ENTRY
     )
+    from snes_tooling.quake.quake_target_layout import asset_layout
+    layout = asset_layout(selected_demo is not None, map_entry)
     palette_bytes = archive.read(PALETTE_ENTRY)
     colormap_bytes = archive.read(COLORMAP_ENTRY)
     if len(palette_bytes) != 768:
@@ -219,16 +251,13 @@ def generate(
         textures,
         lighting,
         sky_enabled=sky_enabled,
+        first_bank=layout.lightmap_first,
+        maximum_bank_count=layout.lightmap_count,
     )
     world_lightmap_chunk_count = len(world_lightmap_chunks)
-    if world_lightmap_chunk_count > WORLD_LIGHTMAP_ROM_BANKS:
-        raise AssertionError(
-            "world lightmaps exceed the fixed ROM bank reservation: "
-            f"{world_lightmap_chunk_count} > {WORLD_LIGHTMAP_ROM_BANKS}"
-        )
     world_lightmap_chunks = (
         *world_lightmap_chunks,
-        *(b"" for _ in range(WORLD_LIGHTMAP_ROM_BANKS - world_lightmap_chunk_count)),
+        *(b"" for _ in range(layout.lightmap_count - world_lightmap_chunk_count)),
     )
     world_mins = tuple(float(world_model[axis]) for axis in range(3))
     world_maxs = tuple(float(world_model[axis + 3]) for axis in range(3))
@@ -380,109 +409,11 @@ def generate(
         max(vertex[axis] for vertex in world_quantized_vertices) for axis in range(3)
     )
 
-    forced_track, demo_samples = extract_camera_samples(demo, map_entry)
-
-    demo_records: list[tuple[int, int, int, int, int]] = []
-    demo_source_records: list[int] = []
-    demo_source_times: list[float] = []
-    demo_view_heights: list[int] = []
-    demo_leaf_ids: set[int] = set()
-    for sample in demo_samples:
-        coordinate = quantize_world_vertex(sample.origin, world_origin)
-        leaf = locate_leaf(sample.origin, nodes, planes, root)
-        if leaves[leaf].contents == -2:
-            raise AssertionError(
-                f"demo record {sample.record} resolves to the BSP's solid leaf"
-            )
-        yaw = round((sample.view_angles[1] % 360.0) * 32.0 / 360.0) & 31
-        # Quake's positive pitch looks down; this renderer's positive pitch
-        # rotates the view direction up.
-        pitch = round(-sample.view_angles[0] * 32.0 / 360.0)
-        pitch = ((pitch + 16) & 31) - 16
-        record = (*coordinate, yaw, pitch)
-        demo_records.append(record)
-        demo_source_records.append(sample.record)
-        demo_source_times.append(sample.server_time)
-        demo_view_heights.append(sample.view_height)
-        demo_leaf_ids.add(leaf)
-    if len(demo_records) < 2:
-        raise AssertionError("demo1 did not produce a changing E1M3 camera track")
-    demo_track = b"".join(struct.pack("<bbbBb", *record) for record in demo_records)
-    if len(demo_track) != len(demo_records) * DEMO_TRACK_RECORD_BYTES:
-        raise AssertionError("demo track record packing is inconsistent")
-    first_demo_time = demo_source_times[0]
-    demo_ticks = [
-        round((server_time - first_demo_time) * NTSC_FRAMES_PER_SECOND)
-        for server_time in demo_source_times
-    ]
-    if demo_ticks[0] != 0 or any(
-        right < left for left, right in zip(demo_ticks, demo_ticks[1:])
-    ):
-        raise AssertionError("demo timing is not monotonic")
-    if demo_ticks[-1] > 0xFFFF:
-        raise AssertionError("demo timing exceeds uint16 NTSC ticks")
-    demo_timing = b"".join(struct.pack("<H", tick) for tick in demo_ticks)
-    if len(demo_timing) != len(demo_records) * DEMO_TIMING_RECORD_BYTES:
-        raise AssertionError("demo timing record packing is inconsistent")
-    if any(sample.view_angles[2] != 0.0 for sample in demo_samples):
-        raise AssertionError("precise demo track cannot omit nonzero roll")
-
-    precise_source_indices = sample_newest_due_indices(
-        demo_source_times, playback_sample_rate_hz
-    )
-    if not precise_source_indices or min(precise_source_indices) < 0:
-        raise AssertionError("precise demo stream begins before its source track")
-    demo_precise_records: list[tuple[int, int, int, int, int]] = []
-    for sample in sample_camera_track(demo_samples, playback_sample_rate_hz):
-        position_q3 = tuple(round(value * 8.0) for value in sample.origin)
-        if any(value < -0x8000 or value > 0x7FFF for value in position_q3):
-            raise AssertionError(
-                "precise demo Q3 position exceeds signed 16-bit storage"
-            )
-        yaw_u16 = round((sample.view_angles[1] % 360.0) * 65536.0 / 360.0) & 0xFFFF
-        pitch_u16 = round((sample.view_angles[0] % 360.0) * 65536.0 / 360.0) & 0xFFFF
-        demo_precise_records.append((*position_q3, yaw_u16, pitch_u16))
-    demo_precise_track = b"".join(
-        struct.pack("<hhhHH", *record) for record in demo_precise_records
-    )
-    if (
-        len(demo_precise_track)
-        != len(demo_precise_records) * DEMO_PRECISE_TRACK_RECORD_BYTES
-    ):
-        raise AssertionError("precise demo track record packing is inconsistent")
-    demo_precise_ticks = [
-        round(step * NTSC_FRAMES_PER_SECOND / playback_sample_rate_hz)
-        for step in range(len(demo_precise_records))
-    ]
-    if demo_precise_ticks[0] != 0 or any(
-        right < left for left, right in zip(demo_precise_ticks, demo_precise_ticks[1:])
-    ):
-        raise AssertionError("precise demo timing is not monotonic")
-    if demo_precise_ticks[-1] > 0xFFFF:
-        raise AssertionError("precise demo timing exceeds uint16 NTSC ticks")
-    demo_precise_timing = b"".join(
-        struct.pack("<H", tick) for tick in demo_precise_ticks
-    )
-    if len(demo_precise_timing) != len(demo_precise_records) * DEMO_TIMING_RECORD_BYTES:
-        raise AssertionError("precise demo timing record packing is inconsistent")
-    demo_step_indices = tuple(
-        range(0, len(demo_precise_records), demo_ordered_pose_stride)
-    )
-    if not demo_step_indices:
-        raise AssertionError("precise demo stream has no 3 Hz step poses")
-    # Static verifier poses are specific to the canonical demo1; external
-    # demos may have different timing and skip these checks.
-    if canonical_demo:
-        try:
-            demo_verify_near_pose = precise_source_indices.index(20)
-            demo_verify_far_pose = precise_source_indices.index(456)
-        except ValueError as error:
-            raise AssertionError(
-                "static verifier source poses are absent from the precise stream"
-            ) from error
-    else:
-        demo_verify_near_pose = 0
-        demo_verify_far_pose = 0
+    from snes_tooling.quake.quake_playback_assets import pack_playback, disabled_playback
+    playback = (pack_playback(demo, map_entry, world_origin, nodes, planes, root,
+                             leaves, playback_sample_rate_hz,
+                             demo_ordered_pose_stride, canonical_demo)
+                if selected_demo is not None else disabled_playback())
 
     referenced_texture_ids = sorted(
         {
@@ -514,6 +445,42 @@ def generate(
     world_face_stream_padding_records = 0
     world_pvs_quantization_guard_faces: set[int] = set()
     world_plane_cull_guard_faces: set[int] = set()
+    world_planar_cull_shifts: dict[int, int] = {}
+    world_source_contours = []
+    world_refinement_eligible = []
+    for face in faces[world_first_face : world_first_face + world_face_count]:
+        contour = tuple(
+            edges[abs(surfedge)][0 if surfedge >= 0 else 1]
+            for surfedge in surfedges[face.first_edge : face.first_edge + face.edge_count]
+        )
+        world_source_contours.append(contour)
+        world_refinement_eligible.append(
+            len(contour) <= 255
+            and polygon_has_area([vertices[index] for index in contour])
+            and polygon_has_area([world_q2_vertices[index] for index in contour])
+            and texture_for_face(face) is not None
+        )
+    world_refined_contours, world_edge_refinement = refine_world_face_edges(
+        vertices, world_q2_vertices, world_source_contours, world_refinement_eligible
+    )
+    if world_edge_refinement["maximum_face_vertices"] > 255:
+        raise AssertionError("refined world polygon exceeds byte vertex count")
+    world_packed_candidates = packed_world_edge_candidates(
+        world_q2_vertices, world_refined_contours, world_refinement_eligible,
+        source_vertices=vertices,
+        extra_contours=tuple(
+            tuple(edges[abs(surfedge)][0 if surfedge >= 0 else 1]
+                  for surfedge in surfedges[face.first_edge : face.first_edge + face.edge_count])
+            for face in faces
+        ) if packed_edge_scope == "bsp-all-exact" else (),
+    )
+    world_packed_refinement = {
+        "policy": PACKED_AFFINE_REFINEMENT_POLICY, "scope": packed_edge_scope,
+        "inserted_index_count": 0,
+        "refined_face_count": 0, "maximum_face_vertices": 0, "faces": [],
+        "rejected_nonintegral_st": [],
+    }
+    world_edge_refinement["packed_affine_refinement"] = world_packed_refinement
     for face_index in range(world_first_face, world_first_face + world_face_count):
         face = faces[face_index]
         source_indices: list[int] = []
@@ -523,9 +490,53 @@ def generate(
             vertex_index = edge[0] if surfedge >= 0 else edge[1]
             source_indices.append(vertex_index)
 
+        emitted_indices = world_refined_contours[face_index - world_first_face]
+        source_polygon = [vertices[vertex_index] for vertex_index in source_indices]
+        emitted_polygon = [vertices[vertex_index] for vertex_index in emitted_indices]
+        texture_record = texinfo[face.texinfo]
+        source_texture_id = int(texture_record[8])
+        world_face_texture_ids.append(packed_texture_ids.get(source_texture_id, 0xFF))
+        if 0 <= source_texture_id < len(textures):
+            coordinate_s, coordinate_t, _ = normalized_face_texture_coordinates(
+                emitted_polygon,
+                texture_record,
+                textures[source_texture_id],
+            )
+        else:
+            coordinate_s, coordinate_t = face_texture_coordinates(
+                emitted_polygon, texture_record
+            )
+        emitted_st_q4 = []
+        for s, t in zip(coordinate_s, coordinate_t, strict=True):
+            s_q4 = round_half_away_from_zero(s * 16.0)
+            t_q4 = round_half_away_from_zero(t * 16.0)
+            if not (-0x8000 <= s_q4 <= 0x7FFF and -0x8000 <= t_q4 <= 0x7FFF):
+                raise AssertionError(
+                    f"face {face_index} texture coordinate exceeds signed Q4: {(s_q4, t_q4)}"
+                )
+            emitted_st_q4.append((s_q4, t_q4))
+        emitted_indices, emitted_st_q4, packed_changes = refine_packed_face_coordinates(
+            emitted_indices, emitted_st_q4,
+            world_packed_candidates[face_index - world_first_face],
+        )
+        if len(emitted_indices) > 255:
+            raise AssertionError(f"world face {face_index} refined polygon exceeds byte vertex count")
+        if packed_changes["accepted"]:
+            world_packed_refinement["faces"].append({
+                "face": face_index - world_first_face, "insertions": packed_changes["accepted"],
+            })
+            world_packed_refinement["refined_face_count"] += 1
+            world_packed_refinement["inserted_index_count"] += len(packed_changes["accepted"])
+        for rejected in packed_changes["rejectedNonintegralST"]:
+            world_packed_refinement["rejected_nonintegral_st"].append({
+                "face": face_index - world_first_face, **rejected,
+            })
+        world_packed_refinement["maximum_face_vertices"] = max(
+            world_packed_refinement["maximum_face_vertices"], len(emitted_indices)
+        )
         coordinate_bank_records = ROM_BANK_BYTES // TEXTURE_COORD_RECORD_BYTES
         coordinate_bank_offset = len(world_indices) % coordinate_bank_records
-        if coordinate_bank_offset + len(source_indices) > coordinate_bank_records:
+        if coordinate_bank_offset + len(emitted_indices) > coordinate_bank_records:
             padding_records = coordinate_bank_records - coordinate_bank_offset
             world_indices.extend([0] * padding_records)
             world_texture_coordinates.extend(
@@ -534,33 +545,13 @@ def generate(
             world_face_stream_padding_records += padding_records
 
         first_index = len(world_indices)
-        if first_index > 0xFFFF or first_index + len(source_indices) > 0x10000:
+        if first_index > 0xFFFF or first_index + len(emitted_indices) > 0x10000:
             raise AssertionError("full-world index stream exceeds uint16 addressing")
-        # Retain one index for every source surfedge, including faces that
-        # collapse after Q2 quantization. Face records can therefore preserve
-        # their original BSP-order offsets while count=0 rejects nondrawables.
-        world_indices.extend(source_indices)
-        source_polygon = [vertices[vertex_index] for vertex_index in source_indices]
-        texture_record = texinfo[face.texinfo]
-        source_texture_id = int(texture_record[8])
-        world_face_texture_ids.append(packed_texture_ids.get(source_texture_id, 0xFF))
-        if 0 <= source_texture_id < len(textures):
-            coordinate_s, coordinate_t, _ = normalized_face_texture_coordinates(
-                source_polygon,
-                texture_record,
-                textures[source_texture_id],
-            )
-        else:
-            coordinate_s, coordinate_t = face_texture_coordinates(
-                source_polygon, texture_record
-            )
-        for s, t in zip(coordinate_s, coordinate_t, strict=True):
-            s_q4 = round_half_away_from_zero(s * 16.0)
-            t_q4 = round_half_away_from_zero(t * 16.0)
-            if not (-0x8000 <= s_q4 <= 0x7FFF and -0x8000 <= t_q4 <= 0x7FFF):
-                raise AssertionError(
-                    f"face {face_index} texture coordinate exceeds signed Q4: {(s_q4, t_q4)}"
-                )
+        # Preserve every source surfedge and face identity; exact boundary
+        # junctions add indices only. Polygon-derived inputs retain the original
+        # contour so planes, material/shading, colors and eligibility stay fixed.
+        world_indices.extend(emitted_indices)
+        for s_q4, t_q4 in emitted_st_q4:
             world_texture_coordinates.extend(struct.pack("<hh", s_q4, t_q4))
         quantized: list[tuple[int, int, int]] = []
         quantized_q2: list[tuple[int, int, int]] = []
@@ -582,32 +573,41 @@ def generate(
         drawable = (
             len(quantized_q2) >= 3
             and len(source_indices) <= 255
-            and polygon_area(source_polygon) >= 1.0
+            and polygon_has_area(source_polygon)
+            and polygon_has_area(quantized_q2)
             and texture_name is not None
         )
         if drawable:
             assert texture_name is not None
+            if world_face_texture_ids[-1] == 0xFF:
+                raise AssertionError(f'drawable world face {face_index} has no packed texture')
             world_texture_names.add(texture_name)
             # Retain the qualified legacy source colors for reference-renderer
             # audits. Runtime packet construction overwrites these two bytes
             # with the material/distance lookup result before rasterization.
             flat, dither = colors_for_face(face, source_polygon)
-            normal, distance = quantized_face_plane(quantized_q2)
-            source_normal = source_winding_normal_q6(planes[face.plane], face.side)
+            try:
+                cull = derive_world_cull_plane(quantized_q2)
+            except ValueError as error:
+                raise AssertionError(f"world face {face_index} cull proof failed: {error}") from error
+            normal, distance = cull.normal, cull.distance
             flags = 0
-            if normal != source_normal:
-                # Q2 packing can rotate thin polygons across their source BSP
-                # half-space. Preserve the exact packed plane for diagnostics,
-                # but tell packet selection to project this uncommon face
-                # instead of trusting a plane-only rejection.
+            if cull.guarded:
+                # A nonplanar Q2 boundary has no single geometric backface
+                # plane. Project it and let its unchanged contour clip/raster.
                 flags |= WORLD_FACE_FLAG_PLANE_CULL_GUARD
                 world_plane_cull_guard_faces.add(face_index - world_first_face)
+            else:
+                assert cull.normal_shift is not None
+                world_planar_cull_shifts[cull.normal_shift] = (
+                    world_planar_cull_shifts.get(cull.normal_shift, 0) + 1
+                )
             world_faces.extend(
                 struct.pack(
-                    "<HBBBB", first_index, len(source_indices), flat, dither, flags
+                    "<HBBBB", first_index, len(emitted_indices), flat, dither, flags
                 )
             )
-            world_max_face_vertices = max(world_max_face_vertices, len(source_indices))
+            world_max_face_vertices = max(world_max_face_vertices, len(emitted_indices))
             world_face_planes.extend(struct.pack("<bbbh", *normal, distance))
             world_drawable_faces += 1
             world_material_family_counts[
@@ -658,14 +658,16 @@ def generate(
         face.edge_count
         for face in faces[world_first_face : world_first_face + world_face_count]
     )
+    total_refined_indices = (world_edge_refinement["inserted_index_count"]
+                             + world_packed_refinement["inserted_index_count"])
     if (
         len(world_indices) - world_face_stream_padding_records
-        != source_world_index_count
+        != source_world_index_count + total_refined_indices
     ):
         raise AssertionError(
             f"full-world index stream lost source surfedges: "
             f"{len(world_indices)} - {world_face_stream_padding_records} != "
-            f"{source_world_index_count}"
+            f"{source_world_index_count} + {total_refined_indices}"
         )
     if (
         len(world_texture_coordinates)
@@ -761,6 +763,21 @@ def generate(
     world_marksurface_bytes = b"".join(
         struct.pack("<H", face_index) for face_index in marksurfaces
     )
+    if len(world_q2_vertices) * 4 > ROM_BANK_BYTES:
+        # Unreferenced and exactly coincident Q2 vertices need no ROM slot.
+        compact = []
+        by_point = {}
+        by_index = {}
+        for index in sorted(set(world_indices)):
+            point = world_q2_vertices[index]
+            if point not in by_point:
+                by_point[point] = len(compact)
+                compact.append(point)
+            by_index[index] = by_point[point]
+        world_indices = [by_index[index] for index in world_indices]
+        world_q2_vertices = compact
+        if len(compact) * 4 > ROM_BANK_BYTES:
+            raise ValueError("referenced world vertices exceed one ROM halfbank")
     world_vertex_bytes = b"".join(
         pack_q2_world_vertex(vertex) for vertex in world_q2_vertices
     )
@@ -774,22 +791,24 @@ def generate(
         world_index_bytes[:ROM_BANK_BYTES],
         world_index_bytes[ROM_BANK_BYTES:],
     )
+    coordinate_bank_count = layout.coordinate_count
+    coordinate_first_bank = layout.coordinate_first
     raw_world_texture_coordinate_chunks = tuple(
         bytes(world_texture_coordinates[offset : offset + ROM_BANK_BYTES])
         for offset in range(0, len(world_texture_coordinates), ROM_BANK_BYTES)
     )
-    if len(raw_world_texture_coordinate_chunks) > WORLD_TEXTURE_COORD_ROM_BANKS:
+    if len(raw_world_texture_coordinate_chunks) > coordinate_bank_count:
         raise AssertionError(
             "world texture coordinates exceed the fixed ROM bank reservation: "
             f"{len(raw_world_texture_coordinate_chunks)} > "
-            f"{WORLD_TEXTURE_COORD_ROM_BANKS}"
+            f"{coordinate_bank_count}"
         )
     world_texture_coordinate_chunks = (
         *raw_world_texture_coordinate_chunks,
         *(
             b""
             for _ in range(
-                WORLD_TEXTURE_COORD_ROM_BANKS - len(raw_world_texture_coordinate_chunks)
+                coordinate_bank_count - len(raw_world_texture_coordinate_chunks)
             )
         ),
     )
@@ -799,7 +818,7 @@ def generate(
     )
     texture_pixels = b"".join(texture_payloads)
     texture_pixel_chunks, texture_placements = pack_texture_bank_images(
-        texture_payloads, bank_count=6
+        texture_payloads, bank_count=layout.texture_count
     )
     texture_directory = bytearray()
     exact_texture_records: list[dict[str, object]] = []
@@ -886,9 +905,22 @@ def generate(
     ):
         raise AssertionError("full-world bank chunk exceeds 32 KiB")
 
+    if require_world_geometry_from is not None:
+        require_world_geometry(require_world_geometry_from, {
+            'QuakeBSPWorldVertices.bin': world_vertex_bytes,
+            'QuakeBSPWorldFaces.bin': bytes(world_faces),
+            'QuakeBSPWorldFacePlanes.bin': bytes(world_face_planes),
+            'QuakeBSPWorldNodes.bin': world_node_bytes,
+            'QuakeBSPWorldPlanes.bin': world_plane_bytes,
+            'QuakeBSPWorldLeaves.bin': world_leaf_bytes,
+            **{f'QuakeBSPWorldIndices{i}.bin': value for i, value in enumerate(world_index_chunks)},
+            **{f'QuakeBSPWorldTextureCoordinates{i}.bin': value
+               for i, value in enumerate(world_texture_coordinate_chunks)},
+        }, origin=world_origin, scale=WORLD_SCALE)
+
     # Precompute one directly consumable face-visibility row for every leaf in
     # the world hull.  This intentionally duplicates Quake's leaf-to-face
-    # expansion offline: the GSU only has to resolve a leaf and inflate 553
+    # expansion offline: the GSU only has to resolve a leaf and inflate the
     # bytes, avoiding thousands of random leaf/marksurface ROM reads per frame.
     world_face_bitset_bytes = (world_face_count + 7) // 8
     pvs_guard_masks: dict[int, int] = {}
@@ -897,13 +929,18 @@ def generate(
         pvs_guard_masks[byte_offset] = pvs_guard_masks.get(byte_offset, 0) | (
             1 << (face_index & 7)
         )
+    # The native guard loop has a nonempty ABI. Admitting one extra face is
+    # conservative; for the all-visible fallback this bit is already set.
+    if not pvs_guard_masks:
+        pvs_guard_masks[0] = 1
+        world_pvs_quantization_guard_faces.add(0)
     pvs_guard_bytes = b"".join(
         struct.pack("<HB", byte_offset, mask)
         for byte_offset, mask in sorted(pvs_guard_masks.items())
     )
     if len(pvs_guard_bytes) != len(pvs_guard_masks) * WORLD_PVS_GUARD_RECORD_BYTES:
         raise AssertionError("face-PVS guard records are inconsistently packed")
-    pvs_rows: list[tuple[bytes, int]] = []
+    source_pvs_rows: list[bytes] = []
     for leaf_index in range(vis_leaf_count + 1):
         # Quake's leaf zero is solid and uses the all-visible fallback.  A fly
         # camera has no collision, so retain that authentic conservative policy.
@@ -934,51 +971,30 @@ def generate(
         face_bits = bytearray(world_face_bitset_bytes)
         for face_index in visible_world_faces:
             face_bits[face_index >> 3] |= 1 << (face_index & 7)
-        compressed = zero_run_encode(bytes(face_bits))
-        pvs_rows.append(
-            (
-                compressed,
-                len(visible_world_faces | world_pvs_quantization_guard_faces),
-            )
-        )
+        source_pvs_rows.append(bytes(face_bits))
 
-    pvs_chunks: list[bytearray] = [bytearray()]
-    pvs_directory = bytearray()
-    for compressed, face_count in pvs_rows:
-        if len(compressed) > ROM_BANK_BYTES:
-            raise AssertionError("one face-PVS row exceeds a 32 KiB ROM bank")
-        if len(pvs_chunks[-1]) + len(compressed) > ROM_BANK_BYTES:
-            pvs_chunks.append(bytearray())
-        chunk_index = len(pvs_chunks) - 1
-        chunk_offset = len(pvs_chunks[-1])
-        pvs_chunks[-1].extend(compressed)
-        pvs_directory.extend(
-            struct.pack(
-                "<HHHBB",
-                0x8000 + chunk_offset,
-                len(compressed),
-                face_count,
-                WORLD_PVS_FIRST_GSU_ROM_BANK + chunk_index,
-                0,
-            )
-        )
+    playable_camera_step = 4 if target.get("gameplay") in ("e1m1-button-door", "basic", "start-hub") else None
+    standalone_fly = target.get("standaloneFly", False)
+    # Retain authored portal VIS and union exact source/packed leaf contacts.
+    from snes_tooling.quake.quake_pvs_leaf_union import conservative_rows
+    conservative_pvs, pvs_leaf_union = conservative_rows(source_pvs_rows,
+        planes=planes, packed_planes=world_plane_records, nodes=world_nodes,
+        leaves=leaves, root=root, origin=world_origin, scale=WORLD_SCALE,
+        camera_step=None if standalone_fly else playable_camera_step, closed_contacts=standalone_fly)
+    guard_bits = sum(1 << face for face in world_pvs_quantization_guard_faces)
+    pvs_rows = [(zero_run_encode(row), (int.from_bytes(row, 'little') | guard_bits).bit_count())
+                for row in conservative_pvs]
+
+    from snes_tooling.quake.packed_visibility.packing import pack_rows
+    packed_pvs = pack_rows(pvs_rows, guard_bytes=len(pvs_guard_bytes),
+        first_bank=WORLD_PVS_FIRST_GSU_ROM_BANK, bank_count=layout.pvs_count)
+    pvs_chunks = packed_pvs['chunks']
+    pvs_directory = packed_pvs['directory']
     if len(pvs_directory) != (vis_leaf_count + 1) * WORLD_PVS_DIRECTORY_RECORD_BYTES:
         raise AssertionError("face-PVS directory lost a world leaf")
-    if len(pvs_directory) + len(pvs_guard_bytes) > ROM_BANK_BYTES:
-        raise AssertionError("face-PVS directory and guards exceed one ROM bank")
-    if any(len(chunk) > ROM_BANK_BYTES for chunk in pvs_chunks):
-        raise AssertionError("face-PVS chunk exceeds a 32 KiB ROM bank")
-    pvs_chunk_count = len(pvs_chunks)
-    if pvs_chunk_count > WORLD_PVS_ROM_BANKS:
-        raise AssertionError(
-            "face-PVS payload exceeds the fixed ROM bank reservation: "
-            f"{pvs_chunk_count} > {WORLD_PVS_ROM_BANKS}; "
-            f"chunk bytes={[len(chunk) for chunk in pvs_chunks]}"
-        )
-    pvs_chunks.extend(bytearray() for _ in range(WORLD_PVS_ROM_BANKS - pvs_chunk_count))
-    pvs_directory_address, pvs_guard_address = pvs_directory_layout(
-        len(pvs_chunks[2]), len(pvs_directory), len(pvs_guard_bytes)
-    )
+    pvs_chunk_count = packed_pvs['chunkCount']
+    pvs_directory_address = packed_pvs['directoryAddress']
+    pvs_guard_address = packed_pvs['guardAddress']
 
     distance_lookup = material_distance_lut()
     shading_lookup = material_shading_table()
@@ -989,12 +1005,13 @@ def generate(
         raise AssertionError("full-world shading asset exceeds one 32 KiB ROM bank")
 
     world_info: dict[str, object] = {
+        "playable_camera_position_units": 16 if standalone_fly else playable_camera_step,
         "root_node": root,
         "first_face": world_first_face,
         "origin": world_origin,
         "coordinate_min": world_coordinate_min,
         "coordinate_max": world_coordinate_max,
-        "vertex_count": len(world_quantized_vertices),
+        "vertex_count": len(world_q2_vertices),
         "index_count": len(world_indices),
         "face_count": world_face_count,
         "max_face_vertices": world_max_face_vertices,
@@ -1019,12 +1036,19 @@ def generate(
         "texture_coordinate_0_bytes": len(world_texture_coordinate_chunks[0]),
         "texture_coordinate_1_bytes": len(world_texture_coordinate_chunks[1]),
         "texture_coordinate_2_bytes": len(world_texture_coordinate_chunks[2]),
+        "texture_coordinate_3_bytes": len(world_texture_coordinate_chunks[3]) if coordinate_bank_count == 4 else 0,
+        "texture_coordinate_first_bank": coordinate_first_bank,
+        "texture_aux_prefix_bytes": len(world_texture_coordinate_chunks[2]) if selected_demo is not None else 0,
         "face_texture_id_bytes": len(world_face_texture_ids),
         "texture_directory_bytes": len(texture_directory),
         "texture_pixel_bytes": len(texture_pixels),
         "texture_pixel_chunk_count": len(texture_pixel_chunks),
         "lightmap_directory_bytes": len(world_lightmap_directory),
         "lightmap_chunk_count": world_lightmap_chunk_count,
+        "lightmap_first_bank": layout.lightmap_first,
+        "lightmap_directory_bank": layout.lightmap_directory_gsu_bank,
+        "lightmap_directory_address": layout.lightmap_directory_address,
+        "lightmap_unpack_bank": layout.unpack_code,
         "lightmap_logical_sample_count": world_lightmap_packing.logical_sample_count,
         "lightmap_packed_bytes": sum(len(chunk) for chunk in world_lightmap_chunks),
         "lightmap_max_face_sample_bytes": max(
@@ -1048,20 +1072,23 @@ def generate(
         "pvs_guard_record_count": len(pvs_guard_masks),
         "pvs_guard_bytes": len(pvs_guard_bytes),
         "pvs_chunk_count": pvs_chunk_count,
+        "face_owner_bank": layout.face_owner_bank,
         "pvs_compressed_bytes": sum(len(chunk) for chunk in pvs_chunks),
-        "demo_pose_count": len(demo_records),
-        "demo_track_bytes": len(demo_track),
-        "demo_timing_bytes": len(demo_timing),
-        "demo_duration_ticks": demo_ticks[-1],
-        "demo_precise_pose_count": len(demo_precise_records),
-        "demo_precise_track_bytes": len(demo_precise_track),
-        "demo_precise_timing_bytes": len(demo_precise_timing),
-        "demo_precise_duration_ticks": demo_precise_ticks[-1],
+        "demo_playback_supported": int(selected_demo is not None),
+        "initial_eye_q8": tuple(round((start[i] + (DEFAULT_VIEWHEIGHT if i == 2 else 0) - world_origin[i]) / WORLD_SCALE * 256) & 0xFFFF for i in range(3)),
+        "demo_pose_count": len(playback.demo_records),
+        "demo_track_bytes": len(playback.demo_track),
+        "demo_timing_bytes": len(playback.demo_timing),
+        "demo_duration_ticks": playback.demo_ticks[-1],
+        "demo_precise_pose_count": len(playback.demo_precise_records),
+        "demo_precise_track_bytes": len(playback.demo_precise_track),
+        "demo_precise_timing_bytes": len(playback.demo_precise_timing),
+        "demo_precise_duration_ticks": playback.demo_precise_ticks[-1],
         "demo_precise_sample_rate_hz": playback_sample_rate_hz,
         "demo_ordered_pose_stride": demo_ordered_pose_stride,
-        "demo_step_pose_count": len(demo_step_indices),
-        "demo_verify_near_pose": demo_verify_near_pose,
-        "demo_verify_far_pose": demo_verify_far_pose,
+        "demo_step_pose_count": len(playback.demo_step_indices),
+        "demo_verify_near_pose": playback.demo_verify_near_pose,
+        "demo_verify_far_pose": playback.demo_verify_far_pose,
         "start_coordinate": start_coordinate,
         "collision_payload_bytes": collision_report["storage"]["payloadBytes"],
     }
@@ -1137,10 +1164,10 @@ def generate(
         Path("QuakeBSPWorldVisibility1.bin"): world_visibility_chunks[1],
         Path("QuakeBSPWorldPVSDirectory.bin"): bytes(pvs_directory),
         Path("QuakeBSPWorldPVSGuards.bin"): pvs_guard_bytes,
-        Path("QuakeBSPDemoTrack.bin"): demo_track,
-        Path("QuakeBSPDemoTiming.bin"): demo_timing,
-        Path("QuakeBSPDemoPrecise.bin"): demo_precise_track,
-        Path("QuakeBSPDemoPreciseTiming.bin"): demo_precise_timing,
+        Path("QuakeBSPDemoTrack.bin"): playback.demo_track,
+        Path("QuakeBSPDemoTiming.bin"): playback.demo_timing,
+        Path("QuakeBSPDemoPrecise.bin"): playback.demo_precise_track,
+        Path("QuakeBSPDemoPreciseTiming.bin"): playback.demo_precise_timing,
         Path("QuakeBSPScene.i"): (
             table_include(
                 len(packed_vertices),
@@ -1158,6 +1185,38 @@ def generate(
         }
     )
     outputs.update(collision_outputs)
+    if selected_demo is None and target.get("gameplay") in ("e1m1-button-door", "basic", "start-hub"):
+        from snes_tooling.quake.quake_bsp_assets import stock_orientation_tilemap
+        from snes_tooling.quake.quake_walk_hull import player_hull_outputs, shotgun_hull_outputs
+        if target["gameplay"] in ("basic", "start-hub"):
+            from snes_tooling.quake.quake_walk_hull import static_level_hull_outputs
+            selected = None
+            if target["gameplay"] == "start-hub":
+                from snes_tooling.quake.quake_start_hub import hub_static_models
+                selected = hub_static_models(parse_entities(lump_data(bsp, lumps, LUMP_ENTITIES)))
+            name = Path(target["map"]).stem
+            movers = dict(e1m2=name == "e1m2", e1m3=name == "e1m3")
+            walk_assets, walk_include = static_level_hull_outputs(
+                bsp, world_origin, point=False, static_models=selected, **movers)
+            shot_assets, shot_include = static_level_hull_outputs(
+                bsp, world_origin, point=True, static_models=selected, **movers)
+        else:
+            from snes_tooling.quake.quakec_explobox import spawn_explobox
+            from snes_tooling.quake.quakec_gameplay import Program
+            from snes_tooling.quake.quakec_grunt import GruntReference
+            from snes_tooling.quake.quakec_shell_pickups import floor_drop
+            world_models = tuple(struct.iter_unpack("<9f7i", lump_data(bsp, lumps, 14)))
+            drop = floor_drop(bsp, world_models[0][10], supporting_roots=(world_models[3][10], world_models[4][10]))
+            vm = GruntReference(Program(archive.read("progs.dat")), world_models, archive, drop)
+            box = spawn_explobox(vm, entities, 1)
+            walk_assets, walk_include = player_hull_outputs(bsp, world_origin, exit_movers=True, explobox=box)
+            shot_assets, shot_include = shotgun_hull_outputs(bsp, world_origin, exit_movers=True)
+        outputs.update(walk_assets)
+        outputs.update(shot_assets)
+        outputs[Path("QuakeBSPScene.i")] += walk_include + shot_include
+        for kind in ("", "Texture"):
+            raw_tilemap = outputs[Path(f"QuakeBSP{kind}Tilemap.bin")]
+            outputs[Path(f"QuakeBSP{kind}DisplayTilemap.bin")] = stock_orientation_tilemap(raw_tilemap)
     outputs.update(
         {
             Path(f"QuakeBSPWorldTexturePixels{index}.bin"): chunk
@@ -1170,12 +1229,14 @@ def generate(
             for index, chunk in enumerate(world_lightmap_chunks)
         }
     )
+    if coordinate_bank_count == 4:
+        outputs[Path("QuakeBSPWorldTextureCoordinates3.bin")] = world_texture_coordinate_chunks[3]
     metadata: dict[str, object] = {
         "source": {
             "pak_path_hint": QUAKE_PAK_PATH_HINT,
             "pak_entry": map_entry,
             "pak_sha256": hashlib.sha256(pak_bytes).hexdigest(),
-            "bsp_sha256": hashlib.sha256(bsp).hexdigest(),
+            "bsp_sha256": bsp_sha256,
             "bsp_version": BSP_VERSION,
             "palette_entry": PALETTE_ENTRY,
             "palette_sha256": hashlib.sha256(palette_bytes).hexdigest(),
@@ -1183,10 +1244,10 @@ def generate(
             "colormap_sha256": hashlib.sha256(colormap_bytes).hexdigest(),
             "lighting_bytes": len(lighting),
             "lighting_sha256": hashlib.sha256(lighting).hexdigest(),
-            "demo_entry": selected_demo.label,
-            "demo_source": selected_demo.source.kind,
-            "demo_locator": selected_demo.source.locator,
-            "demo_sha256": selected_demo.sha256,
+            "demo_entry": (selected_demo.label if selected_demo is not None else None),
+            "demo_source": (selected_demo.source.kind if selected_demo is not None else None),
+            "demo_locator": (selected_demo.source.locator if selected_demo is not None else None),
+            "demo_sha256": (selected_demo.sha256 if selected_demo is not None else None),
         },
         "selection": {
             "sky_enabled": sky_enabled,
@@ -1239,8 +1300,9 @@ def generate(
                 "coordinate_max": list(world_coordinate_max),
             },
             "fly_collision": collision_report,
+            "edge_refinement": world_edge_refinement,
             "packing": {
-                "vertex_count": len(world_quantized_vertices),
+                "vertex_count": len(world_q2_vertices),
                 "index_count": len(world_indices),
                 "face_count": world_face_count,
                 "drawable_face_count": world_drawable_faces,
@@ -1260,17 +1322,31 @@ def generate(
                 "face_plane_record_bytes": FACE_PLANE_RECORD_BYTES,
                 "face_plane_record_format": "<bbbh",
                 "face_plane_source": (
-                    "largest-area triangle in the packed Q2 polygon fan, "
-                    "or an always-culled plane for collapsed faces"
+                    "culling-only: exact-Q2 planar front-halfspace support with a "
+                    "narrow-contour raster margin and minimum wrap-free normal "
+                    "downscale; guarded nonplanar faces "
+                    "retain their original Q6 plane; collapsed faces stay rejected"
                 ),
+                "face_plane_policy": {
+                    "policy": WORLD_CULL_POLICY,
+                    "camera_q2_domain": list(CAMERA_Q2_DOMAIN),
+                    "normal_rounding": "nearest-even(original Q6 normal / 2**shift)",
+                    "distance_rule": "ceil(max(n.camera) over raster front halfspace intersect camera box)",
+                    "raster_front_margin": "one Q2 coordinate envelope for contours at most two Q2 units wide",
+                    "signed16_proof": "minimum shift whose complete final n.camera-D range fits signed16; modular intermediate words preserve the final result",
+                    "planar_face_count": sum(world_planar_cull_shifts.values()),
+                    "planar_normal_shift_counts": {
+                        str(shift): count for shift, count in sorted(world_planar_cull_shifts.items())
+                    },
+                },
                 "face_flag_bits": {
                     "non_drawable": WORLD_FACE_FLAG_NON_DRAWABLE,
                     "plane_cull_guard": WORLD_FACE_FLAG_PLANE_CULL_GUARD,
                 },
                 "plane_cull_guard": {
                     "policy": (
-                        "bypass plane-only backface rejection when the packed Q2 "
-                        "polygon normal differs from the source winding normal at Q6"
+                        "bypass plane-only backface rejection exactly for nonplanar "
+                        "drawable Q2 boundaries; planar faces use a proved conservative cull plane"
                     ),
                     "face_count": len(world_plane_cull_guard_faces),
                     "face_ids": sorted(world_plane_cull_guard_faces),
@@ -1304,7 +1380,7 @@ def generate(
                         {
                             "file": f"QuakeBSPWorldTextureCoordinates{index}.bin",
                             "bytes": len(chunk),
-                            "gsu_rom_bank": WORLD_TEXCOORD_FIRST_GSU_ROM_BANK + index,
+                            "gsu_rom_bank": coordinate_first_bank + index,
                         }
                         for index, chunk in enumerate(world_texture_coordinate_chunks)
                     ],
@@ -1359,7 +1435,7 @@ def generate(
                         "directory_bytes": len(world_lightmap_directory),
                         "sample_file_pattern": (
                             "QuakeBSPWorldLightmapSamples"
-                            f"{{0..{WORLD_LIGHTMAP_ROM_BANKS - 1}}}.bin"
+                            f"{{0..{layout.lightmap_count - 1}}}.bin"
                         ),
                         "logical_sample_count": (
                             world_lightmap_packing.logical_sample_count
@@ -1402,7 +1478,7 @@ def generate(
                             {
                                 "file": f"QuakeBSPWorldLightmapSamples{index}.bin",
                                 "bytes": len(chunk),
-                                "gsu_rom_bank": WORLD_LIGHTMAP_FIRST_GSU_ROM_BANK
+                                "gsu_rom_bank": layout.lightmap_first
                                 + index,
                             }
                             for index, chunk in enumerate(world_lightmap_chunks)
@@ -1493,6 +1569,10 @@ def generate(
                     "decoded_row_bytes": world_face_bitset_bytes,
                     "encoding": "zero bytes encoded as 0,count; nonzero bytes literal",
                     "face_count_semantics": "unique BSP world-model face identities",
+                    "camera_leaf_union": pvs_leaf_union,
+                    "encoded_contour_visibility": {"status": "not-run", "policy": "original-bsp-pvs"},
+                    "unique_encoded_rows": packed_pvs['uniqueRows'],
+                    "shared_row_bytes_saved": packed_pvs['savedBytes'],
                     "quantization_guard": {
                         "policy": (
                             "globally admit drawable faces with a nonzero source-axis "
@@ -1525,48 +1605,48 @@ def generate(
                 "texture_names": sorted(world_texture_names),
             },
         },
-        "demo": {
-            "entry": selected_demo.label,
-            "source": selected_demo.source.kind,
-            "locator": selected_demo.source.locator,
+        "demo": ({
+            "entry": (selected_demo.label if selected_demo is not None else None),
+            "source": (selected_demo.source.kind if selected_demo is not None else None),
+            "locator": (selected_demo.source.locator if selected_demo is not None else None),
             "map_entry": map_entry,
-            "sha256": selected_demo.sha256,
+            "sha256": (selected_demo.sha256 if selected_demo is not None else None),
             "source_bytes": len(demo),
-            "forced_cd_track": forced_track,
-            "source_camera_samples": len(demo_samples),
+            "forced_cd_track": playback.forced_track,
+            "source_camera_samples": len(playback.demo_samples),
             "sample_retention": "all reconstructed source camera samples",
             "camera_origin_semantics": (
                 "view-entity origin plus protocol-15 svc_clientdata view height"
             ),
             "default_view_height": DEFAULT_VIEWHEIGHT,
-            "packed_view_height_values": sorted(set(demo_view_heights)),
-            "track_pose_count": len(demo_records),
-            "distinct_packed_pose_count": len(set(demo_records)),
+            "packed_view_height_values": sorted(set(playback.demo_view_heights)),
+            "track_pose_count": len(playback.demo_records),
+            "distinct_packed_pose_count": len(set(playback.demo_records)),
             "consecutive_repeated_pose_count": sum(
-                left == right for left, right in zip(demo_records, demo_records[1:])
+                left == right for left, right in zip(playback.demo_records, playback.demo_records[1:])
             ),
             "track_record_bytes": DEMO_TRACK_RECORD_BYTES,
-            "track_bytes": len(demo_track),
+            "track_bytes": len(playback.demo_track),
             "timing_record_bytes": DEMO_TIMING_RECORD_BYTES,
-            "timing_bytes": len(demo_timing),
+            "timing_bytes": len(playback.demo_timing),
             "precise_track_record_bytes": DEMO_PRECISE_TRACK_RECORD_BYTES,
-            "precise_track_bytes": len(demo_precise_track),
-            "precise_track_pose_count": len(demo_precise_records),
+            "precise_track_bytes": len(playback.demo_precise_track),
+            "precise_track_pose_count": len(playback.demo_precise_records),
             "precise_track_sample_rate_hz": playback_sample_rate_hz,
             "precise_timing_record_bytes": DEMO_TIMING_RECORD_BYTES,
-            "precise_timing_bytes": len(demo_precise_timing),
-            "precise_duration_ticks": demo_precise_ticks[-1],
+            "precise_timing_bytes": len(playback.demo_precise_timing),
+            "precise_duration_ticks": playback.demo_precise_ticks[-1],
             "precise_timing_quantization": (
                 "round(n * ntsc_frames_per_second / sample_rate_hz)"
             ),
             "precise_track_duration_seconds": (
-                len(demo_precise_records) / playback_sample_rate_hz
+                len(playback.demo_precise_records) / playback_sample_rate_hz
             ),
-            "precise_track_distinct_source_samples": len(set(precise_source_indices)),
+            "precise_track_distinct_source_samples": len(set(playback.precise_source_indices)),
             "precise_track_sampling": CAMERA_SAMPLING_CONTRACT,
             "scene_sampling": SCENE_SAMPLING_CONTRACT,
             "precise_track_repeated_poses": sum(
-                a == b for a, b in zip(demo_precise_records, demo_precise_records[1:])
+                a == b for a, b in zip(playback.demo_precise_records, playback.demo_precise_records[1:])
             ),
             "precise_track_encoding": (
                 "absolute signed Q3 xyz; uint16-turn yaw/pitch; roll omitted "
@@ -1574,21 +1654,21 @@ def generate(
             ),
             "step_sample_rate_hz": DEMO_STEP_SAMPLE_RATE_HZ,
             "ordered_pose_stride": demo_ordered_pose_stride,
-            "step_pose_count": len(demo_step_indices),
-            "step_pose_indices": list(demo_step_indices),
+            "step_pose_count": len(playback.demo_step_indices),
+            "step_pose_indices": list(playback.demo_step_indices),
             "step_sampling": (
                 "canonical sample-rate indices n*orderedPoseStride; "
                 "no second camera stream"
             ),
-            "first_source_record": demo_source_records[0],
-            "last_source_record": demo_source_records[-1],
-            "first_server_time": demo_source_times[0],
-            "last_server_time": demo_source_times[-1],
-            "duration_seconds": demo_source_times[-1] - demo_source_times[0],
+            "first_source_record": playback.demo_source_records[0],
+            "last_source_record": playback.demo_source_records[-1],
+            "first_server_time": playback.demo_source_times[0],
+            "last_server_time": playback.demo_source_times[-1],
+            "duration_seconds": playback.demo_source_times[-1] - playback.demo_source_times[0],
             "ntsc_frames_per_second": NTSC_FRAMES_PER_SECOND,
-            "duration_ticks": demo_ticks[-1],
-            "distinct_timing_ticks": len(set(demo_ticks)),
-            "same_tick_sample_count": len(demo_ticks) - len(set(demo_ticks)),
+            "duration_ticks": playback.demo_ticks[-1],
+            "distinct_timing_ticks": len(set(playback.demo_ticks)),
+            "same_tick_sample_count": len(playback.demo_ticks) - len(set(playback.demo_ticks)),
             "timing_quantization": (
                 "round((svc_time - first_server_time) * ntsc_frames_per_second)"
             ),
@@ -1597,14 +1677,14 @@ def generate(
                     "track_pose": index,
                     "source_record": source_record,
                     "server_time": server_time,
-                    "relative_seconds": server_time - first_demo_time,
+                    "relative_seconds": server_time - playback.first_demo_time,
                     "ntsc_tick": tick,
                 }
                 for index, (source_record, server_time, tick) in enumerate(
-                    zip(demo_source_records, demo_source_times, demo_ticks, strict=True)
+                    zip(playback.demo_source_records, playback.demo_source_times, playback.demo_ticks, strict=True)
                 )
             ],
-            "distinct_leaf_count": len(demo_leaf_ids),
+            "distinct_leaf_count": len(playback.demo_leaf_ids),
             "coordinate_encoding": "map-centered signed int8 at 16 Quake units",
             "angle_encoding": "32-step yaw; inverted signed 32-step pitch",
             "playback": {
@@ -1620,7 +1700,8 @@ def generate(
                 ),
                 "interpolation_cpp": "none (offline interpolated camera poses)",
             },
-        },
+        } if selected_demo is not None else {"enabled": False, "map_entry": map_entry}),
+        **({"target": target} if selected_demo is None else {}),
         "render": {
             "logical_resolution": [LOGICAL_WIDTH, LOGICAL_HEIGHT],
             "physical_resolution": [PHYSICAL_WIDTH, PHYSICAL_HEIGHT],
@@ -1747,11 +1828,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument('--require-world-geometry', type=Path,
+                        help='require matching frozen world geometry before the visibility bake')
+    parser.add_argument("--packed-edge-scope", choices=("eligible-world", "bsp-all-exact"),
+                        default="eligible-world")
     args = parser.parse_args(argv)
     started = time.perf_counter()
     try:
         pak_path = locate_quake_pak(args.pak)
-        outputs, metadata = generate(pak_path, config_path=args.config)
+        outputs, metadata = generate(pak_path, config_path=args.config,
+                                     packed_edge_scope=args.packed_edge_scope,
+                                     require_world_geometry_from=args.require_world_geometry)
         write_or_check(outputs, args.output, args.check)
     except BaseException:
         print(

@@ -1,0 +1,58 @@
+        ; Every edge X is an interpolation between its projected endpoints.
+        ; R6/R7 bound all rows of this polygon. Publish the same group extrema
+        ; previously maintained per vertex, including empty polygons.
+BrushPublishProjectedXBounds:
+        lm      R0, (BRUSH_ARB_GROUP_MIN_X)
+        from    R6
+        cmp     R0
+        bpl     BrushPolygonMinReady
+        nop
+        sm      (BRUSH_ARB_GROUP_MIN_X), R6
+BrushPolygonMinReady:
+        lm      R0, (BRUSH_ARB_GROUP_MAX_X)
+        from    R0
+        cmp     R7
+        bpl     BrushPolygonMaxReady
+        nop
+        sm      (BRUSH_ARB_GROUP_MAX_X), R7
+BrushPolygonMaxReady:
+        ; Candidate spans use first=(min+59)>>7 and last=(max-60)>>7,
+        ; clamped to the viewport. Compare their Q7 pixel boundaries directly.
+        ibt     R1, #60
+        from    R7
+        sub     R1
+        bmi     BrushPolygonNoX
+        nop
+        move    R4, R0                  ; Nonnegative last pixel boundary.
+        dec     R1
+        from    R6
+        add     R1
+        bmi     BrushPolygonHasX        ; First pixel clamps to zero.
+        nop
+        move    R2, R0
+        iwt     R3, #BSP_VIEW_WIDTH*128
+        cmp     R3
+        bcs     BrushPolygonNoX
+        nop
+        iwt     R3, #$FF80
+        with    R2
+        and     R3
+        from    R4
+        cmp     R2
+        bcc     BrushPolygonNoX
+        nop
+BrushPolygonHasX:
+        move    R8, #1
+        ret
+        nop
+BrushPolygonNoX:
+        ; Keep the polygon, its material and ordered arbitration identity.
+        ; MinY=255 rejects every row in the ordinary and staged Y filters.
+        lm      R1, (BRUSH_ARB_METADATA_PTR)
+        with    R1
+        add     #BRUSH_ARB_META_Y_RANGE
+        iwt     R0, #$00FF
+        movew   (R1), R0
+        move    R8, #0                  ; The alias depth-mask driver also skips it.
+        ret
+        nop

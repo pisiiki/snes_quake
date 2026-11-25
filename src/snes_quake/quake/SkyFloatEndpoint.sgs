@@ -1,0 +1,170 @@
+; Packed-X2 exact binary32 endpoint driver. Input exact signed ray numerators/64,
+; full positive binary32 phase bits. Output signed trunc0 Q16 S/T.
+.macro SF_COPY_FLOAT source, dest
+        .repeat 3, word
+          lm    R0, (source+word*2)
+          sm    (dest+word*2), R0
+        .endrepeat
+.endmacro
+; A/B exponent fields are not adjacent to their mantissands.
+.macro SF_LOAD_A source
+        lm      R0, (source)
+        sm      (SF_A0), R0
+        lm      R0, (source+2)
+        sm      (SF_A1), R0
+        lm      R0, (source+4)
+        sm      (SF_AEXP), R0
+.endmacro
+.macro SF_LOAD_B source
+        lm      R0, (source)
+        sm      (SF_B0), R0
+        lm      R0, (source+2)
+        sm      (SF_B1), R0
+        lm      R0, (source+4)
+        sm      (SF_BEXP), R0
+.endmacro
+.macro SF_SAVE_RESULT dest
+        lm      R0, (SF_W0)
+        sm      (dest), R0
+        lm      R0, (SF_W1)
+        sm      (dest+2), R0
+        lm      R0, (SF_EXP)
+        sm      (dest+4), R0
+.endmacro
+.macro SF_VECTOR axis
+        .local Positive
+        lm      R4, (SF_NX0+axis*4)
+        lm      R5, (SF_NX0+axis*4+2)
+        move    R1, #0
+        moves   R5, R5
+        bpl     Positive
+        nop
+        move    R0, #0
+        with    R0
+        sub     R4
+        with    R1
+        sbc     R5
+        move    R4, R0
+        move    R5, R1
+        move    R1, #1
+Positive:
+        sm      (SF_VECTOR0+axis*8+6), R1
+        sm      (SF_W0), R4
+        sm      (SF_W1), R5
+        move    R0, #0
+        sm      (SF_W2), R0
+        ibt     R0, #$FA ; -6
+        sm      (SF_EXP), R0
+        jal     SkyFloatNormalize48
+        nop
+        SF_SAVE_RESULT SF_VECTOR0+axis*8
+        SF_LOAD_A SF_VECTOR0+axis*8
+        SF_LOAD_B SF_VECTOR0+axis*8
+        jal     SkyFloatMultiply24
+        nop
+        .if axis <> 0
+          SF_SAVE_RESULT SF_TEMP
+          SF_LOAD_A SF_SUM
+          SF_LOAD_B SF_TEMP
+          move  R0, #0
+          sm    (SF_ASIGN), R0
+          sm    (SF_BSIGN), R0
+          jal   SkyFloatAdd24
+          nop
+        .endif
+        SF_SAVE_RESULT SF_SUM
+.endmacro
+.macro SF_PROJECT axis
+        .local ShiftRight, ShiftLeftLoop, ShiftRightLoop, ApplySign, Positive
+        SF_LOAD_A SF_VECTOR0+axis*8
+        SF_LOAD_B SF_INVERSE
+        jal     SkyFloatMultiply24
+        nop
+        SF_SAVE_RESULT SF_TEMP
+        SF_LOAD_A SF_TEMP
+        move    R0, #0
+        sm      (SF_B0), R0
+        iwt     R0, #$00BD
+        sm      (SF_B1), R0
+        ibt     R0, #$F1 ; -15
+        sm      (SF_BEXP), R0
+        jal     SkyFloatMultiply24
+        nop
+        SF_SAVE_RESULT SF_TEMP
+        SF_LOAD_A SF_TEMP
+        SF_LOAD_B SF_PHASE_VALUE
+        lm      R0, (SF_VECTOR0+axis*8+6)
+        sm      (SF_ASIGN), R0
+        move    R0, #0
+        sm      (SF_BSIGN), R0
+        jal     SkyFloatAdd24
+        nop
+        lm      R4, (SF_W0)
+        lm      R5, (SF_W1)
+        lm      R7, (SF_EXP)
+        move    R0, #16
+        with    R7
+        add     R0
+        bmi     ShiftRight
+        nop
+        beq     ApplySign
+        nop
+ShiftLeftLoop:
+        with    R4
+        add     R4
+        with    R5
+        adc     R5
+        dec     R7
+        bne     ShiftLeftLoop
+        nop
+        bra     ApplySign
+        nop
+ShiftRight:
+        move    R0, #0
+        with    R0
+        sub     R7
+        move    R7, R0
+ShiftRightLoop:
+        with    R5
+        lsr
+        with    R4
+        ror
+        dec     R7
+        bne     ShiftRightLoop
+        nop
+ApplySign:
+        lm      R0, (SF_SIGN)
+        moves   R0, R0
+        beq     Positive
+        nop
+        move    R0, #0
+        move    R1, #0
+        with    R0
+        sub     R4
+        with    R1
+        sbc     R5
+        move    R4, R0
+        move    R5, R1
+Positive:
+        sm      (SF_OUTS0+axis*4), R4
+        sm      (SF_OUTS0+axis*4+2), R5
+.endmacro
+SkyFloatEndpointX2:
+        sm      (SF_RETURN), R11
+        SF_VECTOR 0
+        SF_VECTOR 1
+        SF_VECTOR 2
+        SF_LOAD_A SF_SUM
+        jal     SkyFloatSqrt24
+        nop
+        SF_SAVE_RESULT SF_TEMP
+        SF_LOAD_A SF_TEMP
+        jal     SkyFloatReciprocal24
+        nop
+        SF_SAVE_RESULT SF_INVERSE
+        ; SF_PHASE_VALUE was normalized once before scanning sky.
+        SF_PROJECT 0
+        SF_PROJECT 1
+        lm      R11, (SF_RETURN)
+        ret
+        nop

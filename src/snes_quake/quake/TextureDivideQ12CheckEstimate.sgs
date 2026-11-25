@@ -1,0 +1,20 @@
+TextureDivideQ12CheckEstimate:
+        ; As in the noncached divider, the doubled residual in R4
+        ; proves exactness when its recovered value is at least R8.
+        with    R4
+        lsr
+        with    R4
+        cmp     R8
+.ifdef PLAYABLE_Q12_COMPACT_RETURN
+        bcs     TextureDivideQ12CorrectionColdReady
+        nop
+        bra     TextureDivideQ12CorrectionCold
+        nop
+.else
+        bcs     TextureDivideQ12EstimateReady
+        nop
+        GSU_ABSOLUTE_GOTO TextureDivideQ12CorrectionCold
+TextureDivideQ12EstimateReady:
+        ret
+        nop
+.endif

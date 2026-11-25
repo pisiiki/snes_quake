@@ -120,7 +120,7 @@ def build_replay(
         raise ValueError("ordered replay workers must be positive")
     viewport = (128, 112, 64, 56) if render_scale == 2 else (85, 74, 43, 37)
     if render_scale == 3:
-        # Fly3[Warp]Reciprocal uses integer half-up rounding, unlike the
+        # Fly3Reciprocal uses integer half-up rounding, unlike the
         # historical X2 asset's Python round(). Bind the actual selector table.
         reciprocal = tuple(0 if depth < 4 else (focal * 256 + depth // 2) // depth
                            for depth in range(1024))

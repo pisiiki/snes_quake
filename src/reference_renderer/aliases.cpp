@@ -1,4 +1,5 @@
 #include "aliases.hpp"
+#include "alias_storage_layout.hpp"
 #include "world.hpp"
 #include "geometry.hpp"
 #include "brushes.hpp"
@@ -7,9 +8,10 @@
 namespace quake_bsp_reference {
 
 namespace {
-int alias_mul_shift(int value, int multiplier, int shift)
+int alias_mul_shift(int value, int multiplier, int shift, bool nearest = false)
 {
-    return wrap_i16((value * multiplier) >> shift);
+    const int bias = shift == 6 || nearest ? 1 << (shift - 1) : 0;
+    return wrap_i16((value * multiplier + bias) >> shift);
 }
 } // namespace
 
@@ -105,11 +107,12 @@ std::uint64_t alias_read_u64(std::span<const std::uint8_t> bytes, std::size_t of
 }
 
 namespace {
-std::size_t alias_location_offset(std::uint8_t bank, std::uint16_t address, std::size_t size, std::size_t chunk_count)
+std::size_t alias_location_offset(std::uint8_t bank, std::uint16_t address, std::size_t size,
+                                  std::span<const std::pair<std::uint8_t, std::uint16_t>> storage)
 {
-    for (std::size_t chunk = 0; chunk < chunk_count; ++chunk)
+    for (std::size_t chunk = 0; chunk < storage.size(); ++chunk)
     {
-        const auto [expected_bank, base] = kAliasStorageLocations.at(chunk);
+        const auto [expected_bank, base] = storage[chunk];
         if (bank == expected_bank && address >= base &&
             static_cast<std::size_t>(address - base) + size <= kAliasHalfbankBytes)
         {
@@ -153,12 +156,23 @@ AliasAssets load_alias_assets(const fs::path& directory)
     const auto sprite_directory = read_u32(first, 24);
     const auto static_offset = read_u32(first, 28);
     const auto static_bytes = read_u32(first, 32);
+    const auto metadata_path = directory / "QuakeBSPAliasAssets.json";
+    std::optional<Json> metadata_info;
+    if (fs::exists(metadata_path))
+    {
+        const auto metadata_bytes = read_file(metadata_path);
+        metadata_info = Json::parse(metadata_bytes.begin(), metadata_bytes.end());
+    }
+    const bool level_schema = metadata_info && is_level_alias_metadata(*metadata_info);
+    const auto storage = alias_storage_layout(metadata_info, chunk_count);
     const auto package_bytes = static_cast<std::size_t>(chunk_count) * kAliasHalfbankBytes;
-    const auto directory_fits = [package_bytes](std::size_t offset, std::size_t size) {
-        return size != 0 && offset + size <= package_bytes &&
+    const auto directory_fits = [package_bytes, level_schema](std::size_t offset, std::size_t size) {
+        if (size == 0)
+            return level_schema && offset <= package_bytes;
+        return offset + size <= package_bytes &&
                offset / kAliasHalfbankBytes == (offset + size - 1) / kAliasHalfbankBytes;
     };
-    if (row_count < kAliasFlyRowCount || chunk_count == 0 || chunk_count > kAliasStorageLocations.size() ||
+    if (row_count < kAliasFlyRowCount ||
         static_bytes != static_cast<std::size_t>(static_count) * kAliasStateBytes ||
         !directory_fits(row_directory, static_cast<std::size_t>(row_count) * kAliasRowBytes) ||
         !directory_fits(sprite_directory, static_cast<std::size_t>(sprite_count) * kAliasSpriteBytes))
@@ -211,7 +225,7 @@ AliasAssets load_alias_assets(const fs::path& directory)
         {
             fail("QBA1 sprite has an empty projected extent");
         }
-        const auto pixel_offset = alias_location_offset(bank, address, pixel_count, chunk_count);
+        const auto pixel_offset = alias_location_offset(bank, address, pixel_count, storage);
         sprite.pixels.reserve(pixel_count);
         for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
         {
@@ -251,7 +265,7 @@ AliasAssets load_alias_assets(const fs::path& directory)
                 state_bank,
                 state_address,
                 static_cast<std::size_t>(state_count) * kAliasStateBytes,
-                chunk_count
+                storage
             );
             row.dynamic_states.reserve(state_count);
             for (std::size_t state = 0; state < state_count; ++state)
@@ -260,7 +274,7 @@ AliasAssets load_alias_assets(const fs::path& directory)
                 const auto base = alias_sprite_id(parsed);
                 if (base >= assets.sprites.size() ||
                     ((parsed.sprite & kAliasDirectionalTag) != 0 &&
-                     (!fly || base + kAliasFlyRowCount > assets.sprites.size())))
+                     ((!fly && !level_schema) || base + kAliasFlyRowCount > assets.sprites.size())))
                 {
                     fail("QBA1 state names an invalid sprite range");
                 }
@@ -282,7 +296,7 @@ AliasAssets load_alias_assets(const fs::path& directory)
         }
         if (group_count != 0)
         {
-            auto cursor = alias_location_offset(group_bank, group_address, 1, chunk_count);
+            auto cursor = alias_location_offset(group_bank, group_address, 1, storage);
             const auto group_chunk_end = (cursor / kAliasHalfbankBytes + 1) * kAliasHalfbankBytes;
             for (std::size_t group = 0; group < group_count; ++group)
             {
@@ -318,21 +332,22 @@ AliasAssets load_alias_assets(const fs::path& directory)
         }
         assets.rows.push_back(std::move(row));
     }
-    const auto metadata_path = directory / "QuakeBSPAliasAssets.json";
     bool fly_facing_loaded = false;
-    if (fs::exists(metadata_path))
+    if (metadata_info)
     {
-        const auto metadata_bytes = read_file(metadata_path);
-        const auto metadata = Json::parse(std::string(metadata_bytes.begin(), metadata_bytes.end()));
+        const auto& metadata = *metadata_info;
         const auto& format = metadata.at("format");
-        const auto facing_bytes = format.at("flyFacingRecordBytes").get<std::size_t>();
+        const auto facing_bytes = level_schema ? kAliasFlyFacingBytes : format.at("flyFacingRecordBytes").get<std::size_t>();
+        if (level_schema && format.contains("flyFacingRecordBytes") &&
+            format.at("flyFacingRecordBytes").get<std::size_t>() != kAliasFlyFacingBytes)
+            fail("level alias facing record width differs from its fixed binary ABI");
         const auto facing_count = format.at("flyFacingRecordCount").get<std::size_t>();
         const auto facing_offset = format.at("flyFacingPackageOffset").get<std::size_t>();
         if (facing_bytes != kAliasFlyFacingBytes || facing_offset + facing_count * facing_bytes > bytes.size())
         {
             fail("QBA1 fly-facing table is invalid");
         }
-        const auto first_fly_row = assets.rows.size() - kAliasFlyRowCount;
+        const auto first_fly_row = level_schema ? 0 : assets.rows.size() - kAliasFlyRowCount;
         for (std::size_t row_index = first_fly_row; row_index < assets.rows.size(); ++row_index)
         {
             auto& states = assets.rows[row_index].dynamic_states;
@@ -347,31 +362,53 @@ AliasAssets load_alias_assets(const fs::path& directory)
             }
         }
         fly_facing_loaded = true;
-        for (const auto& model : metadata.at("models"))
+        if (level_schema)
         {
-            assets.model_names.push_back(model.at("name").get<std::string>());
-            assets.model_kinds.push_back(model.at("kind").get<std::string>());
-        }
-        const auto& instrumentation = metadata.at("instrumentation");
-        assets.static_entity_ids = instrumentation.at("staticEntityIds").get<std::vector<int>>();
-        assets.row_entity_ids.resize(assets.rows.size());
-        for (const auto& effect_row : instrumentation.at("effectStates"))
-        {
-            const auto row = effect_row.at("row").get<std::size_t>();
-            if (row >= assets.rows.size())
+            // Standalone levels retain the same binary facing ABI and do not
+            // claim recorded entity inspection identities. No actors are added.
+            if (!assets.static_states.empty())
+                fail("level alias schema cannot describe static inspection states");
+            assets.model_names = metadata.at("instrumentation").at("modelNames").get<std::vector<std::string>>();
+            for (const auto& name : assets.model_names)
             {
-                fail("QBA1 effect inspection row escapes the runtime package");
+                if (!name.ends_with(".mdl") && !name.ends_with(".spr"))
+                    fail("level alias metadata names an unsupported model kind");
+                assets.model_kinds.push_back(name.ends_with(".spr") ? "spr" : "mdl");
+                assets.model_rotates.push_back(false);
             }
-            auto& entities = assets.row_entity_ids[row];
-            entities.assign(assets.rows[row].dynamic_states.size(), -1);
-            for (const auto& state : effect_row.at("states"))
+            assets.row_entity_ids.resize(assets.rows.size());
+            for (std::size_t row = 0; row < assets.rows.size(); ++row)
+                assets.row_entity_ids[row].assign(assets.rows[row].dynamic_states.size(), -1);
+        }
+        else
+        {
+            for (const auto& model : metadata.at("models"))
             {
-                const auto index = state.at("index").get<std::size_t>();
-                if (index >= entities.size())
+                assets.model_names.push_back(model.at("name").get<std::string>());
+                assets.model_kinds.push_back(model.at("kind").get<std::string>());
+                assets.model_rotates.push_back(model.value("rotates", false));
+            }
+            const auto& instrumentation = metadata.at("instrumentation");
+            assets.static_entity_ids = instrumentation.at("staticEntityIds").get<std::vector<int>>();
+            assets.row_entity_ids.resize(assets.rows.size());
+            for (const auto& effect_row : instrumentation.at("effectStates"))
+            {
+                const auto row = effect_row.at("row").get<std::size_t>();
+                if (row >= assets.rows.size())
                 {
-                    fail("QBA1 effect inspection state escapes its runtime row");
+                    fail("QBA1 effect inspection row escapes the runtime package");
                 }
-                entities[index] = state.at("entity").get<int>();
+                auto& entities = assets.row_entity_ids[row];
+                entities.assign(assets.rows[row].dynamic_states.size(), -1);
+                for (const auto& state : effect_row.at("states"))
+                {
+                    const auto index = state.at("index").get<std::size_t>();
+                    if (index >= entities.size())
+                    {
+                        fail("QBA1 effect inspection state escapes its runtime row");
+                    }
+                    entities[index] = state.at("entity").get<int>();
+                }
             }
         }
         if (assets.model_names.size() != assets.model_kinds.size() ||
@@ -456,7 +493,9 @@ void compose_alias_billboards(
     const ViewTransform& view,
     const AliasAssets& assets,
     std::size_t sample_index,
-    AliasCoverage* coverage
+    AliasCoverage* coverage,
+    std::optional<std::uint8_t> fly_rotation,
+    const SourceAliasPlacementAt& source_placement
 )
 {
     for_each_alias_pixel(
@@ -501,7 +540,9 @@ void compose_alias_billboards(
             frame.lightmap_texture_indices[pixel] = index;
             frame.lightmap_texture_levels[pixel] = 0;
             frame.untextured_lightmap_indices[pixel] = kUntexturedBrightIndex;
-        }
+        },
+        fly_rotation,
+        source_placement
     );
     refresh_alias_frame_summary(frame);
 }
@@ -565,21 +606,18 @@ ordered_packed_alias_views(const Camera& camera, const AliasAssets& assets, std:
     const auto& row = assets.rows[sample_index];
     std::vector<PackedAliasView> views;
     views.reserve(row.tokens.size());
+    const auto position = camera.position_q2();
     for (std::size_t token_ordinal = 0; token_ordinal < row.tokens.size(); ++token_ordinal)
     {
         const auto& token = row.tokens[token_ordinal];
         const auto& state = token.is_static ? assets.static_states.at(token.index) : row.dynamic_states.at(token.index);
-        const int dx = wrap_i16(state.origin_q2[0] - camera.x * 4);
-        const int dy = wrap_i16(state.origin_q2[1] - camera.y * 4);
-        const int dz = wrap_i16(state.origin_q2[2] - camera.z * 4);
+        const int dx = wrap_i16(state.origin_q2[0] - position[0]);
+        const int dy = wrap_i16(state.origin_q2[1] - position[1]);
+        const int dz = wrap_i16(state.origin_q2[2] - position[2]);
         const auto sprite = alias_resolved_sprite_id(state, dx, dy, assets.rotation_yaw_q8);
-        const int forward = wrap_i16(alias_mul_shift(dx, kCosTable[yaw], 2) + alias_mul_shift(dy, kSinTable[yaw], 2));
-        const int right = wrap_i16(alias_mul_shift(dy, kCosTable[yaw], 2) - alias_mul_shift(dx, kSinTable[yaw], 2));
-        const int up =
-            wrap_i16(alias_mul_shift(dz, kCosTable[pitch], 2) - alias_mul_shift(forward, kSinTable[pitch], 6));
-        const int depth =
-            wrap_i16(alias_mul_shift(forward, kCosTable[pitch], 6) + alias_mul_shift(dz, kSinTable[pitch], 2));
-        views.push_back({token_ordinal, right, up, depth, sprite});
+        const auto view =
+            transform_packed_delta(dx, dy, dz, kCosTable[yaw], kSinTable[yaw], kCosTable[pitch], kSinTable[pitch], 2);
+        views.push_back({token_ordinal, view.right_q6, view.up_q6, view.depth_q6, sprite});
     }
     std::sort(views.begin(), views.end(), [](const PackedAliasView& left, const PackedAliasView& right) {
         if (left.depth_q6 != right.depth_q6)

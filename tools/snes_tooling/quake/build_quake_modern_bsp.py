@@ -29,7 +29,6 @@ SHARED_TOOLS = Workspace.discover().shared_tools
 from snes_tooling.shared.host_resources import physical_core_count  # noqa: E402
 from snes_tooling.quake.quake_rom_config import (  # noqa: E402
     BSP_SOURCE_ERICW_MAP,
-    DEFAULT_CONFIG,
     BspBuildConfig,
     configured_bsp_build,
 )
@@ -37,7 +36,8 @@ from snes_tooling.quake.quake_rom_config import (  # noqa: E402
 
 TOOLS = Workspace.discover().path('tools', 'snes_tooling', 'quake')
 EXAMPLE = Workspace.discover().root / "src/snes_quake"
-OUTPUT = Workspace.discover().root / "out/snes_quake"
+from snes_tooling.shared.snes_example_build import project_layout
+OUTPUT = project_layout(Workspace.discover().quake_example).output_dir
 WORKSPACE = Workspace.discover().root
 ERICW_SOURCE = default_git_checkout(WORKSPACE, Path("github/ericwa/ericw-tools/main"))
 MAP_SOURCE_ROOT = default_git_checkout(
@@ -48,9 +48,10 @@ VCPKG = default_git_checkout(WORKSPACE, Path("github/microsoft/vcpkg/master"))
 DEFAULT_BUILD_ROOT = WORKSPACE / "tmp/validation/ericw-tools-snes-lightmap-area"
 DEFAULT_OUTPUT = OUTPUT / "build/modern-bsp/PAK0.PAK"
 DEFAULT_RECEIPT = OUTPUT / "build/modern-bsp/receipt.json"
+DEFAULT_CONFIG = WORKSPACE / "config/snes_quake/profiles/e1m3-ericw.json"
 DEFAULT_BSP_BUILD = configured_bsp_build(DEFAULT_CONFIG)
 if DEFAULT_BSP_BUILD.source != BSP_SOURCE_ERICW_MAP:
-    raise RuntimeError("default Quake config must select the modern EricW BSP")
+    raise RuntimeError("the E1M3 reference build profile must select the modern EricW BSP")
 PATCH = resolve_input(WORKSPACE, Path(str(DEFAULT_BSP_BUILD.tools_patch)))
 MAP_ENTRY = str(DEFAULT_BSP_BUILD.map_entry)
 MAP_SOURCE_NAME = str(DEFAULT_BSP_BUILD.map_member)
@@ -671,7 +672,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         type=Path,
-        help="experimental JSON override; omission uses rom-config.json",
+        help="experimental JSON override; omission uses the E1M3 reference build profile",
     )
     parser.add_argument("--jobs", type=int, default=physical_core_count())
     parser.add_argument("--light-isa", choices=("sse2", "avx2"), default="sse2")
@@ -716,12 +717,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if args.map_threads != configured.map_threads:
         parser.error("--map-threads must match the deterministic config value")
     if args.max_world_lightmap_samples != configured.world_lightmap_samples:
-        parser.error("--max-world-lightmap-samples must match rom-config.json")
+        parser.error("--max-world-lightmap-samples must match the E1M3 reference build profile")
     if (
         args.max_inline_model_lightmap_samples
         != configured.inline_model_lightmap_samples
     ):
-        parser.error("--max-inline-model-lightmap-samples must match rom-config.json")
+        parser.error("--max-inline-model-lightmap-samples must match the E1M3 reference build profile")
     return args
 
 

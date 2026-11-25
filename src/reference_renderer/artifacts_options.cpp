@@ -164,6 +164,60 @@ void write_u16_plane(const fs::path& path, std::span<const std::uint16_t> values
 }
 } // namespace
 
+void write_raw_owner_planes(
+    const fs::path& prefix,
+    std::span<const std::uint16_t> faces,
+    std::span<const std::uint16_t> entities,
+    std::span<const std::uint16_t> models
+)
+{
+    if (faces.size() != kLogicalPixels ||
+        ((!entities.empty() || !models.empty()) && (entities.size() != faces.size() || models.size() != faces.size())))
+        fail("raw ownership requires a complete face plane and paired entity/model planes");
+    // Preserve 0xffff misses exactly. This path never interprets an owner or
+    // an unwritten color index through a display palette.
+    write_u16_plane(with_suffix(prefix, ".faces"), faces);
+    if (!entities.empty())
+    {
+        write_u16_plane(with_suffix(prefix, ".entities"), entities);
+        write_u16_plane(with_suffix(prefix, ".models"), models);
+    }
+}
+
+bool run_raw_owner_plane_self_test()
+{
+    const auto prefix =
+        fs::temp_directory_path() /
+        ("quake-raw-owners-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::vector<std::uint16_t> faces(kLogicalPixels, kMissFace), entities(kLogicalPixels), models(kLogicalPixels);
+    faces[0] = 0x1234;
+    entities[0] = 0x4321;
+    models[0] = 0x00cd;
+    bool rejected = false;
+    try
+    {
+        write_raw_owner_planes(prefix, faces, entities, {});
+    }
+    catch (const std::runtime_error&)
+    {
+        rejected = true;
+    }
+    if (!rejected || fs::exists(with_suffix(prefix, ".faces")))
+        return false;
+    write_raw_owner_planes(prefix, faces, entities, models);
+    const auto face_bytes = read_file(with_suffix(prefix, ".faces"));
+    const auto entity_bytes = read_file(with_suffix(prefix, ".entities"));
+    const auto model_bytes = read_file(with_suffix(prefix, ".models"));
+    const bool passed =
+        face_bytes.size() == kLogicalPixels * 2 && face_bytes[0] == 0x34 && face_bytes[1] == 0x12 &&
+        face_bytes[2] == 0xff && face_bytes[3] == 0xff && entity_bytes[0] == 0x21 && entity_bytes[1] == 0x43 &&
+        model_bytes[0] == 0xcd && model_bytes[1] == 0 && !fs::exists(with_suffix(prefix, ".bmp")) &&
+        !fs::exists(with_suffix(prefix, ".idx"));
+    for (const auto* suffix : {".faces", ".entities", ".models"})
+        fs::remove(with_suffix(prefix, suffix));
+    return passed;
+}
+
 void write_reference_outputs(const fs::path& prefix, const ReferenceFrame& frame, const SourceWorld& world)
 {
     if (frame.material_indices.size() != frame.indices.size())
@@ -833,6 +887,23 @@ void declare_artifact_options(CLI::App& app, Options& options)
         options.fly_alias_render_indices,
         "Write packed world plus the generated current-camera fly alias row"
     );
+    app.add_option("--x2-weapon-assets", options.x2_weapon_assets, "Native-resolution QWV2 weapon asset")
+        ->check(CLI::ExistingFile);
+    app.add_option(
+           "--full-precision-replay",
+           options.full_precision_replay,
+           "Source camera and entity transform replay"
+    )
+        ->check(CLI::ExistingFile);
+    app.add_option("--x2-weapon-output", options.x2_weapon_output, "Write the final X2 plane with the weapon");
+    app.add_option("--x2-weapon-frame", options.x2_weapon_frame, "Explicit X2 weapon frame ID, zero hides it")
+        ->check(CLI::Range(0, 255));
+    app.add_option(
+           "--x2-weapon-source-pose",
+           options.x2_weapon_source_pose,
+           "Select the weapon at this source demo pose"
+    )
+        ->check(CLI::Range(0, 65535));
 }
 } // namespace
 
@@ -865,6 +936,8 @@ void declare_replay_options(CLI::App& app, Options& options, RawOptionValues& ra
         ->check(CLI::ExistingFile);
     app.add_option("--alias-assets", options.alias_assets, "Directory containing QBA1 MDL/IDSP billboard assets")
         ->check(CLI::ExistingDirectory);
+    app.add_option("--fly-alias-replay", options.fly_alias_replay, "QFA1 complete source Fly actor replay")
+        ->check(CLI::ExistingFile);
     app.add_option("--ordered-replay", options.ordered_replay, "QOR1 packed cameras and packets for ordered playback")
         ->check(CLI::ExistingFile);
     app.add_option(
@@ -964,8 +1037,31 @@ void declare_render_options(CLI::App& app, Options& options, RawOptionValues& ra
     )
         ->check(CLI::IsMember({"none", "snes-q4"}))
         ->capture_default_str();
+    app.add_flag("--gameplay", options.gameplay, "Play the independent deterministic gameplay core");
+    app.add_option("--gameplay-assets", options.gameplay_assets, "One map manifest or gameplay-maps.json index")
+        ->check(CLI::ExistingFile)
+        ->expected(-1);
+    app.add_option("--gameplay-map", options.gameplay_map, "Initial playable level")
+        ->check(CLI::IsMember({"start", "e1m1", "e1m3", "e1m2", "e1m4"}));
+    app.add_flag("--gameplay-face-colors", options.gameplay_face_colors, "Start interactive gameplay with baked face colors");
+    app.add_option("--gameplay-script", options.gameplay_script, "Deterministic native tick/service script")
+        ->check(CLI::ExistingFile);
+    app.add_option("--gameplay-tape-dir", options.gameplay_tape_dir, "Directory of recorded gameplay routes")
+        ->check(CLI::ExistingDirectory);
+    app.add_option("--gameplay-record-dir", options.gameplay_record_dir, "Save and browse interactive gameplay tapes");
+    app.add_option("--gameplay-report", options.gameplay_report, "Gameplay state/script JSON output");
     app.add_flag("--self-test", options.self_test, "Run the internal BVH/ray/parity test");
     app.add_flag("--report-only", options.report_only, "Write JSON counters without framebuffer artifacts");
+    app.add_flag(
+        "--raw-owner-planes",
+        options.raw_owner_planes,
+        "Retain raw static ownership planes alongside report-only counters; no bitmap export"
+    );
+    app.add_flag(
+        "--projection-ray-owner-planes",
+        options.projection_ray_owner_planes,
+        "Write separate nominal/inverse projection-ray owners and their diagnostic contract"
+    );
 }
 } // namespace
 
@@ -1092,7 +1188,8 @@ OptionFacts derive_option_facts(const Options& options)
     facts.brush_demo = !options.brush_replay.empty();
     facts.packed_demo = !options.packed_realtime_demo_track.empty();
     facts.static_fly = !options.fly_alias_render_indices.empty();
-    facts.ordered_sky = !options.quake_sky_indices.empty() && options.demo_pose >= 0;
+    facts.ordered_sky =
+        options.demo_pose >= 0 && (!options.quake_sky_indices.empty() || !options.x2_weapon_output.empty());
     facts.fly_sky = !options.quake_sky_indices.empty() && facts.static_fly;
     facts.packed_brush_indices =
         !options.packed_brush_albedo_indices.empty() || !options.packed_brush_lightmap_indices.empty() ||
@@ -1105,7 +1202,7 @@ OptionFacts derive_option_facts(const Options& options)
         facts.brush_indices || !options.packed_albedo_indices.empty() || !options.packed_lightmap_indices.empty() ||
         !options.packed_lightmap_levels.empty() || !options.packed_render_indices.empty() ||
         !options.fly_alias_render_indices.empty() || !options.quake_sky_indices.empty() ||
-        !options.particle_output.empty();
+        !options.particle_output.empty() || !options.x2_weapon_output.empty();
     return facts;
 }
 } // namespace
@@ -1113,8 +1210,7 @@ OptionFacts derive_option_facts(const Options& options)
 class OptionContractValidator
 {
   public:
-    OptionContractValidator(Options& options, const RawOptionValues& raw)
-    :
+    OptionContractValidator(Options& options, const RawOptionValues& raw) :
     options_(options),
     raw_(raw),
     facts_(derive_option_facts(options))
@@ -1123,6 +1219,30 @@ class OptionContractValidator
 
     void validate()
     {
+        if (options_.gameplay || !options_.gameplay_assets.empty() || !options_.gameplay_script.empty() ||
+            !options_.gameplay_tape_dir.empty() || !options_.gameplay_record_dir.empty())
+        {
+            if (options_.self_test || options_.pak.empty() || options_.gameplay_assets.empty())
+                fail("gameplay requires --pak and --gameplay-assets, separately from --self-test");
+            if (!options_.gameplay_script.empty() && options_.gameplay_report.empty())
+                fail("--gameplay-script requires --gameplay-report");
+            if (options_.gameplay_face_colors && !options_.gameplay_script.empty())
+                fail("--gameplay-face-colors requires interactive gameplay");
+            if (!options_.gameplay_script.empty() &&
+                (!options_.gameplay_tape_dir.empty() || !options_.gameplay_record_dir.empty()))
+                fail("gameplay tape directories are for interactive gameplay");
+            if (facts_.precise_demo || facts_.packed_demo || !options_.brush_replay.empty())
+                fail("gameplay and recorded demo modes are mutually exclusive");
+            if (options_.render_scale != "x2")
+                fail("gameplay currently requires the X2 render viewport");
+            if (options_.instrumentation_session.empty() != options_.instrumentation_pipe.empty())
+                fail("gameplay instrumentation requires both session and pipe");
+            if (!options_.instrumentation_session.empty() &&
+                (!valid_reference_instrumentation_identifier(options_.instrumentation_session) ||
+                 !valid_reference_instrumentation_identifier(options_.instrumentation_pipe)))
+                fail("invalid gameplay instrumentation identifier");
+            return;
+        }
         validate_self_test_contract();
         if (options_.self_test)
         {
@@ -1139,6 +1259,7 @@ class OptionContractValidator
         validate_live_feature_contract();
         validate_demo_pose_contract();
         validate_static_fly_contract();
+        validate_x2_weapon_contract();
         validate_fly_sky_paths();
         validate_demo_pose_artifacts();
         validate_timing_contract();
@@ -1158,6 +1279,10 @@ class OptionContractValidator
 
     void validate_self_test_contract() const
     {
+        if (options_.self_test && options_.projection_ray_owner_planes)
+            fail("--projection-ray-owner-planes cannot be combined with --self-test");
+        if (options_.self_test && options_.raw_owner_planes)
+            fail("--raw-owner-planes cannot be combined with --self-test");
         if (options_.self_test && (!options_.quake_sky_indices.empty() || options_.surface_time_override))
         {
             fail(
@@ -1193,6 +1318,8 @@ class OptionContractValidator
 
     void validate_source_replay_contract() const
     {
+        if (!options_.full_precision_replay.empty() && (!facts_.precise_demo || options_.demo_pose >= 0))
+            fail("--full-precision-replay requires live --realtime-demo playback");
         if (!options_.particle_replay.empty() && !facts_.precise_demo)
             fail("--particle-replay requires --realtime-demo");
         if (!options_.particle_output.empty() && (options_.particle_replay.empty() || options_.demo_pose < 0))
@@ -1380,7 +1507,7 @@ class OptionContractValidator
             );
         }
         if (options_.demo_pose >= 0 && options_.output_prefix.empty() &&
-            !(options_.report_only && (!options_.quake_sky_indices.empty() || !options_.particle_output.empty())))
+            !(options_.report_only && (facts_.ordered_sky || !options_.particle_output.empty())))
         {
             fail("--demo-pose requires --output-prefix");
         }
@@ -1406,6 +1533,48 @@ class OptionContractValidator
         if (options_.fly_alias_render_indices.empty() && options_.fly_source_pose != 0)
         {
             fail("--fly-source-pose requires --fly-alias-render-indices");
+        }
+    }
+
+    void validate_x2_weapon_contract() const
+    {
+        const bool by_frame = options_.x2_weapon_frame >= 0;
+        const bool by_pose = options_.x2_weapon_source_pose >= 0;
+        const bool live_demo =
+            facts_.precise_demo && options_.demo_pose < 0 && options_.ordered_alias_visibility.empty();
+        if (options_.x2_weapon_output.empty() && !by_frame && !by_pose &&
+            (options_.x2_weapon_assets.empty() || live_demo))
+        {
+            return;
+        }
+        if (options_.x2_weapon_assets.empty() || options_.x2_weapon_output.empty() || options_.render_scale != "x2" ||
+            (by_frame && by_pose))
+        {
+            fail("--x2-weapon-output requires --x2-weapon-assets, X2, and at most one weapon selection");
+        }
+        if (facts_.ordered_sky)
+        {
+            if (options_.ordered_replay.empty() || options_.data_dir.empty() || options_.no_textures ||
+                options_.material_view)
+            {
+                fail("ordered X2 weapon output requires --ordered-replay, --data-dir, and a textured render mode");
+            }
+        }
+        else if (!facts_.static_fly || (!by_frame && !by_pose))
+        {
+            fail("static X2 weapon output requires --fly-alias-render-indices and a weapon frame or source pose");
+        }
+        const auto output = fs::weakly_canonical(options_.x2_weapon_output);
+        for (const auto& other :
+             {options_.x2_weapon_assets,
+              options_.fly_alias_render_indices,
+              options_.quake_sky_indices,
+              options_.packed_alias_render_indices})
+        {
+            if (!other.empty() && output == fs::weakly_canonical(other))
+            {
+                fail("X2 weapon output must use a separate path");
+            }
         }
     }
 
@@ -1465,6 +1634,18 @@ class OptionContractValidator
 
     void validate_output_contract() const
     {
+        if (options_.projection_ray_owner_planes &&
+            (!options_.report_only || options_.data_dir.empty() || options_.packet_source_faces.empty() ||
+             options_.output_prefix.empty() || options_.demo_pose >= 0 || !options_.ordered_replay.empty() ||
+             facts_.precise_demo || facts_.packed_demo))
+            fail(
+                "--projection-ray-owner-planes requires static --report-only, --data-dir, "
+                "--packet-source-faces and --output-prefix"
+            );
+        if (options_.raw_owner_planes &&
+            (!options_.report_only || options_.data_dir.empty() || options_.packet_source_faces.empty() ||
+             options_.demo_pose >= 0 || !options_.ordered_replay.empty()))
+            fail("--raw-owner-planes requires static --report-only, --data-dir and --packet-source-faces");
         if (options_.report_only && options_.json_path.empty() && !facts_.raw_indices)
         {
             fail("--report-only requires --json");
@@ -1558,14 +1739,135 @@ bool run_particle_option_contract_self_test()
     return false;
 }
 
+bool run_raw_owner_option_self_test()
+{
+    Options options;
+    if (options.raw_owner_planes)
+        return false;
+    CLI::App app;
+    RawOptionValues raw;
+    declare_render_options(app, options, raw);
+    std::vector<std::string> arguments{"--raw-owner-planes"};
+    app.parse(arguments);
+    if (!options.raw_owner_planes)
+        return false;
+    options.pak = "fixture.pak";
+    options.data_dir = "data";
+    options.packet_source_faces = "packet.bin";
+    options.json_path = "report.json";
+    options.output_prefix = "reference";
+    options.report_only = true;
+    std::string rejection;
+    const auto accepted = [&](Options candidate) {
+        try
+        {
+            OptionContractValidator(candidate, raw).validate();
+            return true;
+        }
+        catch (const std::runtime_error& error)
+        {
+            rejection = error.what();
+            return false;
+        }
+    };
+    if (!accepted(options))
+    {
+        std::cerr << "raw-owner valid fixture rejected: " << rejection << '\n';
+        return false;
+    }
+    auto invalid = options;
+    invalid.output_prefix.clear();
+    if (accepted(invalid))
+        return false;
+    invalid = options;
+    invalid.report_only = false;
+    if (accepted(invalid))
+        return false;
+    invalid = options;
+    invalid.data_dir.clear();
+    if (accepted(invalid))
+        return false;
+    invalid = options;
+    invalid.packet_source_faces.clear();
+    if (accepted(invalid))
+        return false;
+    invalid = options;
+    invalid.self_test = true;
+    return !accepted(invalid);
+}
+
+bool run_projection_ray_owner_option_self_test()
+{
+    Options options;
+    if (options.projection_ray_owner_planes)
+        return false;
+    CLI::App app;
+    RawOptionValues raw;
+    declare_render_options(app, options, raw);
+    std::vector<std::string> arguments{"--projection-ray-owner-planes"};
+    app.parse(arguments);
+    if (!options.projection_ray_owner_planes || options.raw_owner_planes)
+        return false;
+    options.pak = "fixture.pak";
+    options.data_dir = "data";
+    options.packet_source_faces = "packet.bin";
+    options.json_path = "report.json";
+    options.output_prefix = "reference";
+    options.report_only = true;
+    const auto accepted = [&](Options candidate) {
+        try
+        {
+            OptionContractValidator(candidate, raw).validate();
+            return true;
+        }
+        catch (const std::runtime_error&)
+        {
+            return false;
+        }
+    };
+    if (!accepted(options))
+        return false;
+    for (int field = 0; field < 7; ++field)
+    {
+        auto invalid = options;
+        switch (field)
+        {
+        case 0:
+            invalid.output_prefix.clear();
+            break;
+        case 1:
+            invalid.report_only = false;
+            break;
+        case 2:
+            invalid.data_dir.clear();
+            break;
+        case 3:
+            invalid.packet_source_faces.clear();
+            break;
+        case 4:
+            invalid.self_test = true;
+            break;
+        case 5:
+            invalid.demo_pose = 0;
+            break;
+        case 6:
+            invalid.ordered_replay = "ordered.json";
+            break;
+        }
+        if (accepted(invalid))
+            return false;
+    }
+    return true;
+}
+
 Options parse_options(int argc, char** argv)
 {
     Options options;
     RawOptionValues raw;
     CLI::App app{"Independent C++23 SNES Quake reference renderer", "quake_bsp_reference_renderer"};
     declare_options(app, options, raw);
-    app.add_option("--render-scale", options.render_scale, "Graphics scale: x2, x3 or x3-warp")
-        ->check(CLI::IsMember({"x2", "x3", "x3-warp"}));
+    app.add_option("--render-scale", options.render_scale, "Graphics scale: x2 or x3")
+        ->check(CLI::IsMember({"x2", "x3"}));
     auto* diagnostic_focal =
         app.add_option(
                "--diagnostic-source-focal",
@@ -1573,25 +1875,9 @@ Options parse_options(int argc, char** argv)
                "Native X3 focal [33,64], only for static demo-pose diagnostics; never a training target"
         )
             ->check(CLI::Range(33, 64));
-    auto* visibility_focal =
-        app.add_option(
-               "--visibility-source-focal",
-               options.diagnostic_source_focal,
-               "Projection-bound X3 visibility export focal [33,64]; requires --ordered-alias-visibility"
-        )
-            ->check(CLI::Range(33, 64));
-    app.add_option("--warp-model", options.warp_model, "Reference warp: projective, mode7 or hdma")
-        ->check(CLI::IsMember({"projective", "mode7", "hdma"}));
-    app.add_option("--warp-depth", options.warp_depth, "Translation plane depth in Quake units; 0 = rotation only");
-    app.add_option("--warp-bands", options.warp_bands, "HDMA band count: 1, 8, 16, 32 or 224");
-    app.add_option("--warp-profile-q16", options.warp_profile, "Three or five inverse-depth Q16 knots, top to bottom")
-        ->delimiter(',');
     parse_command_line(app, argc, argv);
     normalize_options(options, raw);
     OptionContractValidator(options, raw).validate();
-    if (visibility_focal->count() &&
-        (diagnostic_focal->count() || options.render_scale != "x3" || options.ordered_alias_visibility.empty()))
-        fail("visibility source focal requires an X3 ordered visibility export and cannot use diagnostic focal");
     if (diagnostic_focal->count() &&
         (options.render_scale != "x3" || options.demo_pose < 0 || options.output_prefix.empty() ||
          !options.ordered_alias_visibility.empty()))

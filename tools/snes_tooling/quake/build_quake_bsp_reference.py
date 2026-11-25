@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from snes_tooling import Workspace
+from snes_tooling.workspace import WorkspaceError
 
 import argparse
 import hashlib
@@ -236,6 +237,18 @@ def _input_manifest(paths: Sequence[Path]) -> list[dict[str, object]]:
     return sorted(records, key=lambda record: str(record["path"]))
 
 
+def reference_source_identity() -> dict[str, object]:
+    """Bind derived visibility proofs to the complete reference build inputs.
+
+    Keep the builder's inventory authoritative: projection helpers, headers,
+    new translation units and build settings must invalidate old evidence.
+    Relative paths make the identity independent of the checkout location.
+    """
+    files = _input_manifest(_build_inputs())
+    encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {"aggregateSha256": hashlib.sha256(encoded).hexdigest(), "files": files}
+
+
 def _output_manifest(runtime: Path) -> dict[str, dict[str, object]]:
     outputs = {"executable": _fingerprint(EXECUTABLE)}
     if os.name == "nt":
@@ -273,7 +286,25 @@ def _write_build_receipt(inputs: list[dict[str, object]], runtime: Path) -> None
     temporary.replace(BUILD_RECEIPT)
 
 
+def require_invocation_workspace() -> None:
+    """Reject an editable install silently targeting a different checkout."""
+    if os.environ.get("SNES_WORKSPACE"):
+        return
+    target = WORKSPACE.resolve()
+    for label, path in (("invocation", Path(sys.argv[0])), ("working directory", Path.cwd())):
+        try:
+            caller = Workspace.containing(path).root
+        except WorkspaceError:
+            continue
+        if caller != target:
+            raise RuntimeError(
+                f"reference build resolves {target}, but {label} belongs to {caller}; "
+                "set SNES_WORKSPACE explicitly to the intended checkout before building"
+            )
+
+
 def build(*, force: bool = False) -> dict[str, object]:
+    require_invocation_workspace()
     build_inputs = _build_inputs()
     missing = [path for path in build_inputs if not path.is_file()]
     if missing:

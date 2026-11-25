@@ -85,9 +85,13 @@ inline constexpr int kBspLumpCount = 15;
 inline constexpr int kLumpPlanes = 1;
 inline constexpr int kLumpTextures = 2;
 inline constexpr int kLumpVertices = 3;
+inline constexpr int kLumpVisibility = 4;
+inline constexpr int kLumpNodes = 5;
 inline constexpr int kLumpTexinfo = 6;
 inline constexpr int kLumpFaces = 7;
 inline constexpr int kLumpLighting = 8;
+inline constexpr int kLumpLeaves = 10;
+inline constexpr int kLumpMarkSurfaces = 11;
 inline constexpr int kLumpEdges = 12;
 inline constexpr int kLumpSurfEdges = 13;
 inline constexpr int kLumpModels = 14;
@@ -489,6 +493,7 @@ struct SourceWorld
     std::vector<int> face_texture_infos;
     std::vector<FaceLightmap> face_lightmaps;
     std::vector<std::uint8_t> lighting;
+    std::uint8_t switched_light_mask{15};
     std::vector<FaceColor> colors;
     std::vector<Plane> visibility_planes;
     std::vector<std::uint8_t> live_base_colors;
@@ -522,6 +527,9 @@ FaceLightmap make_face_lightmap(
 std::uint8_t orientation_light_level(const Vec3& normal);
 
 SourceWorld build_source_world(const BspData& bsp);
+
+std::vector<std::uint8_t> authored_world_visibility(
+    std::span<const std::uint8_t> bytes, const BspData& bsp, const Vec3& eye);
 
 SourceWorld build_quantized_world(const fs::path& data_dir, const SourceWorld& source);
 

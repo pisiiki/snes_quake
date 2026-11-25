@@ -149,6 +149,14 @@ void write_json_report(
           {"source", Json::array({source_camera.x, source_camera.y, source_camera.z})}}},
         {"logicalResolution", Json::array({kLogicalWidth, kLogicalHeight})},
         {"artifactMode", options.report_only ? "report-only" : "full"},
+        {"rawOwnerPlanes", options.raw_owner_planes ? Json{
+            {"contract", "static-source-through-post-brush-u16le-v1"},
+            {"prefix", options.output_prefix.generic_string()},
+            {"faceLayers", {"source", "quantized", "packet-nearest", "packet-painter", "current-pipeline", "packed-projective"}},
+            {"entityModelLayer", "packed-projective"},
+            {"missFace", kMissFace},
+            {"scope", "pre-sky/pre-alias static and post-brush packed owners; all pixels retained"}
+        } : Json(nullptr)},
         {"colorMode", options.flat ? "flat" : "checker-dither"},
         {"renderMatrix",
          {{"contract", "quake-techniques-2-4-7-v1"},

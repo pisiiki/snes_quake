@@ -1,0 +1,26 @@
+.if .defined(PLAYABLE_E1M1_CULL_STREAMED_ALIAS) && (BSP_RENDER_SCALE = 2)
+FlyBrushMaskLoadFacing:
+.ifdef PLAYABLE_MAP_ID
+        ; The ROM scan already tested the link in R1 at the address in R7.
+        move    R10, R7
+.else
+        lm      R0, (BRUSH_CURRENT_LINK)
+        add     R0
+        add     R0
+        iwt     R10, #BRUSH_LINKS
+        with    R10
+        add     R0
+        movew   R1, (R10)
+        iwt     R0, #BRUSH_LINK_BACKFACING_TAG
+        and     R1
+        bne     @Back
+        nop
+.endif
+        sm      (BRUSH_FRAGMENT_LOAD_RETURN), R11
+        GSU_ABSOLUTE_GOTO BrushLoadCurrentFragmentLinked
+.ifndef PLAYABLE_MAP_ID
+@Back:
+        GSU_ABSOLUTE_GOTO FlyBrushMaskPrepareReturn, 1
+        sub     R0
+.endif
+.endif

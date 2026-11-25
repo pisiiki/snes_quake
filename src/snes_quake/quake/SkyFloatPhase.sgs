@@ -1,0 +1,130 @@
+; Decode/normalize immutable phase exactly once per surviving-sky compositor.
+; This helper is x2 only. Live Fly retains its existing native Q24 time oracle;
+; demo and saved-frame replay supply the complete independent binary32 phase.
+SkyFloatPreparePhase:
+        sm      (SF_PHASE_RETURN), R11
+        lm      R0, (GSU_SKY_EXACT_PHASE_FORMAT_OFFSET)
+        moves   R0, R0
+        beq     @Binary32
+        nop
+        move    R1, #GSU_SKY_EXACT_PHASE_Q24
+        with    R0
+        cmp     R1
+        ibt     R1, #$E8 ; -24
+        beq     @FixedExponent
+        nop
+        ibt     R1, #$F0 ; -16, explicit legacy Q16 override
+@FixedExponent:
+        sm      (SF_EXP), R1
+        .repeat 3, word
+          lm    R0, (GSU_SKY_EXACT_PHASE_OFFSET+word*2)
+          sm    (SF_W0+word*2), R0
+        .endrepeat
+        jal     SkyFloatNormalize48
+        nop
+        lm      R4, (SF_W0)
+        lm      R5, (SF_W1)
+        lm      R8, (SF_EXP)
+        GSU_ABSOLUTE_GOTO @Publish
+@Binary32:
+        lm      R4, (GSU_SKY_EXACT_PHASE_OFFSET)
+        lm      R5, (GSU_SKY_EXACT_PHASE_OFFSET+2)
+        move    R0, R4
+        with    R0
+        or      R5
+        bne     @Nonzero
+        nop
+        move    R8, #0
+        bra     @Publish
+        nop
+@Nonzero:
+        move    R8, R5
+        with    R8
+        add     R8
+        with    R8
+        hib
+        bne     @NormalPhase
+        nop
+        ; A subnormal phase is exact integer fraction * 2^-149. Normalize its
+        ; integer significand without inventing the normal hidden bit.
+        sm      (SF_W0), R4
+        sm      (SF_W1), R5
+        move    R0, #0
+        sm      (SF_W2), R0
+        iwt     R0, #.loword(-149)
+        sm      (SF_EXP), R0
+        jal     SkyFloatNormalize48
+        nop
+        lm      R4, (SF_W0)
+        lm      R5, (SF_W1)
+        lm      R8, (SF_EXP)
+        GSU_ABSOLUTE_GOTO @Publish
+@NormalPhase:
+        iwt     R0, #150
+        with    R8
+        sub     R0
+        iwt     R1, #$007F
+        with    R5
+        and     R1
+        iwt     R1, #$0080
+        with    R5
+        or      R1
+@Publish:
+        sm      (SF_PHASE_VALUE), R4
+        sm      (SF_PHASE_VALUE+2), R5
+        sm      (SF_PHASE_VALUE+4), R8
+        ; Q3 projection and the two-layer sampler use this same rounded phase.
+        ; In particular Q24 just below an integer can round upward in binary32.
+        move    R0, #16
+        with    R8
+        add     R0
+        bmi     @ShiftRight
+        nop
+        beq     @Q16Ready
+        nop
+@ShiftLeftLoop:
+        with    R4
+        add     R4
+        with    R5
+        adc     R5
+        dec     R8
+        bne     @ShiftLeftLoop
+        nop
+        bra     @Q16Ready
+        nop
+@ShiftRight:
+        move    R0, #0
+        with    R0
+        sub     R8
+        move    R8, R0
+        move    R1, #24
+        with    R8
+        cmp     R1
+        bcc     @ShiftRightLoop
+        nop
+        move    R4, #0
+        move    R5, #0
+        bra     @Q16Ready
+        nop
+@ShiftRightLoop:
+        with    R5
+        lsr
+        with    R4
+        ror
+        dec     R8
+        bne     @ShiftRightLoop
+        nop
+@Q16Ready:
+        sm      (SF_PHASE_NATIVE_LO), R4
+        move    R0, R5
+        iwt     R1, #$FF80
+        with    R0
+        and     R1
+        sm      (SF_PHASE_EPOCH_HI), R0
+        iwt     R1, #$007F
+        with    R5
+        and     R1
+        sm      (SF_PHASE_NATIVE_HI), R5
+        lm      R11, (SF_PHASE_RETURN)
+        ret
+        nop

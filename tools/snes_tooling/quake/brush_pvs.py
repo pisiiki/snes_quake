@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import struct
+import time
 
 BANK_BYTES = 32768
 DIRECTORY = struct.Struct("<H")
@@ -169,6 +170,78 @@ def build_leaf_pvs(source, fragments, decompress, *, bank, start_offset):
 BANKED_DIRECTORY = struct.Struct("<HB")
 
 
+def validate_rom_leaf_pvs(rom: bytes, metadata: dict) -> dict:
+    """Verify the linked directory and row storage as one generated family.
+
+    Palette-reserved texture banks can carry a separately packed directory.
+    Checking their pixels or individual input hashes cannot prove that its
+    pointers address the QBSA/QBSF tails actually included in the cartridge.
+    """
+    started = time.monotonic()
+    pvs = metadata["worldComposition"]["leafPvs"]
+
+    def read(bank, offset, size):
+        if not (0 <= bank < 128 and 0 <= offset <= BANK_BYTES
+                and 0 <= size <= BANK_BYTES - offset):
+            raise ValueError("brush PVS bank range is invalid")
+        first = bank * BANK_BYTES + offset
+        if first + size > len(rom):
+            raise ValueError("brush PVS bank range escapes the linked ROM")
+        return rom[first:first + size]
+
+    leaf_count, row_bytes = pvs["leafCount"], pvs["rowBytes"]
+    if (pvs["directoryRecordBytes"] != BANKED_DIRECTORY.size
+            or pvs["directoryBytes"] != leaf_count * BANKED_DIRECTORY.size
+            or row_bytes != (leaf_count + 7) // 8):
+        raise ValueError("brush PVS directory dimensions are invalid")
+    directory = read(pvs["directoryBank"], pvs["directoryAddress"] - 0x8000,
+                     pvs["directoryBytes"])
+    regions, digest = [], hashlib.sha256(directory)
+    for region in pvs["rowStorage"]:
+        payload = read(region["bank"], region["offset"], region["bytes"])
+        if hashlib.sha256(payload).hexdigest() != region["sha256"]:
+            raise ValueError("linked brush PVS row storage differs from its metadata")
+        regions.append((region["bank"], region["offset"], payload))
+        digest.update(payload)
+    if digest.hexdigest() != pvs["sha256"]:
+        raise ValueError("linked brush PVS directory and row storage are from different asset families")
+
+    rows = {}
+    guards = pvs["guard"]["guardLeaves"]
+    if any(not 0 <= leaf < leaf_count for leaf in guards):
+        raise ValueError("brush PVS guard leaf escapes its domain")
+    for address, bank in BANKED_DIRECTORY.iter_unpack(directory):
+        key = (bank, address)
+        if key in rows:
+            continue
+        matches = [(offset, payload) for region_bank, offset, payload in regions
+                   if region_bank == bank and offset <= address - 0x8000 < offset + len(payload)]
+        if len(matches) != 1:
+            raise ValueError("brush PVS row pointer escapes declared storage")
+        offset, payload = matches[0]
+        cursor, row = address - 0x8000 - offset, bytearray()
+        while len(row) < row_bytes:
+            if cursor >= len(payload):
+                raise ValueError("brush PVS RLE row is truncated")
+            value = payload[cursor]
+            cursor += 1
+            if value:
+                row.append(value)
+            else:
+                if cursor >= len(payload) or not payload[cursor]:
+                    raise ValueError("brush PVS RLE zero run is truncated or empty")
+                row.extend(bytes(payload[cursor]))
+                cursor += 1
+                if len(row) > row_bytes:
+                    raise ValueError("brush PVS RLE row overruns its decoded size")
+        if any(not row[leaf >> 3] & (1 << (leaf & 7)) for leaf in guards):
+            raise ValueError("linked brush PVS row lost a conservative guard leaf")
+        rows[key] = bytes(row)
+    return {"leafCount": leaf_count, "uniqueRows": len(rows), "rowBytes": row_bytes,
+            "guardLeafCount": len(guards), "sha256": digest.hexdigest(),
+            "elapsedSeconds": round(time.monotonic() - started, 3)}
+
+
 def banked_rows(payload, metadata, regions, *, directory_bank, directory_offset):
     """Relocate complete, unchanged RLE streams using 24-bit row pointers."""
     count = metadata["leafCount"]
@@ -212,7 +285,15 @@ def install_leaf_pvs(source, fragments, decompress, *, texture_chunks, texture_m
     first = runtime_metadata["firstBank"]
     directory_bank = first - 1
     directory_offset = (texture_bank_used_bytes(texture_metadata["textures"], directory_bank) + 1) & ~1
-    regions = [(first + index, used) for index, used in enumerate(runtime_metadata["usedBytesByBank"])]
+    used_runtime = runtime_metadata["usedBytesByBank"]
+    directory_bytes = metadata["leafCount"] * BANKED_DIRECTORY.size
+    if directory_offset + directory_bytes > BANK_BYTES:
+        index = min(range(len(used_runtime)), key=used_runtime.__getitem__)
+        directory_bank = first + index
+        directory_offset = (used_runtime[index] + 1) & ~1
+        used_runtime[index] = directory_offset + directory_bytes
+        runtime_metadata["freeBytesByBank"][index] = BANK_BYTES - used_runtime[index]
+    regions = [(first + index, used) for index, used in enumerate(used_runtime)]
     for role in fragments.metadata["bankRoles"].values():
         count = role["bankCount"]
         used = role.get("logicalBytes", role.get("bytes")) - (count - 1) * BANK_BYTES
@@ -229,7 +310,12 @@ def install_leaf_pvs(source, fragments, decompress, *, texture_chunks, texture_m
         result[offset:offset + len(added)] = added
         return bytes(result)
 
-    textures[-1] = write_tail(textures[-1], directory_offset, directory)
+    if directory_bank < first:
+        textures[-1] = write_tail(textures[-1], directory_offset, directory)
+    else:
+        index = directory_bank - first
+        runtime[index] = write_tail(runtime[index], directory_offset, directory)
+        metadata["storage"] = "24-bit directory and unchanged RLE rows in checked brush bank tails"
     for row in rows:
         bank, offset, added = row["bank"], row["offset"], row["payload"]
         if first <= bank < first + len(runtime):

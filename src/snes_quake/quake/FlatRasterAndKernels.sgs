@@ -1,3 +1,4 @@
+
 ; Keep the dominant interior decoder inside the lightmap interpolation cache
 ; window. The technique-0/1 flat loop occupies this routine's former cold slot.
 ; Padding below retains the CPU-installed T4 overlays and cache-manifest
@@ -13,25 +14,25 @@ LightmapSampleInteriorDirect:
         with    R3
         and     R1
 
-        move    R5, R9
+        to      R5
+        from    R9
+        and     R1
         with    R9
         hib
         with    R9
         sex
-        with    R5
-        and     R1
 
         lm      R1, (LIGHTMAP_WIDTH)
         with    R9
         mult    R1
-        with    R8
+        to      R6
+        from    R8
         add     R9
-        move    R6, R8
         ; This is the adjusted sampler's sole entry. R15 already names the
         ; target while its delay executes, so CACHE sees the same cache line.
         GSU_ABSOLUTE_GOTO LightmapSampleAdjustedHorizontalReady, shared_delay
         cache
-  .repeat 3
+  .repeat 5
         nop
   .endrepeat
 
@@ -41,22 +42,51 @@ LightmapSampleInteriorDirect:
 TextureSampleAbsolutePowerOfTwoSingleBank:
         lm      R5, (TEXTURE_SPAN_S)
         lm      R6, (TEXTURE_SPAN_T)
+        ; Keep the ordinary entry's inputs and flags while skipping the cold
+        ; gap now occupied by a private, cache-resident lightmap continuation.
+        bra     TextureSampleAbsolutePowerOfTwoSingleBankRegisters
+        nop
+TextureUntexturedLightmapInteriorBlock:
+TextureUntexturedLightmapInteriorSpanLoop:
+        ; The common selector already leaves this entry in R13. Retaining it
+        ; avoids returning to the uncached main-code tail for every pixel.
+        iwt     R7, #TextureUntexturedLightmapSampleReady
+        move    R8, R5
+        move    R9, R6
+        bra     LightmapSampleInteriorDirect
+        with    R8
   .repeat $27DC - (* - GSU_SelectVisibility)
         nop
   .endrepeat
 TextureSampleAbsolutePowerOfTwoSingleBankRegisters:
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+.else
         lm      R1, (TEXTURE_SPAN_SHADE_Q8)
-        with    R5
+.endif
+        from    R5
         and     R1
-  .repeat 4
-        with    R5
+        ; R0 is scratch until GETB. Keep the first three shifts implicit.
+  .repeat 3
         lsr
   .endrepeat
+        to      R5
+        lsr
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+.endif
         with    R6
         and     R1
         lm      R12, (TEXTURE_STEP_SHADE_Q8)
         jmp     R12
         with    R6
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+.else
+        ; Pin every row continuation in the alternate sampler.
+  .repeat 3
+        nop
+  .endrepeat
+.endif
 TextureSamplePowerOfTwoRowShift3:
         add     R6
         with    R6
@@ -72,12 +102,11 @@ TextureSamplePowerOfTwoRowReady:
         with    R4
         add     R6
         GSU_SET_ROM_BUFFER_ADDRESS R4
-        ; Every texture sample supplies a new absolute R14 address, so the
-        ; macro's sequential-read increment would be dead work here.
-        to      R0
+        ; Raw JMP resets the destination before GETB; RET inserts a delay NOP.
+        ; Every sample supplies a fresh absolute R14 address.
+        jmp     R11
         getb
-        ret
-        nop
+        .res 3, $01
         nop
 
 TextureLightmapInteriorSpanLoop:
@@ -88,51 +117,47 @@ TextureLightmapInteriorSpanLoop:
         GSU_ABSOLUTE_GOTO LightmapSampleInteriorDirect, shared_delay
         with    R8
 
-; Put the repeated coordinate DDA first so its complete loop fits in the
-; lightmap sampler's active cache window.
-        with    R5
+; Fraction carries advance exact finite-block coordinates without per-pixel
+; residual branches. LOOP owns R12/R13; the shared tail restores the read pointer.
+        with    R1
 TextureBuildCoordinateLoop:
-        add     R7
-        with    R1
         add     R9
-        bmi     TextureBuildCoordinateSReady
-        inc     R10
-        with    R1
-        sub     R3
         with    R5
-        add     R4
-TextureBuildCoordinateSReady:
-        with    R6
-        add     R8
-        with    R2
-        add     R13
-        bmi     TextureBuildCoordinateTReady
-        inc     R10
-        with    R2
-        sub     R3
-        with    R6
-        add     R11
-TextureBuildCoordinateTReady:
+        adc     R7
         movew   (R10), R5
         inc     R10
         inc     R10
+        with    R2
+        add     R3
+        with    R6
+        adc     R8
         movew   (R10), R6
-        dec     R12
-        bne     TextureBuildCoordinateLoop
-        with    R5
         inc     R10
         inc     R10
+        loop
+        with    R1
 TextureBuildCoordinateDone:
-        iwt     R0, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
-        sm      (TEXTURE_COORD_PTR), R0
-        lm      R11, (TEXTURE_COORD_RETURN)
-        ret
-        nop
-        nop
+.include "quake/TextureCoordinateReturn.sgs"
 
-; Shared reciprocal and bilinear callbacks remain resident in the lightmap
-; cache window; the mixed sampler uses the retained cold auxiliary segment.
+; Preloaded lightmap cells use the same resident window as the pixel loop.
+LightmapSampleBlockBilinearCached:
+        with    R3
+        and     R1
+        to      R5
+        from    R9
+        and     R1
+        lm      R8, (LIGHTMAP_BLOCK_UL)
+        lm      R9, (LIGHTMAP_BLOCK_UR)
+        lm      R6, (LIGHTMAP_BLOCK_LL)
+        lm      R11, (LIGHTMAP_BLOCK_LR)
+        GSU_ABSOLUTE_GOTO LightmapSampleLowerReady
+        .res 46 - (* - TextureBuildCoordinateLoop), $01
+; The following slot shares the lightmap sampling window.
 TextureCoordinateSetupSlotStart:
+        .assert TextureCoordinateSetupSlotStart - TextureBuildCoordinateLoop = 46, error, "Coordinate loop moved following cache entries"
+.if .defined(QUAKE_CACHED_LIGHTMAP_BLOCK8) && (BSP_RENDER_SCALE = 2)
+.include "quake/MsuLightmapBlock8Cache.sgs"
+.else
 TextureDivideQ12Lookup:
 TextureDivideQ12HotMirrorStart:
         iwt     R4, #GSU_DIVIDE_Q12_HOT_MIRROR_SAFE_ENTRIES+1
@@ -160,81 +185,118 @@ TextureDivideQ12HotMirrorStart:
 TextureDivideQ12HotMirrorMissCached:
         bra     TextureDivideQ12HotMirrorMissCold
         nop
-LightmapSampleBlockBilinearCached:
-        with    R3
-        and     R1
-        to      R5
-        from    R9
-        and     R1
-        lm      R8, (LIGHTMAP_BLOCK_UL)
-        lm      R9, (LIGHTMAP_BLOCK_UR)
-        lm      R6, (LIGHTMAP_BLOCK_LL)
-        lm      R11, (LIGHTMAP_BLOCK_LR)
-        GSU_ABSOLUTE_GOTO LightmapSampleLowerReady
+; The sequential endpoint reader shares the non-MSU sampling window.
+TexturePerspectiveSampleSpanBuffered:
+        lm      R10, (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET)
+        moves   R10, R10
+        beq     TexturePerspectiveSampleSpanBufferedFallbackCached
+        movew   R5, (R10)
+        inc     R10
+        inc     R10
+        movew   R6, (R10)
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R10
+        ret
+        nop
+TexturePerspectiveSampleSpanBufferedFallbackCached:
+        GSU_ABSOLUTE_GOTO TexturePerspectiveSampleSpan
+.endif
 TextureDivideQ12HotMirrorMissCold:
         move    R1, R2
         dec     R1
         GSU_ABSOLUTE_GOTO TextureDivideQ12HotMirrorMiss
 
+; Keep signed mask interpolation in the divider's unused cache space.
+FlyBrushMaskDepthFinishCached:
+        BSP_SIGNED_MUL_SHIFT_TRUNC12 R0, R7, R3
+        with    R5
+        add     R0
+        lm      R11, (FLY_MASK_DEPTH_RETURN)
+        ret
+        nop
+FlyBrushMaskDepthFinishCachedEnd:
+.assert * - FlyBrushMaskDepthFinishCached = $2D, error, "Cached mask finish changed footprint"
+
   .repeat $73 - (* - TextureCoordinateSetupSlotStart)
         nop
   .endrepeat
+; Keep the old lightmap entry, and cache the exact mask perspective factor
+; beside its shared reciprocal lookup/multiply during visibility tests.
 LightmapPrepareCachedContinue:
-        move    R0, R7
-        sub     R1
-        bmi     LightmapPrepareEndTInterior
+        GSU_ABSOLUTE_GOTO LightmapPrepareCachedContinueCold
+FlyMaskPerspectiveFactorQ12:
+        lm      R5, (TEXTURE_BASE_DEPTH)
+; Ordinary spans retain their selected lookup/loaded pair. The edge overlays
+; enter Products with a cache-local lookup in R13; arithmetic preserves R10/R13.
+FlyMaskPerspectiveFactorQ12BaseLoaded:
+        lm      R10, (TEXTURE_Q12_LOADED_ROUTINE)
+        lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
+FlyMaskPerspectiveFactorQ12Products:
+        ; Three doubles scale Q12 to Q15 without wrapping for factors below
+        ; unity. The only negative result is exactly 4096, handled directly.
+        ; R0 is dead before either multiply/unity continuation. The final
+        ; ADD has the original 4*factor operands, including all16-bit flags.
+        from    R3
+        add     R3
+        add     R0
+        to      R6
+        add     R0
+        bpl     FlyMaskPerspectiveFactorScaledProducts
         nop
-        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
-LightmapPrepareEndTInterior:
-        to      R9
-        from    R7
-        sub     R13
-        iwt     R0, #$8000              ; Proven interior block.
-        sm      (LIGHTMAP_BLOCK_FAST), R0
-        moves   R8, R8
-        beq     LightmapPrepareSameS
-        nop
-        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
-LightmapPrepareSameS:
-        moves   R9, R9
-        beq     LightmapPrepareSameT
-        nop
-        GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
-LightmapPrepareSameT:
-
-        lm      R1, (LIGHTMAP_WIDTH)
-        move    R0, R13
-        umult   R1
-        add     R12
-        move    R6, R0
-        lm      R10, (LIGHTMAP_ROM_ADDRESS)
-        with    R10
-        add     R6
-        move    R0, #0
-        moveb   R0, (R10)
-        sm      (LIGHTMAP_BLOCK_UL), R0
-        inc     R10
-        move    R0, #0
-        moveb   R0, (R10)
-        sm      (LIGHTMAP_BLOCK_UR), R0
-        dec     R10
-        with    R10
-        add     R1
-        move    R0, #0
-        moveb   R0, (R10)
-        sm      (LIGHTMAP_BLOCK_LL), R0
-        inc     R10
-        move    R0, #0
-        moveb   R0, (R10)
-        sm      (LIGHTMAP_BLOCK_LR), R0
-        GSU_ABSOLUTE_GOTO LightmapClassifyCachedCell
-        ; The lightmapped edge depth hoist consumes 32 bytes of this cold gap
-        ; while keeping RenderConvexFace and every later cache kernel pinned.
-  .repeat 0
+        GSU_ABSOLUTE_GOTO FlyMaskPerspectiveFactorUnityProductsCold
+        ; Both paths already exited; retain every following public entry.
+  .repeat 3
         nop
   .endrepeat
+FlyMaskPerspectiveFactorScaledProducts:
+        ; Base depth is nonnegative; its floor product needs no signed
+        ; truncation correction. Delta depth retains exact toward-zero rules.
+        BSP_SIGNED_MUL_SCALED8_SHIFT12 R5
+        move    R12, R0
+        lm      R7, (TEXTURE_DELTA_DEPTH)
+        BSP_SIGNED_MUL_SCALED8_SHIFT_TRUNC12 R7
+        move    R1, R0
+        bra     FlyMaskPerspectiveFactorProductsReady
+        nop
+  .repeat 4
+        nop
+  .endrepeat
+FlyMaskPerspectiveFactorProductsReady:
+        to      R2
+        from    R5
+        add     R7
+        with    R2
+        sub     R1
+
+        from    R12
+        cmp     R2
+        bne     FlyMaskPerspectiveFactorDivide
+        nop
+        iwt     R3, #4096
+        ret
+        nop
+        nop                             ; Preserve the divide entry address.
+FlyMaskPerspectiveFactorDivide:
+        ; Dispatch the exact quotient using the caller's resident cache.
+        move    R8, R12
+        move    R9, R2
+        ; R13 retains the caller-selected lookup; R10 is its loaded continuation.
+        jmp     R13
+        nop
+
+.assert * - FlyMaskPerspectiveFactorQ12 = $4F, error, "Mask factor clone footprint changed"
+.res $59 - (* - LightmapPrepareCachedContinue), $01
 LightmapPrepareBlockDone:
         GSU_ABSOLUTE_GOTO TextureLightmapSelectBlockRoutine
+
+FlyMaskPerspectiveFactorUnityProductsCold:
+        move    R12, R5
+        lm      R7, (TEXTURE_DELTA_DEPTH)
+        move    R1, R7
+        GSU_ABSOLUTE_GOTO FlyMaskPerspectiveFactorProductsReady
+
+.assert * - FlyMaskPerspectiveFactorUnityProductsCold = 11, error, "Mask unity clone changed"
 
         ; Absorb cold setup/selector size changes while every qualified
         ; cache-kernel address remains stable.
@@ -246,7 +308,7 @@ LightmapPrepareBlockDone:
 ; Clip one complete convex BSP face against a wide four-plane view pyramid,
 ; project it at Q7 subpixel precision, then emit one exact pixel-center span
 ; per covered row. The wide planes bound division without acting as a semantic
-; near plane. Normal guards bound |axis|/depth by one; wide WARP uses two.
+; near plane. Viewport guards bound |axis|/depth by one.
   .repeat $2920 - (* - GSU_SelectVisibility)
         nop
   .endrepeat
@@ -341,13 +403,6 @@ ConvexDistanceUseRight:
 ConvexDistanceAxisReady:
         with    R5
         asr
-.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
-        ; WARP installs a second ASR: depth/2 +/- axis/4 bounds |axis|/depth
-        ; by two without overflowing signed16. Ordinary X3 restores the NOPs.
-ConvexClipAxisScale:
-        nop
-        nop
-.endif
         lm      R0, (CONVEX_PLANE)
         moves   R0, R0
         beq     ConvexDistanceAdd
@@ -576,37 +631,142 @@ ConvexInterpolateComponents:
         lm      R5, (CONVEX_BASE_RIGHT)
         lm      R7, (CONVEX_DELTA_RIGHT)
         lm      R8, (CONVEX_FACTOR)
-        BSP_SIGNED_MUL_SHIFT_TRUNC12 R2, R7, R8
+        BSP_CLIP_MUL_VIEW12 R2, R7, R8
         with    R5
         add     R2
         sm      (CONVEX_INTER_RIGHT), R5
         lm      R5, (CONVEX_BASE_UP)
         lm      R7, (CONVEX_DELTA_UP)
         lm      R8, (CONVEX_FACTOR)
-        BSP_SIGNED_MUL_SHIFT_TRUNC12 R2, R7, R8
+        BSP_CLIP_MUL_VIEW12 R2, R7, R8
         with    R5
         add     R2
         sm      (CONVEX_INTER_UP), R5
         lm      R5, (CONVEX_BASE_DEPTH)
         lm      R7, (CONVEX_DELTA_DEPTH)
         lm      R8, (CONVEX_FACTOR)
-        BSP_SIGNED_MUL_SHIFT_TRUNC12 R2, R7, R8
+        BSP_CLIP_MUL_VIEW12 R2, R7, R8
         with    R5
         add     R2
         sm      (CONVEX_INTER_DEPTH), R5
         lm      R11, (CONVEX_INTERPOLATE_RETURN)
         ret
         nop
-        ; Keep the next pinned cache kernel stable after specializing the three
-        ; Q12 multiplications above. This padding is unreachable after RET.
-        .repeat 0
+        ; X2's cold reciprocal lookup reuses the unreachable post-RET slot.
+  .if BSP_RENDER_SCALE = 2
+        .include "quake/PacketProjectionReciprocalROM.sgs"
+  .endif
+; Depth-only brush views supply packed XY in R4 and Z/residuals in R7.
+; Decode in this retired padding, then reuse the packet decoder without
+; changing its hot entry. CACHE anchors at $ECE0 and includes the shared RET.
+ClipTransformPackedQ2Registers:
+        cache
+        move    R1, R4
+        with    R1
+        sex
+        move    R2, R4
+        with    R2
+        hib
+        with    R2
+        sex
+        move    R3, R7
+        with    R3
+        sex
+        with    R7
+        hib
+        bra     ClipTransformPackedQ2Coordinates
         nop
-        .endrepeat
+        ; Preserve the retired slot after the branch delay; never executed.
+        nop
+        nop
+        nop
+.assert * - ClipTransformPackedQ2Registers = 23, error, "Packed Q2 adapter changed its bounded footprint"
+; The packed transform's existing $ECE0 cache also owns these two retired
+; padding slots. Store raw right/up before halving, then finish in its tail.
+FlyBrushDepthClassifyStore:
+        lm      R1, (CLIP_RIGHT)
+        movew   (R9), R1
+        inc     R9
+        inc     R9
+        lm      R2, (CLIP_UP)
+        movew   (R9), R2
+        inc     R9
+        inc     R9
+        GSU_ABSOLUTE_GOTO FlyBrushDepthClassifyStorePlanes
+.assert * - FlyBrushDepthClassifyStore <= 20, error, "Fly depth store exceeds the packed adapter padding"
         .res $0176 - (* - ConvexInterpolateEdge)
 GSU_CACHE_KERNEL_END ConvexInterpolateEdge
 
 .include "quake/VertexTransform.sgs"
 
+; Store exact R12 depth in the ten-byte XYZ/zero-S/T record.
+; ROL collects the signs of the bounded half-coordinate sums in bits 3..0.
+FlyBrushDepthClassifyStorePlanes:
+        movew   (R9), R12
+        inc     R9
+        inc     R9
+        move    R0, #0
+        stw     (R9)
+        inc     R9
+        inc     R9
+        stw     (R9)
+        inc     R9
+        to      R4
+        from    R12
+        asr
+        with    R1
+        asr
+        with    R2
+        asr
+        to      R6
+        from    R4
+        add     R2
+        with    R6
+        rol
+        with    R0
+        rol
+        to      R6
+        from    R4
+        sub     R2
+        with    R6
+        rol
+        with    R0
+        rol
+        to      R6
+        from    R4
+        sub     R1
+        with    R6
+        rol
+        with    R0
+        rol
+        to      R6
+        from    R4
+        add     R1
+        with    R6
+        rol
+        to      R2
+        from    R0
+        rol
+        ; Keep the OR outcode in R8's low byte and the AND outcode in its high byte.
+        with    R8
+        or      R2
+        to      R6
+        from    R2
+        swap
+        with    R6
+        or      #15
+        with    R8
+        and     R6
+        jmp     R11                     ; Increment in the hardware delay slot.
+        inc     R9
+FlyBrushDepthClassifyStoreEnd:
+        .res 65 - (* - FlyBrushDepthClassifyStorePlanes), $01
+.assert FlyBrushDepthClassifyStoreEnd - FlyBrushDepthClassifyStorePlanes <= 65, error, "Fly depth classify/store exceeds the transform padding"
+.assert ^FlyBrushDepthClassifyStore = ^FlyBrushDepthClassifyStoreEnd, lderror, "Fly depth classify/store crosses its code bank"
+.assert .loword(FlyBrushDepthClassifyStoreEnd) <= ((.loword(ClipTransformPackedQ2Registers + 1) & $FFF0) + $0200), lderror, "Fly depth classify/store escapes the packed transform cache"
+  .if BSP_RENDER_SCALE = 2
+.include "quake/PacketDepthRight.sgs"
+  .endif
   .repeat $2EA0 - (* - GSU_SelectVisibility)
         nop
   .endrepeat
@@ -757,8 +917,8 @@ ConvexProjectReturn:
 GSU_CACHE_KERNEL_END ConvexProjectPolygon
 
 ; R1=signed Q6 component, R2=positive Q6 depth. Return signed Q7 screen
-; delta in R0 and its signed quotient in R3. The ordinary entry preserves the
-; historic +/-depth saturation used by convex faces. Coherent alias endpoints
+; delta in R0 and the legacy signed Q11 quotient in R3. X2 retains Q12 for R0.
+; The ordinary entry preserves +/-depth saturation. Coherent alias endpoints
 ; set R4 nonzero and enter after that mode initializer; their rectangle-level
 ; same-side classification makes the unsaturated quotient safe and necessary.
 ConvexProjectComponent:
@@ -780,40 +940,40 @@ ConvexProjectMagnitudeReady:
         ; ordinary component clamp.
         moves   R4, R4
         bne     ConvexProjectDivide
-.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
-        with    R1                     ; First byte of MOVE in the delay slot.
-        to      R0
-        ; WARP halves the magnitude only for this comparison, then clamps to
-        ; +/-2*depth. Keep the original numerator and the zero-depth guard.
-ConvexProjectClampScale:
-        nop
-.else
         nop
         move    R0, R1
-.endif
         cmp     R2
         bcc     ConvexProjectDivide
         nop
-.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
-ConvexProjectClampLimit:
-.endif
+.if BSP_RENDER_SCALE = 2
+        iwt     R3, #4096
+.else
         iwt     R3, #2048
+.endif
         bra     ConvexProjectSignedQuotient
         nop
 ConvexProjectDivide:
         move    R0, R1
-        ; The shared corrected reciprocal returns floor(component*4096/depth).
-        ; Halving that exact Q12 quotient is identical to the former eleven-bit
-        ; restoring division's floor(component*2048/depth).
+        ; Keep the exact Q12 quotient for X2's 3*q screen delta before halving
+        ; it for the legacy R3 alias ABI. X3 retains its original Q11 scaling.
         move    R7, R11
         move    R5, R10
         jal     TextureDivideQ12Prepared
         nop
         move    R10, R5
         move    R11, R7
+.if BSP_RENDER_SCALE <> 2
         with    R3
         lsr
+.endif
 ConvexProjectSignedQuotient:
+.if BSP_RENDER_SCALE = 2
+        move    R0, R3
+        add     R0
+        add     R3
+        with    R3
+        lsr
+.endif
         lm      R1, (CONVEX_CUR_INSIDE)
         moves   R1, R1
         beq     ConvexProjectScale
@@ -822,7 +982,12 @@ ConvexProjectSignedQuotient:
         with    R1
         sub     R3
         move    R3, R1
+.if BSP_RENDER_SCALE = 2
+        not
+        inc     R0
+.endif
 ConvexProjectScale:
+.if BSP_RENDER_SCALE <> 2
         move    R0, R3
         add     R0                       ; 2q
         to      R1
@@ -830,9 +995,6 @@ ConvexProjectScale:
         add     R3
         with    R1
         add     R1                       ; 4q
-.if BSP_RENDER_SCALE = 2
-        add     R1                       ; 6q
-.else
         move    R0, R1                  ; 4q: focal length 64.
 .endif
 ConvexProjectComponentDone:
@@ -1370,6 +1532,7 @@ TextureDivideQ12:
         lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
         jmp     R13
         nop
+        .include "BakedFaceClipLeading.sgs"
   .repeat $32 - (* - TexturePrepareDivideQ12)
         nop
   .endrepeat
@@ -1381,11 +1544,7 @@ TextureDivideQ12SelectBank:
         cmp     R4
         bcc     TextureDivideQ12BankReady
         nop
-        with    R1
-        sub     R4
-        inc     R0
-        bra     TextureDivideQ12SelectBank
-        nop
+        QuakeNextQ12Bank TextureDivideQ12SelectBank, TextureDivideQ12PackedTail
 TextureDivideQ12BankReady:
         romb
         to      R2
@@ -1420,8 +1579,15 @@ SkyMarkerSampler:
         ; LJMP's bank operand is restricted to R8-R13. All admitted sampler
         ; callers either document R12 as volatile or replace it immediately;
         ; mode 4 is rejected before publishing this route.
+        ; Compositor run scratch is dead while opaque faces publish markers.
+        ; Normal calls always clear the private span continuation, including
+        ; cache hits, without changing any formerly preserved register.
         iwt     R4, #.loword(SkyMarkerSamplerROM)
-        move    R12, #$02
+        move    R12, #BSP_GSU_ROM2_BANK
+        ; IWT/IBT reset both prefixes. SUB R0 is the one-byte self-zero;
+        ; together with the four-byte high-RAM store it fills five old NOPs.
+        sub     R0
+        sm      (SKY_RUN_RETURN), R0
         from    R4
         ljmp    R12
         nop
@@ -1430,33 +1596,8 @@ SkyMarkerSampler:
   .endrepeat
 .assert * - SkyMarkerSampler = 14, error, "Sky marker thunk changed the retired reserve footprint"
 
-.macro TEXTURE_DIVIDE_UNSIGNED_STEP
-        .local Next
-        with    R0
-        add     R0
-        from    R3
-        to      R3
-        rol
-        with    R2
-        add     R2
-        to      R4
-        from    R3
-        sub     R1
-        bcc     Next
-        nop
-        move    R3, R4
-        inc     R2
-Next:
-.endmacro
-
 TextureDivideUnsigned:
-        move    R2, #0
-        move    R3, #0
-  .repeat 16
-        TEXTURE_DIVIDE_UNSIGNED_STEP
-  .endrepeat
-        ret
-        nop
+.include "quake/TextureFullDivideDispatch.sgs"
 
 ; Technique 4's projective blocks are at most eight pixels wide. Handle the
 ; power-of-two widths directly and use exact reciprocals for 3/5/6/7. A balanced
@@ -1502,22 +1643,28 @@ TextureDivideBlock8:
         to      R3
         and     #7
   .repeat 3
-        with    R0
         lsr
   .endrepeat
         move    R2, R0
         ret
         nop
+        ; Unreachable padding retains every following divider/cache entry.
+  .repeat 3
+        nop
+  .endrepeat
 TextureDivideBlock4:
         to      R3
         and     #3
   .repeat 2
-        with    R0
         lsr
   .endrepeat
         move    R2, R0
         ret
         nop
+        ; Unreachable padding retains every following divider/cache entry.
+  .repeat 2
+        nop
+  .endrepeat
 TextureDivideBlock2:
         to      R3
         and     #1
@@ -1581,11 +1728,17 @@ TextureDivideBlockReciprocalReady:
 
 ; Lightmap preparation runs once per block. Keep its bounds-proof prefix in the
 ; builder's former cold slot and rejoin the unchanged suffix above.
+; Production generation publishes the conservative emitted world UV/grid proof.
+; Unqualified assets retain the complete original per-block proof below.
+.ifndef BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN = 0
+.endif
 LightmapPrepareBlock:
         move    R0, #0
         sm      (LIGHTMAP_BLOCK_FAST), R0
         lm      R0, (LIGHTMAP_ROM_BANK)
         moves   R0, R0
+LightmapPrepareBlockBankReady:
         bpl     :+
         nop
         GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
@@ -1596,21 +1749,21 @@ LightmapPrepareBlock:
         lm      R1, (LIGHTMAP_MIN_BLOCK_S)
         sub     R1
         move    R12, R0
+        ; R1 still holds this face's minimum from the first endpoint.
         lm      R0, (TEXTURE_BLOCK_END_S)
         hib
         sex
-        lm      R1, (LIGHTMAP_MIN_BLOCK_S)
         sub     R1
         move    R6, R0
         lm      R1, (LIGHTMAP_WIDTH)
         dec     R1
-        move    R0, R12
+        from    R12
         cmp     R1
         bcc     LightmapPrepareStartSInterior
         nop
         GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
 LightmapPrepareStartSInterior:
-        move    R0, R6
+        from    R6
         cmp     R1
         bcc     LightmapPrepareEndSInterior
         nop
@@ -1625,30 +1778,60 @@ LightmapPrepareEndSInterior:
         lm      R1, (LIGHTMAP_MIN_BLOCK_T)
         sub     R1
         move    R13, R0
+        ; R1 still holds this face's minimum from the first endpoint.
         lm      R0, (TEXTURE_BLOCK_END_T)
         hib
         sex
-        lm      R1, (LIGHTMAP_MIN_BLOCK_T)
         sub     R1
         move    R7, R0
         lm      R1, (LIGHTMAP_HEIGHT)
         dec     R1
-        move    R0, R13
+        from    R13
         cmp     R1
         bcc     LightmapPrepareStartTInterior
         nop
         GSU_ABSOLUTE_GOTO LightmapPrepareBlockDone
 LightmapPrepareStartTInterior:
-        GSU_ABSOLUTE_GOTO LightmapPrepareCachedContinue
+        GSU_ABSOLUTE_GOTO LightmapPrepareCachedContinueCold
 
-; Technique 2 streams Q4 S/T in R5/R6. Translate the face-selected sampler
-; once, then tail-call the unchanged convex renderer with its original return.
+.assert * - LightmapPrepareBlock <= $6D, error, "Lightmap proof prefix exceeds its pinned slot"
+        .res $6D - (* - LightmapPrepareBlock), $01
 TextureRenderConvexFaceAlbedo:
 TextureRenderConvexFaceAlbedoGeneric:
 TextureRenderConvexFaceAlbedoSamplerReady:
+.ifdef PLAYABLE_MAP_ID
+        iwt     R13, #BakedRenderWorldFace
+.else
         iwt     R13, #TextureRenderConvexFace
+.endif
         jmp     R13
         nop
+
+  .if BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+; Only a fully checked endpoint batch can bypass the original per-block proof.
+LightmapPrepareWorldClosedGrid:
+        lm      R0, (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET)
+        moves   R0, R0
+        beq     LightmapPrepareWorldClosedGridFallback
+        nop
+        ; Replay initializes FAST once per qualified row. No sampler mutates it.
+LightmapPrepareWorldClosedGridReady:
+        ; Published endpoints qualify the face's interior route, including T7.
+        ; Buffered endpoints preserve ROMB; the header selected this face's bank.
+        lm      R13, (TEXTURE_ERR_T)
+        iwt     R7, #TextureLightmapSampleReady
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+.if .defined(PLAYABLE_SAME_T_LIGHTMAP_BLOCK) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO TextureLightmapSameTSelect
+.else
+        jmp     R13
+        nop
+.endif
+LightmapPrepareWorldClosedGridFallback:
+        GSU_ABSOLUTE_GOTO LightmapPrepareBlock
+  .endif
 
 ; Resolve the overwhelmingly common sampler once per face. The fallback
 ; retains non-power-of-two, 256-wide, and cross-bank cases.
@@ -1672,6 +1855,17 @@ TextureSelectSampleRoutine:
         bne     TextureSelectSampleRoutineWidthMismatch
         nop
         lm      R0, (TEXTURE_WIDTH)
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        ; Single-bank POT materials use one of the four pinned row shifts.
+        ibt     R1, #16
+        cmp     R1
+        bcc     TextureSelectSampleRoutineWidthMismatch
+        nop
+        iwt     R1, #129
+        cmp     R1
+        bcs     TextureSelectSampleRoutineWidthMismatch
+        nop
+.else
         lm      R1, (TEXTURE_HEIGHT)
         cmp     R1
         bne     TextureSelectSampleRoutineWidthMismatch
@@ -1680,6 +1874,7 @@ TextureSelectSampleRoutine:
         cmp     R2
         beq     TextureSelectSampleRoutineDone
         nop
+.endif
         iwt     R10, #TextureSelectPowerOfTwoStateReady
         GSU_ABSOLUTE_GOTO TexturePreparePowerOfTwoSamplerState
   .repeat $368A - (* - GSU_SelectVisibility)
@@ -1706,7 +1901,11 @@ TextureSelectSampleRoutineDone:
 ; Widths 16/32/64/128 select zero through three doubles. R10 is the caller's
 ; continuation so both direct and arbitrated material selectors can share it.
 TexturePreparePowerOfTwoSamplerState:
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_HEIGHT_Q4)
+.else
         lm      R1, (TEXTURE_WIDTH_Q4)
+.endif
         with    R1
         sub     #15
         dec     R1
@@ -1735,7 +1934,7 @@ TextureSelectSampleRowRoutineReady:
 ; Generated special flags and the unequal-axis sky route through one cold ROM
 ; selector. Ordinary square textures retain the bank-$70 fast path above.
 TextureSelectSampleRoutineWidthMismatch:
-        move    R9, #$02
+        move    R9, #BSP_GSU_ROM2_BANK
         iwt     R8, #.loword(SkySelectSampleRoutineROM)
         from    R8
         ljmp    R9
@@ -1744,7 +1943,7 @@ TextureSelectSampleRoutineWidthMismatch:
 ; Both possible outer owners use one stable thunk.  The ROM handler tests the
 ; command-cleared/mixed-published brush return to select the exact saved path.
 SkyOwnerReturn:
-        move    R9, #$02
+        move    R9, #BSP_GSU_ROM2_BANK
         iwt     R8, #.loword(SkyOwnerReturnROM)
         from    R8
         ljmp    R9

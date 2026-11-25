@@ -11,6 +11,10 @@ EnsureFlyBrushPVSCode:
         cmp     #$0002
         beq     @Ready
         jsr     EnsureTechnique4RendererCode
+.if BSP_RENDER_SCALE = 2
+        lda     #.loword(WorldLightmapRasterTarget)
+        sta     f:WorldLightmapRasterCall+2
+.endif
         lda     #.loword(FlyBrushBuildGeometryLinks)
         ldx     #.loword(FlyBrushMarkVisiblePainter)
         jsr     SetBrushPVSCode

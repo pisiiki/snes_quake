@@ -19,23 +19,11 @@ PACKET_SOURCE_FACES = GSU_SOURCE_FACE_IDS_OFFSET ; Painter-ordered world face ID
 PAINTER_NODE_BITS  = GSU_PAINTER_NODE_MASK_OFFSET
 PROJECTION_CACHE   = GSU_PROJECTION_CACHE_OFFSET
 
-WORLD_VERTICES_ROM_BANK = $04
-WORLD_INDICES0_ROM_BANK = $05
-WORLD_INDICES1_ROM_BANK = $06
-WORLD_FACES_ROM_BANK = $07
-WORLD_FACE_PLANES_ROM_BANK = $08
-WORLD_NODES_ROM_BANK = $09
-WORLD_PLANES_ROM_BANK = $0A
-WORLD_FACE_OWNERS_ROM_BANK = $14
-WORLD_NODE_PARENTS_ROM_BANK = $15
 .assert BSP_WORLD_FACE_FLAG_NON_DRAWABLE = 1, error, "Packet flag classifier requires non-drawable bit 1"
 .assert BSP_WORLD_FACE_FLAG_PLANE_CULL_GUARD = 2, error, "Packet flag classifier requires plane-cull guard bit 2"
-WORLD_SHADING_ROM_BANK = $16
-WORLD_TEXCOORD_FIRST_ROM_BANK = $17
-WORLD_TEXTURE_AUX_ROM_BANK = $19
 
-PACKET_VERTEX_CAPACITY = 768
-PACKET_INDEX_CAPACITY  = 2048
+PACKET_VERTEX_CAPACITY = GSU_VALID_CAPACITY
+PACKET_INDEX_CAPACITY  = GSU_INDICES_CAPACITY / 2
 PACKET_FACE_CAPACITY   = GSU_PACKET_FACE_CAPACITY
 PACKET_GUARD_VALUE     = $A55A
 PACKET_REMAP_GUARD     = GSU_VERTEX_REMAP_GUARD_OFFSET
@@ -167,9 +155,15 @@ CLIP_Q6            = STATE + $BC
 ; Packet selection finishes before near-plane clipping starts, so cache the
 ; camera in the world vertices' Q2 domain in the otherwise-idle clip return
 ; words.  This avoids rebuilding camera*4 for every plane and projected vertex.
+.if BSP_QUAKEC_GAMEPLAY
+PACKET_CAMERA_Q2_X = GSU_PLAYABLE_CAMERA_Q2_X
+PACKET_CAMERA_Q2_Y = GSU_PLAYABLE_CAMERA_Q2_Y
+PACKET_CAMERA_Q2_Z = GSU_PLAYABLE_CAMERA_Q2_Z
+.else
 PACKET_CAMERA_Q2_X = CLIP_RETURN
 PACKET_CAMERA_Q2_Y = CLIP_TRANSFORM_RETURN
 PACKET_CAMERA_Q2_Z = CLIP_EDGE_RETURN
+.endif
 
 ; Packet construction uses low scalar state for short accesses while retaining
 ; its large painter stack in raster scratch. Keep the individual kernels small
@@ -235,6 +229,11 @@ PACKET_PROJECTION_COUNT = PACKET_STATE + $78
 PACKET_PROJ_STATE = PACKET_STATE + $7A
 PACKET_CACHE_ENTRY = PACKET_STATE + $7C
 PACKET_LOCAL_VERTEX = PACKET_STATE + $7E
+; The 16-bit cache-address ADD wraps to the current uncommitted X/Y pair.
+PACKET_TRANSIENT_PROJECTION = (PACKET_PROJ_X + $10000 - PROJECTION_CACHE) / GSU_PROJECTION_CACHE_RECORD_BYTES
+.assert ((PROJECTION_CACHE + PACKET_TRANSIENT_PROJECTION * GSU_PROJECTION_CACHE_RECORD_BYTES) & $FFFF) = PACKET_PROJ_X, error, "Transient projection must wrap to X"
+.assert PACKET_PROJ_Y = PACKET_PROJ_X + 2 && GSU_PROJECTION_CACHE_RECORD_BYTES = 4, error, "Transient projection must be an X/Y record"
+.assert PACKET_TRANSIENT_PROJECTION >= GSU_PROJECTION_CACHE_ENTRIES && PACKET_TRANSIENT_PROJECTION < PACKET_REMAP_SLOT_MASK, error, "Transient projection overlaps a persistent slot or the unseen tag"
 
 ; After selection, the convex rasterizer reuses the idle packet-builder stack.
 ; Two bounded
@@ -310,6 +309,9 @@ CONVEX_DIV_NUM = CONVEX_STATE + $68
 CONVEX_DIV_DEN = CONVEX_STATE + $6A
 CONVEX_SCREEN_END_PTR = CONVEX_STATE + $6C
 CONVEX_PROJECT_RETURN = CONVEX_STATE + $6E
+; Projection has returned before shaded row walking begins. Reuse its link
+; word for the current fixed world or metadata-owned brush arena start.
+TEXTURE_EDGE_WALK_SCREEN_START = CONVEX_PROJECT_RETURN
 CONVEX_CLIP_RETURN = CONVEX_STATE + $70
 CONVEX_INTERPOLATE_RETURN = CONVEX_STATE + $72
 CONVEX_RASTER_RETURN = CONVEX_STATE + $74
@@ -399,6 +401,10 @@ TEXTURE_WRAP_MASK_T = TEXTURE_STATE + $86
 ; A turbulent face uses its fixed 64x64 sampler instead of either ordinary
 ; wrap mask, so the selector can reuse this word for its mode-specific exit.
 TEXTURE_TURBULENCE_EXIT = TEXTURE_WRAP_MASK_S
+; Sky bypasses ordinary texture wrapping. Cache its face identity separately
+; from the mapped PLOT row/high byte and exact palette marker/low byte.
+TEXTURE_SKY_MARKER_ROW = TEXTURE_WRAP_MASK_S
+TEXTURE_SKY_MARKER_FACE = TEXTURE_WRAP_MASK_T
 TEXTURE_SAMPLE_ROUTINE = TEXTURE_STATE + $88
 LIGHTMAP_LOAD_RETURN = TEXTURE_STATE + $8A
 ; Once a loader has recovered its link, this word becomes the active face's
@@ -450,6 +456,7 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
 .assert CONVEX_REVERSE_PTR + 2 = GSU_CONVEX_STATE_OFFSET + GSU_CONVEX_STATE_BYTES, error, "BSP convex state size changed"
 .assert TEXTURE_SCREEN_END <= PACKET_PAINTER_STACK_END, error, "BSP texture buffers exceed the idle painter stack"
 .assert TEXTURE_SHADE_SCREEN_END <= PACKET_PAINTER_STACK_END, error, "BSP shaded-texture buffers exceed the idle painter stack"
+.assert GSU_TEXTURE_ENDPOINT_STAGE_OFFSET >= TEXTURE_SHADE_SCREEN_END, error, "Endpoint staging overlaps live tall-face projected vertices"
 .assert TEXTURE_LIGHTMAP_FAST_ROUTINE + 2 = GSU_TEXTURE_STATE_OFFSET + GSU_TEXTURE_STATE_BYTES, error, "BSP texture/lightmap state size changed"
 .assert BSP_WORLD_MAX_FACE_VERTICES + 4 <= CONVEX_VERTEX_CAPACITY, error, "BSP convex clip capacity is too small"
 .assert BSP_VIEW_FRACTION_BITS = 6, error, "BSP view transform must remain Q6"
@@ -506,7 +513,7 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
   .endrepeat
         move    dest, R4
 .endmacro
-
+.include "quake/PitchProductRounding.i"
 .macro BSP_CLIP_COPY_VIEW source_right, source_up, source_depth, dest_right, dest_up, dest_depth
         lm      R0, (source_right)
         sm      (dest_right), R0
@@ -585,6 +592,8 @@ TEXTURE_LIGHTMAP_FAST_ROUTINE = TEXTURE_STATE + $AC
         or      R6
         move    dest, R0
 .endmacro
+
+.include "quake/ClipProductRounding.i"
 
 .macro CONVEX_LOAD_VIEW pointer, right_addr, up_addr, depth_addr
         movew   R0, (pointer)
@@ -715,6 +724,8 @@ Done:
         inc     R14                     ; gsu-lint: allow-r14-rom-buffer
 .endmacro
 
+.include "quake/WorldFaceOwners.sgs"
+
 .include "quake/LightmapUnpack.sgs"
 
 .macro BSP_ABS_CAMERA_DISTANCE reg, camera_address
@@ -732,6 +743,8 @@ Done:
 Nonnegative:
 .endmacro
 
+.include "quake/PacketIndexKernels.i"
+.include "quake/PacketCapacityRetry.i"
 .segment "GSUCODE"
 
 .export GSU_SelectVisibility, GSU_Code, GSU_CoverageCode, GSU_TextureCode
@@ -800,16 +813,24 @@ SelectorNodeRecord:
         add     R1                       ; 8n
         with    R1
         add     R2                       ; 10n
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_NODES_ROM_ADDRESS
         with    R4
         add     R1
-        move    R0, #$09
+        move    R0, #WORLD_NODES_ROM_BANK
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_WORD R4            ; plane index
         BSP_ROM_LOAD_WORD R5            ; front child
         BSP_ROM_LOAD_WORD R6            ; back child
 
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        move    R0, R4
+        jal     PlayableCameraNodePlaneSide
+        nop
+        move    R3, R0
+        move    R0, R6
+        moves   R3, R3
+.else
         ; Plane record address = $8000 + plane*5 in GSU ROM bank $0A.
         move    R1, R4
         with    R1
@@ -818,10 +839,10 @@ SelectorNodeRecord:
         add     R1                       ; 4p
         with    R1
         add     R4                       ; 5p
-        iwt     R2, #$8000
+        iwt     R2, #WORLD_PLANES_ROM_ADDRESS
         with    R2
         add     R1
-        move    R0, #$0A
+        move    R0, #WORLD_PLANES_ROM_BANK
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R2
         BSP_ROM_LOAD_SIGNED_BYTE R7     ; nx Q6
@@ -829,6 +850,13 @@ SelectorNodeRecord:
         BSP_ROM_LOAD_SIGNED_BYTE R9     ; nz Q6
         BSP_ROM_LOAD_WORD R10           ; map-centered Q6 distance
 
+.if BSP_QUAKEC_GAMEPLAY
+        jal     PlayableCameraPlaneSide
+        nop
+        move    R3, R0
+        move    R0, R6
+        moves   R3, R3
+.else
         lm      R0, (WORLD_CAMERA_X)
         move    R3, R0
         with    R3
@@ -845,19 +873,30 @@ SelectorNodeRecord:
         mult    R9
         with    R3
         add     R2
+        ; Default to back before SUB publishes the exact signed-word flags.
+        ; Only a strictly positive distance replaces it with the front child.
+        move    R0, R6
         with    R3
         sub     R10
+.endif
+.endif
+        ; Quake Mod_PointInLeaf takes the front child only for positive distance.
         bmi     SelectorUseBackChild
-        with    R5                      ; Branch delay: front is the default.
-        to      R0
-        bra     SelectorStoreChild
         nop
+        beq     SelectorUseBackChild
+        nop
+        move    R0, R5
 SelectorUseBackChild:
-        move    R0, R6
 SelectorStoreChild:
         sm      (WORLD_NODE), R0
         GSU_ABSOLUTE_GOTO SelectorTraverseNode
 
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+  .if .defined(PLAYABLE_FLAT_BRUSH_FRAGMENT_SELECTOR) && (BSP_RENDER_SCALE = 2) ; unreachable copy template
+        .include "FlatBrushFragmentPatch.sgs"
+  .endif
+        .res $6D - (* - SelectorNodeRecord), $01
+.endif
 SelectorLeafResolved:
         with    R0
         not                               ; child = -leaf-1, therefore leaf=~child
@@ -870,7 +909,14 @@ SelectorLeafResolved:
         GSU_ABSOLUTE_GOTO SelectorUnchanged
 SelectorLeafChanged:
         sm      (GSU_TELEMETRY_LEAF), R0
-
+.ifdef PLAYABLE_VISIBILITY_STREAM
+        .export VisibilityStreamResume
+        iwt     R0, #VISIBILITY_STREAM_REQUEST
+        sm      (GSU_TELEMETRY_MAGIC), R0
+        stop
+        nop
+VisibilityStreamResume:
+.else
         ; Directory record = 8 bytes; its base follows aligned PVS2.
         with    R0
         add     R0
@@ -890,13 +936,11 @@ SelectorLeafChanged:
         BSP_ROM_LOAD_BYTE R7            ; GSU ROM bank $10-$14
         sm      (GSU_TELEMETRY_ENCODED_BYTES), R5
         sm      (GSU_TELEMETRY_FACE_COUNT), R6
-
         move    R0, R7
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
         iwt     R10, #WORLD_VISIBILITY
         iwt     R12, #BSP_WORLD_FACE_BITSET_BYTES
-
 SelectorDecodeByte:
         BSP_ROM_LOAD_BYTE R0
         moves   R0, R0
@@ -946,6 +990,7 @@ SelectorApplyPVSGuard:
         dec     R12
         bne     SelectorApplyPVSGuard
         nop
+.endif ; PLAYABLE_VISIBILITY_STREAM
         lm      R0, (GSU_TELEMETRY_PVS_REVISION)
         inc     R0
         sm      (GSU_TELEMETRY_PVS_REVISION), R0
@@ -962,6 +1007,7 @@ GSU_CACHE_KERNEL_END GSU_SelectVisibility
 GSU_CACHE_KERNEL_BEGIN PacketBegin
         move    R0, #1
         ramb
+        BSP_PACKET_CAPACITY_BEGIN
         iwt     R10, #COMMAND+6
         movew   R0, (R10)
         sm      (GSU_TELEMETRY_PACKET_CAMERA_REVISION), R0
@@ -1029,8 +1075,7 @@ PacketClearPainterNodes:
         sm      (GSU_TELEMETRY_GUARD_STATUS), R0
         sm      (GSU_TELEMETRY_ERROR), R0
 
-        iwt     R0, #WORLD_VISIBILITY
-        sm      (PACKET_VIS_POINTER), R0
+        BSP_PACKET_CAPACITY_ORIGINAL_POINTER
         iwt     R0, #VERTICES
         sm      (PACKET_VERTEX_POINTER), R0
         iwt     R0, #INDICES
@@ -1051,36 +1096,50 @@ PacketClearPainterNodes:
         sm      (PACKET_PITCH_SIN), R0
         GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_COS_OFFSET, R5
         sm      (PACKET_PITCH_COS), R0
+        jal     ViewMatrixSelectorInit
+        nop
 
         iwt     R10, #COMMAND+8
         GSU_LOAD_BYTE R0
         with    R0
         sex
         sm      (PACKET_CAMERA_X), R0
+.if !BSP_QUAKEC_GAMEPLAY
         with    R0
         add     R0
         with    R0
         add     R0
         sm      (PACKET_CAMERA_Q2_X), R0
+.endif
         GSU_LOAD_BYTE R0
         with    R0
         sex
         sm      (PACKET_CAMERA_Y), R0
+.if !BSP_QUAKEC_GAMEPLAY
         with    R0
         add     R0
         with    R0
         add     R0
         sm      (PACKET_CAMERA_Q2_Y), R0
+.endif
         GSU_LOAD_BYTE R0
         with    R0
         sex
         sm      (PACKET_CAMERA_Z), R0
+.if !BSP_QUAKEC_GAMEPLAY
         with    R0
         add     R0
         with    R0
         add     R0
         sm      (PACKET_CAMERA_Q2_Z), R0
+.endif
+.ifdef PLAYABLE_AXIAL_FACE_FLAGS
+        GSU_ABSOLUTE_GOTO PacketPrepareFaceCameraProducts
+.elseif .defined(PLAYABLE_PACKET_VIEW_REUSE) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO PacketInvalidateViewCache
+.else
         GSU_ABSOLUTE_GOTO PacketScanLoadByte
+.endif
 GSU_CACHE_KERNEL_END PacketBegin
 
 ; Ascending bit/face scan and the first two cheap rejection stages.
@@ -1089,8 +1148,13 @@ GSU_CACHE_KERNEL_BEGIN PacketScanLoadByte
         iwt     R1, #BSP_WORLD_FACE_COUNT
         with    R0
         cmp     R1
+  .if BSP_RENDER_SCALE = 2
+        bcc     PacketScanHasFaces      ; An empty partial tail can pass the count.
+        nop
+  .else
         bne     PacketScanHasFaces
         nop
+  .endif
         GSU_ABSOLUTE_GOTO PacketScanDone
 PacketScanHasFaces:
         lm      R10, (PACKET_VIS_POINTER)
@@ -1111,15 +1175,34 @@ PacketScanBit:
         nop
         GSU_ABSOLUTE_GOTO PacketScanDone
 PacketScanTestVisible:
+        ; Short stores preserve carry and zero from the visibility shift.
+  .if BSP_RENDER_SCALE = 2
+        lm      R2, (PACKET_VIS_VALUE)
+        with    R2
+        lsr
+        sm      (PACKET_VIS_VALUE), R2   ; R0 still holds this face ID.
+  .else
         lm      R0, (PACKET_VIS_VALUE)
         with    R0
-        and     #1
-        bne     PacketScanVisible
+        lsr
+        sm      (PACKET_VIS_VALUE), R0
+  .endif
+        bcs     PacketScanVisible
         nop
+  .if BSP_RENDER_SCALE = 2
+        bne     PacketScanUnseenBit
+        nop
+        ; Current bit and all later bits are clear. The byte pointer is
+        ; already past this byte, even for the capacity-retry mask.
+        lm      R1, (PACKET_VIS_BITS)
+        add     R1
+        sm      (PACKET_FACE_ID), R0
+        bra     PacketScanLoadByte
+        nop
+PacketScanUnseenBit:
+  .endif
         GSU_ABSOLUTE_GOTO PacketScanNextBit
 PacketScanVisible:
-
-        ; Face record address = $8000 + face*6 in bank $07.
         lm      R0, (PACKET_FACE_ID)
         move    R1, R0
         with    R1
@@ -1129,7 +1212,7 @@ PacketScanVisible:
         add     R1                       ; 4f
         with    R1
         add     R2                       ; 6f
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_FACES_ROM_BANK
@@ -1137,31 +1220,65 @@ PacketScanVisible:
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_WORD R0
         sm      (PACKET_FACE_FIRST), R0
+  .if BSP_RENDER_SCALE = 2
+        to      R0
+        getb
+  .else
         BSP_ROM_LOAD_BYTE R0
+  .endif
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_DESCRIPTOR_CODE
+        ibt     R1, #$1F
+        and     R1
+  .endif
         sm      (PACKET_FACE_VERTICES), R0
         move    R1, R0
         with    R1
         sub     #3
+  .if BSP_RENDER_SCALE = 2
+        bmi     PacketScanNextBit
+        nop
+  .else
         bpl     PacketScanHasPolygon
         nop
         GSU_ABSOLUTE_GOTO PacketScanNextBit
+  .endif
 PacketScanHasPolygon:
+  .if BSP_RENDER_SCALE = 2
+        ; Read only the face flags and leave the ROM buffer on that byte.
+        with    R4
+        add     #5
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+  .else
         BSP_ROM_LOAD_BYTE R0
+    .ifdef PLAYABLE_WORLD_AFFINE_UV_DESCRIPTOR_CODE
+        and     #15
+    .endif
         sm      (PACKET_FACE_FLAT), R0
         BSP_ROM_LOAD_BYTE R0
         sm      (PACKET_FACE_DITHER), R0
         BSP_ROM_LOAD_BYTE R0
-        ; Generated flags are exactly 0=stable, 1=non-drawable, or 2=guarded.
-        ; Classify them without expanding this saturated cache kernel.
+  .endif
+        ; Keep the linked axial tag live across the plane lookup.
+.ifdef PLAYABLE_AXIAL_FACE_FLAGS
+        move    R6, R0
+        and     #3
+.elseif .defined(PLAYABLE_WORLD_AFFINE_UV)
+        and     #3
+.else
         moves   R0, R0
+.endif
         beq     PacketScanPlaneCull
         dec     R0                       ; 1 -> 0, 2 -> 1 (flags no longer live)
         beq     PacketScanNextBit
         nop
-        ; A Q2 polygon whose normal no longer matches the source winding can
-        ; cross the source half-space after quantization. Project these rare
-        ; faces conservatively and let clipping/raster coverage decide.
+        ; Let clipping and raster coverage handle quantized winding changes.
+.if .defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO PacketProjectFaceBeginKeepCache
+.else
         GSU_ABSOLUTE_GOTO PacketProjectFaceBegin
+.endif
 PacketScanPlaneCull:
         ; Oriented face plane address = $8000 + face*5 in bank $08.
         lm      R0, (PACKET_FACE_ID)
@@ -1172,53 +1289,31 @@ PacketScanPlaneCull:
         add     R1                       ; 4f
         with    R1
         add     R0                       ; 5f
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_FACE_PLANES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_FACE_PLANES_ROM_BANK
         romb
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_SIGNED_BYTE R7
-        BSP_ROM_LOAD_SIGNED_BYTE R8
-        BSP_ROM_LOAD_SIGNED_BYTE R9
-        BSP_ROM_LOAD_WORD R10
-
-        ; Face planes are derived from Q2 vertices, so evaluate the camera in
-        ; the same coordinate domain. LMULT preserves signed-word endpoints.
-        lm      R0, (PACKET_CAMERA_Q2_X)
-        move    R6, R7
-        with    R0
-        lmult
-        move    R12, R4
-        lm      R0, (PACKET_CAMERA_Q2_Y)
-        move    R6, R8
-        with    R0
-        lmult
-        with    R12
-        add     R4
-        lm      R0, (PACKET_CAMERA_Q2_Z)
-        move    R6, R9
-        with    R0
-        lmult
-        with    R12
-        add     R4
+.include "quake/PacketFaceCullDot.i"
         with    R12
         sub     R10
-        ; Keep coplanar faces: rounding the Q6 view can give them a visible
-        ; sliver even when their world-space plane distance is exactly zero.
-        ; The actual clipped polygon, rather than a widened neighbor, covers it.
+        ; Keep coplanar faces: rounded Q6 projection can leave a visible sliver.
         bmi     PacketScanPlaneAccepted
         nop
         bne     PacketScanNextBit
         nop
 PacketScanPlaneAccepted:
+.if .defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO PacketProjectFaceBeginKeepCache
+.else
         GSU_ABSOLUTE_GOTO PacketProjectFaceBegin
-
+.endif
+.if BSP_RENDER_SCALE = 2
+        .res $E5 - (* - PacketScanLoadByte), $01
+.elseif .defined(PLAYABLE_AXIAL_FACE_FLAGS)
+        .res $DC - (* - PacketScanLoadByte), $01
+.endif
 PacketScanNextBit:
-        lm      R0, (PACKET_VIS_VALUE)
-        with    R0
-        lsr
-        sm      (PACKET_VIS_VALUE), R0
         lm      R0, (PACKET_FACE_ID)
         inc     R0
         sm      (PACKET_FACE_ID), R0
@@ -1238,9 +1333,9 @@ GSU_CACHE_KERNEL_END PacketScanLoadByte
 ; command-local cache. Only an explicitly unseen world vertex reaches the
 ; transform kernel, so adjacent and later rejected faces cannot repeat it.
 GSU_CACHE_KERNEL_BEGIN PacketLoadProjectedWorldVertex
-        ; Projection walks always begin with a split-stream index decode. Keep
-        ; the straight-line decode in this cache window so the face loop crosses
-        ; CBR only once per vertex; the GSU has no spare nested-call link register.
+        ; X2 primes this lookup; both fan-loop entries skip their CACHE so
+        ; returning fan steps cannot evict it between vertices. X3 retains the
+        ; old fan-owned window. A new face may replace and re-prime the lookup.
         lm      R1, (PACKET_INDEX_CURSOR)
         iwt     R2, #$4000
         move    R0, R1
@@ -1259,7 +1354,7 @@ PacketIndexBankReady:
         romb
         with    R1
         add     R1
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_INDICES_ROM_ADDRESS
         with    R4
         add     R1
         GSU_SET_ROM_BUFFER_ADDRESS R4
@@ -1267,7 +1362,7 @@ PacketIndexBankReady:
         sm      (PACKET_SOURCE_INDEX), R0
 
 PacketProjectionLookup:
-        lm      R0, (PACKET_SOURCE_INDEX)
+        BSP_PACKET_REUSE_SOURCE_INDEX
         with    R0
         add     R0
         iwt     R10, #WORLD_VERTEX_REMAP
@@ -1310,7 +1405,7 @@ PacketProjectionSeen:
         movew   R0, (R10)
         sm      (PACKET_PROJ_Y), R0
 
-        lm      R0, (PACKET_CACHE_ENTRY)
+        BSP_PACKET_REUSE_CACHE_CLASS
         iwt     R2, #PACKET_REMAP_PROJECTABLE
         with    R0
         cmp     R2
@@ -1397,6 +1492,9 @@ PacketProjectionBehindFlagsReady:
         sm      (PACKET_DEPTH_FLAGS), R0
         ret
         nop
+.if .defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2)
+        .include "quake/PacketFanWalker.sgs"
+.endif
 GSU_CACHE_KERNEL_END PacketLoadProjectedWorldVertex
 
 ; Project a previously unseen PACKET_SOURCE_INDEX with the renderer's
@@ -1406,104 +1504,38 @@ GSU_CACHE_KERNEL_END PacketLoadProjectedWorldVertex
 PacketProjectWorldVertex:
         nop
         lm      R0, (PACKET_SOURCE_INDEX)
-        move    R1, R0
-        with    R1
-        add     R1                       ; 2v
-        with    R1
-        add     R1                       ; 4v
-        iwt     R4, #$8000
-        with    R4
-        add     R1
-        move    R0, #WORLD_VERTICES_ROM_BANK
-        romb
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_SIGNED_BYTE R1
-        BSP_ROM_LOAD_SIGNED_BYTE R2
-        BSP_ROM_LOAD_SIGNED_BYTE R3
-        BSP_ROM_LOAD_BYTE R7
-        ; Decode signed Q2 = base*4 + the component's two residual bits.
-        with    R1
-        add     R1
-        with    R1
-        add     R1
-        move    R0, R7
-        with    R0
-        and     #3
-        with    R1
-        add     R0
-  .repeat 2
-        with    R7
-        lsr
-  .endrepeat
-        with    R2
-        add     R2
-        with    R2
-        add     R2
-        move    R0, R7
-        with    R0
-        and     #3
-        with    R2
-        add     R0
-  .repeat 2
-        with    R7
-        lsr
-  .endrepeat
-        with    R3
-        add     R3
-        with    R3
-        add     R3
-        with    R7
-        and     #3
-        with    R3
-        add     R7
-        lm      R0, (PACKET_CAMERA_Q2_X)
-        with    R1
-        sub     R0                       ; dx
-        lm      R0, (PACKET_CAMERA_Q2_Y)
-        with    R2
-        sub     R0                       ; dy
-        lm      R0, (PACKET_CAMERA_Q2_Z)
-        with    R3
-        sub     R0                       ; dz
+        BSP_PACKET_LOAD_WORLD_VIEW_DELTAS
 
-        ; Q2 coordinates times Q6 trig values become Q6 after a two-bit shift.
-        ; Preserve that view precision through the reciprocal projection.
-        lm      R9, (PACKET_YAW_COS)
-        BSP_SIGNED_MUL_SHIFT R12, R1, R9, 2
-        BSP_SIGNED_MUL_SHIFT R5, R2, R9, 2
-        lm      R9, (PACKET_YAW_SIN)
-        BSP_SIGNED_MUL_SHIFT R0, R2, R9, 2
-        with    R12
-        add     R0
-        sm      (PACKET_VIEW_FORWARD), R12
-        BSP_SIGNED_MUL_SHIFT R7, R1, R9, 2
-        with    R5
-        sub     R7
-        sm      (PACKET_VIEW_RIGHT), R5
-
-        lm      R9, (PACKET_PITCH_COS)
-        ; Identity pitch preserves exact Q6 words without four multiplies.
-        move    R0, #64
-        with    R9
-        cmp     R0
-        beq     PacketProjectLevelPitch
+  .if BSP_RENDER_SCALE = 2
+.include "quake/PacketDepthFirst.sgs"
+.include "quake/TextureYTracker.sgs"
+.include "quake/PacketDepthUp.sgs"
+  .else
+        ; Shared leaf preserves R9 and R11; retain the caller's cache window.
+        move    R9, R11
+        link    #4
+        GSU_ABSOLUTE_GOTO ClipTransformQ2Deltas, shared_delay
         nop
-        GSU_ABSOLUTE_GOTO PacketProjectPitchedVertex
-PacketProjectLevelPitch:
-  .repeat 4
-        with    R3
-        add     R3
-  .endrepeat
-        sm      (PACKET_VIEW_UP), R3
-        lm      R7, (PACKET_VIEW_FORWARD)
+        move    R11, R9
+        lm      R5, (CLIP_RIGHT)
+        sm      (PACKET_VIEW_RIGHT), R5
+        lm      R12, (CLIP_UP)
+        sm      (PACKET_VIEW_UP), R12
+        lm      R7, (CLIP_DEPTH)
         sm      (PACKET_VIEW_DEPTH), R7
         GSU_ABSOLUTE_GOTO PacketProjectTransformedWorldVertex, shared_delay
         with    R7
-  .repeat $129 - (* - PacketProjectWorldVertex)
+  .endif
+.if !(.defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2))
+        .include "FlatComponentProjection.sgs"
+.endif
+  .if BSP_RENDER_SCALE = 3
+.include "quake/PacketX3ProjectionReciprocalROM.sgs"
+  .endif
+  .repeat $5F0 - (* - GSU_SelectVisibility)
         nop
   .endrepeat
-; Classify and project the Q6 view coordinate without replacing the fan cache.
-; Preserve the established entry addresses, including the former CACHE byte.
+; Keep the resident tracker and the established projection/cache entry.
         .align GSU_CACHE_LINE_BYTES
 PacketProjectTransformedWorldVertex:
         nop
@@ -1561,12 +1593,32 @@ PacketProjectInRange:
         with    R5
         lsr
   .endrepeat
+        iwt     R0, #GSU_RECIPROCAL_ENTRIES
+        with    R5
+        cmp     R0
+        bcc     PacketProjectionDepthReady
+        nop
+        dec     R5                      ; Only rounded1024 can exceed the table.
+PacketProjectionDepthReady:
         iwt     R10, #GSU_RECIPROCAL_OFFSET
         with    R5
         add     R5
         with    R10
         add     R5
+        ; Both viewport images install only the prefix below the colormap.
+        iwt     R0, #GSU_TEXTURE_COLORMAP_OFFSET
+        with    R10
+        cmp     R0
+        bcc     PacketProjectionRamReciprocal
+        nop
+  .if BSP_RENDER_SCALE = 2
+        GSU_ABSOLUTE_GOTO PacketProjectionRomReciprocal
+  .else
+        GSU_ABSOLUTE_GOTO PacketX3ProjectionRomReciprocal
+  .endif
+PacketProjectionRamReciprocal:
         movew   R9, (R10)
+PacketProjectionReciprocalReady:
         lm      R5, (PACKET_VIEW_RIGHT)
         BSP_SIGNED_MUL_SHIFT12 R0, R5, R9
         move    R1, #BSP_VIEW_CENTER_X
@@ -1592,10 +1644,12 @@ PacketProjectInRange:
 ; R4/R6 scratch is dead after each projection; coordinate ADD/SUB sets fresh flags.
 ; Fill only the unreachable tail so every downstream public/cache entry keeps
 ; its established address despite the shorter X/Y projection helpers.
+  .if BSP_RENDER_SCALE = 2
+.include "quake/TextureGeneralReturn.sgs"
+  .endif
   .repeat $06E0 - (* - GSU_SelectVisibility)
         nop
   .endrepeat
-
 ; Publish the just-computed projection only after all coordinates and state are
 ; complete. Rejected faces therefore retain reusable cache entries but never
 ; expose packet-local IDs or packet-array bytes.
@@ -1659,38 +1713,58 @@ PacketProjectionTagReady:
         ret
         nop
 PacketProjectionCacheOverflow:
-        ; This is unreachable for every non-solid E1M3 PVS (audited maximum
-        ; 1,297). Still terminate reuse deterministically if data ever grows.
-        move    R0, #6
-        sm      (GSU_TELEMETRY_ERROR), R0
-        lm      R0, (PACKET_SOURCE_INDEX)
-        with    R0
-        add     R0
-        iwt     R10, #WORLD_VERTEX_REMAP
-        with    R10
-        add     R0
-        iwt     R1, #PACKET_REMAP_UNPROJECTABLE
-        movew   (R10), R1
+        ; Keep the source remap unseen. A later lookup computes fresh X/Y and
+        ; depth state. Only an immediate copy may use the transient tag in R1.
+        lm      R0, (PACKET_PROJ_STATE)
+        dec     R0
+        bmi     PacketProjectionTransientFar
+        nop
+        bne     PacketProjectionTransientBehind
+        nop
+        iwt     R1, #PACKET_REMAP_PROJECTABLE|PACKET_TRANSIENT_PROJECTION
+        ret
+        nop
+PacketProjectionTransientBehind:
+        iwt     R1, #PACKET_REMAP_BEHIND_NEAR|PACKET_TRANSIENT_PROJECTION
+        ret
+        nop
+PacketProjectionTransientFar:
+        iwt     R1, #PACKET_REMAP_UNPROJECTABLE|PACKET_TRANSIENT_PROJECTION
         ret
         nop
 
 GSU_CACHE_KERNEL_BEGIN PacketProjectFaceBegin
+PacketProjectFaceBeginKeepCache:
+.assert PacketProjectFaceBeginKeepCache - PacketProjectFaceBegin = 1, error, "PacketProjectFaceBegin post-CACHE entry moved"
         lm      R0, (PACKET_FACE_FIRST)
         sm      (PACKET_INDEX_CURSOR), R0
         move    R0, #0
         sm      (PACKET_FAN_ORDINAL), R0
         sm      (PACKET_FAN_VALID), R0
         sm      (PACKET_DEPTH_FLAGS), R0
-        GSU_ABSOLUTE_GOTO PacketProjectFaceLoop
+.if .defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2)
+        GSU_ABSOLUTE_GOTO PacketProjectFaceLoopCached
+.else
+        GSU_ABSOLUTE_GOTO PacketProjectFaceLoop + (BSP_RENDER_SCALE = 2)
+.endif
 GSU_CACHE_KERNEL_END PacketProjectFaceBegin
+
+.macro PACKET_FAN_NEXT_LEGACY
+        GSU_ABSOLUTE_GOTO PacketProjectFaceLoop + (BSP_RENDER_SCALE = 2)
+.endmacro
 
 ; Stream one polygon fan and accept as soon as any fully-near triangle has a
 ; conservative screen-overlapping bounding box. If none does, the cold
 ; PacketNearStraddler path still admits a face with both projectable and
 ; behind-near vertices; RenderFaces already clips those crossing triangles.
 GSU_CACHE_KERNEL_BEGIN PacketProjectFaceLoop
-        ; Keep the walker cached while unseen vertices execute the cold stages.
-        jal     PacketLoadProjectedWorldVertex+1
+.if .defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2)
+        ; The cached walker frees this former fan dispatch slot.
+        .include "FlatComponentProjection.sgs"
+        .res $07B9 - (* - GSU_SelectVisibility), $01
+.else
+        ; X2 preserves lookup CBR; X3 caches this walker. Cold transforms keep CBR.
+        jal     PacketLoadProjectedWorldVertex + (BSP_RENDER_SCALE <> 2)
         nop
         lm      R0, (PACKET_FAN_ORDINAL)
         moves   R0, R0
@@ -1720,28 +1794,32 @@ PacketFanCurrentValid:
         beq     PacketFanThreeValid
         nop
         GSU_ABSOLUTE_GOTO PacketFanAdvancePrevious
+.endif
 PacketFanThreeValid:
-        ; Pixel-center ownership can extend one integer projection unit past
-        ; a vertex bbox. Test max(x)>=-1 and min(x)<129 without min/max.
+        ; Expand only admission tests; stored projections retain their old values.
+        ; X2 needs7pixels for its rounded-depth lookup; X3 retains1.
         lm      R4, (PACKET_FAN_X0)
         move    R0, R4
-        inc     R0
+        with    R0
+        add     #BSP_VIEW_SCREEN_ADMISSION_GUARD
         bpl     PacketFanHasNonnegativeX
         nop
         lm      R5, (PACKET_FAN_X1)
         move    R0, R5
-        inc     R0
+        with    R0
+        add     #BSP_VIEW_SCREEN_ADMISSION_GUARD
         bpl     PacketFanHasNonnegativeX
         nop
         lm      R6, (PACKET_PROJ_X)
         move    R0, R6
-        inc     R0
+        with    R0
+        add     #BSP_VIEW_SCREEN_ADMISSION_GUARD
         bpl     PacketFanHasNonnegativeX
         nop
         GSU_ABSOLUTE_GOTO PacketFanAdvancePrevious
 PacketFanHasNonnegativeX:
-        iwt     R2, #BSP_VIEW_WIDTH+1
-        lm      R4, (PACKET_FAN_X0)
+        iwt     R2, #BSP_VIEW_WIDTH+BSP_VIEW_SCREEN_ADMISSION_GUARD
+        BSP_PACKET_REUSE_FIRST_X
         with    R4
         cmp     R2
         bmi     PacketFanXIntersects
@@ -1764,23 +1842,26 @@ PacketFanXIntersects:
         BSP_PACKET_CLAMP_Y R4
         BSP_PACKET_CLAMP_Y R5
         BSP_PACKET_CLAMP_Y R6
-        ; max(y)>=-1.
+        ; max(y)>=-guard.
         move    R0, R4
-        inc     R0
+        with    R0
+        add     #BSP_VIEW_SCREEN_ADMISSION_GUARD
         bpl     PacketFanHasNonnegativeY
         nop
         move    R0, R5
-        inc     R0
+        with    R0
+        add     #BSP_VIEW_SCREEN_ADMISSION_GUARD
         bpl     PacketFanHasNonnegativeY
         nop
         move    R0, R6
-        inc     R0
+        with    R0
+        add     #BSP_VIEW_SCREEN_ADMISSION_GUARD
         bpl     PacketFanHasNonnegativeY
         nop
         GSU_ABSOLUTE_GOTO PacketFanAdvancePrevious
 PacketFanHasNonnegativeY:
-        ; min(y)<113.
-        iwt     R2, #BSP_VIEW_HEIGHT+1
+        ; min(y)<height+guard.
+        iwt     R2, #BSP_VIEW_HEIGHT+BSP_VIEW_SCREEN_ADMISSION_GUARD
         move    R0, R4
         with    R0
         cmp     R2
@@ -1801,68 +1882,25 @@ PacketFanYIntersects:
 PacketFaceScreenCandidate:
         GSU_ABSOLUTE_GOTO PacketAdmissionBegin
 
-PacketFanFirst:
-        lm      R0, (PACKET_PROJ_X)
-        sm      (PACKET_FAN_X0), R0
-        lm      R0, (PACKET_PROJ_Y)
-        sm      (PACKET_FAN_Y0), R0
-        lm      R0, (PACKET_PROJ_VALID)
-        sm      (PACKET_FAN_VALID), R0
-        bra     PacketFanNext
-        nop
-PacketFanSecond:
-        lm      R0, (PACKET_PROJ_X)
-        sm      (PACKET_FAN_X1), R0
-        lm      R0, (PACKET_PROJ_Y)
-        sm      (PACKET_FAN_Y1), R0
-        lm      R0, (PACKET_PROJ_VALID)
-        moves   R0, R0
-        beq     PacketFanNext
-        nop
-        lm      R0, (PACKET_FAN_VALID)
-        with    R0
-        or      #2
-        sm      (PACKET_FAN_VALID), R0
-        bra     PacketFanNext
-        nop
-PacketFanAdvancePrevious:
-        lm      R0, (PACKET_PROJ_X)
-        sm      (PACKET_FAN_X1), R0
-        lm      R0, (PACKET_PROJ_Y)
-        sm      (PACKET_FAN_Y1), R0
-        lm      R0, (PACKET_FAN_VALID)
-        iwt     R2, #$FFFD
-        with    R0
-        and     R2
-        move    R1, R0
-        lm      R0, (PACKET_PROJ_VALID)
-        moves   R0, R0
-        beq     PacketFanStoreValidity
-        nop
-        with    R1
-        or      #2
-PacketFanStoreValidity:
-        sm      (PACKET_FAN_VALID), R1
-PacketFanNext:
-        lm      R0, (PACKET_INDEX_CURSOR)
-        inc     R0
-        sm      (PACKET_INDEX_CURSOR), R0
-        lm      R0, (PACKET_FAN_ORDINAL)
-        inc     R0
-        sm      (PACKET_FAN_ORDINAL), R0
-        lm      R1, (PACKET_FACE_VERTICES)
-        with    R0
-        cmp     R1
-        beq     PacketFaceOffscreen
-        nop
-        GSU_ABSOLUTE_GOTO PacketProjectFaceLoop
-PacketFaceOffscreen:
-        GSU_ABSOLUTE_GOTO PacketNearStraddler
-
+.if .defined(PLAYABLE_SELECTOR_FAN_CACHE) && .defined(PLAYABLE_WORLD_AFFINE_UV) && (BSP_RENDER_SCALE = 2)
+  .if .defined(PLAYABLE_FLAT_COMPONENT_PROJECTOR) && !.defined(PLAYABLE_E1M1_SHADED_PROJECTOR)
+        ; Use the former fan update tail for the Flat edge code and patches.
+        .include "FlatProjectionEdgeCode.sgs"
+  .endif
+  .ifdef PLAYABLE_E1M1_CULL_STREAMED_ALIAS
+        .include "quake/FlyBrushMaskProject.sgs"
+  .endif
+        ; Retain the original index loader and all following packet anchors.
+        .res $0920 - (* - GSU_SelectVisibility), $01
+.else
+        .include "quake/PacketFanTail.sgs"
+.endif
         .include "quake/PacketWorldIndexLoader.sgs"
 GSU_CACHE_KERNEL_END PacketProjectFaceLoop
 
 GSU_CACHE_KERNEL_BEGIN PacketNearStraddler
+PacketNearStraddlerKeepCache:
+.assert PacketNearStraddlerKeepCache - PacketNearStraddler = 1, error, "PacketNearStraddler post-CACHE entry moved"
         lm      R0, (PACKET_DEPTH_FLAGS)
         move    R1, R0
         with    R1
@@ -1922,10 +1960,7 @@ PacketAdmissionStartCountOrCopy:
         sm      (PACKET_FAN_ORDINAL), R0
         GSU_ABSOLUTE_GOTO PacketAdmissionCountLoop
 PacketRejectFaceCapacity:
-        lm      R0, (PACKET_REJECT_FACE)
-        inc     R0
-        sm      (PACKET_REJECT_FACE), R0
-        GSU_ABSOLUTE_GOTO PacketScanNextBit
+        BSP_PACKET_CAPACITY_REJECT PACKET_REJECT_FACE
 GSU_CACHE_KERNEL_END PacketAdmissionBegin
 
 GSU_CACHE_KERNEL_BEGIN PacketAdmissionCountLoop
@@ -2003,13 +2038,7 @@ PacketAdmissionCapacityReady:
         GSU_ABSOLUTE_GOTO PacketAdmissionCopyLoop
 
 PacketRejectVertexCapacity:
-        lm      R0, (PACKET_REJECT_VERTEX)
-        inc     R0
-        sm      (PACKET_REJECT_VERTEX), R0
-        GSU_ABSOLUTE_GOTO PacketScanNextBit
+        BSP_PACKET_CAPACITY_REJECT PACKET_REJECT_VERTEX
 PacketRejectIndexCapacity:
-        lm      R0, (PACKET_REJECT_INDEX)
-        inc     R0
-        sm      (PACKET_REJECT_INDEX), R0
-        GSU_ABSOLUTE_GOTO PacketScanNextBit
+        BSP_PACKET_CAPACITY_REJECT PACKET_REJECT_INDEX
 GSU_CACHE_KERNEL_END PacketAdmissionCountLoop

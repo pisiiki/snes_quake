@@ -70,9 +70,16 @@ AliasEndpointCoordinate:
         with    R0
         add     R4
 .if BSP_RENDER_SCALE = 2
-        iwt     R1, #(ALIAS_X_AXIS + 64)
+  .ifdef PLAYABLE_MAP_ID
+        iwt     R1, #ALIAS_Y_AXIS
         with    R1
         sub     R10
+        GSU_ABSOLUTE_GOTO AliasPlayableEndpointTail
+  .else
+        iwt     R1, #(ALIAS_X_AXIS + BSP_VIEW_CENTER_X)
+        with    R1
+        sub     R10
+  .endif
 .else
         iwt     R1, #ALIAS_X_AXIS
         with    R1
@@ -88,10 +95,12 @@ AliasEndpointCoordinate:
         move    R2, #BSP_VIEW_WIDTH
 @CenterReady:
 .endif
+.if (BSP_RENDER_SCALE <> 2) || !.defined(PLAYABLE_MAP_ID)
         with    R0
         add     R1
         ret
         nop
+.endif
 
 ; Large denominators miss the RAM reciprocal mirror infrequently. Keep their
 ; exact bank selection and ROM load cold so the repeated endpoint advance can
@@ -107,11 +116,7 @@ TextureEndpointDivideSelectBank:
         cmp     R4
         bcc     TextureEndpointDivideBankReady
         nop
-        with    R1
-        sub     R4
-        inc     R0
-        bra     TextureEndpointDivideSelectBank
-        nop
+        QuakeNextQ12Bank TextureEndpointDivideSelectBank, TextureDivideQ12PackedTail
 TextureEndpointDivideBankReady:
         romb
         move    R2, R1
@@ -133,7 +138,7 @@ TextureEndpointDivideBankReady:
 ; only their distinct unity-output ABIs remain separate here.
 TextureDivideQ12EdgeCachedWindowMissCold:
         iwt     R10, #TextureDivideQ12EdgeLocalCacheFill
-        lm      R13, (TEXTURE_Q12_LOOKUP_ROUTINE)
+        iwt     R13, #TextureEdgePerspectiveLookup
         jmp     R13
         nop
 TextureDivideQ12EdgeLocalCacheFill:
@@ -184,23 +189,7 @@ T4TextureShadeIntersectUnityOutputsCold:
         GSU_ABSOLUTE_GOTO TextureShadeIntersectScreenX
 
 TextureStageLightmapRowCold:
-        ; One record per logical row: raw min/max X followed by exact left and
-        ; right S/T/depth. Convex rows are contiguous, so Y is reconstructed
-        ; from the final raster row and the record count during replay.
-        lm      R10, (TEXTURE_COORD_PTR)
-        lm      R1, (CONVEX_MIN_X)
-        lm      R3, (CONVEX_MAX_X)
-        movew   (R10), R1
-        inc     R10
-        inc     R10
-        movew   (R10), R3
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_LEFT_S)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_RIGHT_S)
+        ; The resident row entry leaves R10 at base+6 and right S in R0.
         movew   (R10), R0
         inc     R10
         inc     R10
@@ -226,13 +215,25 @@ TextureStageLightmapRowCold:
         sm      (TEXTURE_LIGHTMAP_FAST_ROUTINE), R0
         ret
         nop
+        ; Keep every later tail helper at its established address.
+        .res 66 - (* - TextureStageLightmapRowCold), $01
 
 T4TextureStageLightmapRight:
-        ; R10 is base+14. The right X is already staged and no longer needs
-        ; to survive the overwhelmingly common orientation comparison.
+        ; R10 is base+14. The stage's last three adds target R10, its stores
+        ; leave R0 unchanged, and the absolute jump resets the GSU prefixes.
         with    R10
         sub     #14
         movew   R1, (R10)
+.if .defined(PLAYABLE_E1M1_T4_RIGHT_STAGE_CODE) && .defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)
+        ; The word load resets the prefix, so SUB consumes the live right X.
+        sub     R1
+        bpl     T4TextureStageLightmapOrdered
+        inc     R10
+        ; The reverse helper still receives base+2. Ordered rows keep base+1.
+        inc     R10
+        GSU_ABSOLUTE_GOTO T4TextureStageLightmapReverseCold
+        .res $11 - (* - T4TextureStageLightmapRight), $01
+.else
         inc     R10
         inc     R10
         movew   R0, (R10)
@@ -241,17 +242,30 @@ T4TextureStageLightmapRight:
         bpl     T4TextureStageLightmapOrdered
         nop
         GSU_ABSOLUTE_GOTO T4TextureStageLightmapReverseCold
+.endif
 T4TextureStageLightmapOrdered:
+.assert * - T4TextureStageLightmapRight = $11, error, "Ordered stage entry moved"
         with    R10
+.if .defined(PLAYABLE_E1M1_T4_RIGHT_STAGE_CODE) && .defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)
+        add     #15
+.else
         add     #14
+.endif
 T4TextureStageLightmapAdvance:
+.assert * - T4TextureStageLightmapRight = $14, error, "Shared row advance moved"
         sm      (TEXTURE_COORD_PTR), R10
         GSU_ABSOLUTE_GOTO T4TextureRasterNextRow
 
 
 TextureDivideQ12EdgePerspectiveLoaded:
+.assert * - T4TextureStageLightmapRight = $1B, error, "Right-stage tail changed size"
         move    R6, R12
-        GSU_ABSOLUTE_GOTO TextureDivideQ12EdgeLoadedCached
+        move    R15, R3
+        nop
+TextureEdgePerspectiveMirrorMissSaveContinuation:
+        ; The raw resident mirror serves either the quotient multiply or the
+        ; edge-cache fill. ROM lookup preserves R3 until that continuation.
+        to      R3                     ; Caller delay supplies WITH R10.
 
 TextureEdgePerspectiveMirrorMissCold:
         iwt     R10, #TextureDivideQ12EdgePerspectiveLoaded

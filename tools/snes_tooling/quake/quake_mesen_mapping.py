@@ -20,6 +20,26 @@ CONTRACT_SCHEMA = "quake-mesence-mapping-v1"
 UPSTREAM_REPOSITORY = "https://github.com/nesdev-org/MesenCE.git"
 UPSTREAM_COMMIT = "091ff784182c13712deef068c94dc54020b7caf2"
 
+# The ordinary player is a separately qualified, unmodified upstream binary.
+# Keep this pin separate from the ROM mapping contract above.
+PLAYER_COMMIT = "4b8a196e299b3de297b204fd1208d2981562c89b"
+PLAYER_RUN_ID = 37624076912
+PLAYER_ARTIFACT_ID = 11483144254
+PLAYER_ZIP_BYTES = 32974185
+PLAYER_ZIP_SHA256 = "6296e76cb086c54da97083f17adee2bb33a29695db4ee1135c8ea9c451c753b8"
+PLAYER_REPOSITORY = "pisiiki/snes_quake"
+PLAYER_RELEASE_TAG = "v0.0.3"
+PLAYER_RELEASE_COMMIT = "fafa152d3a08ed0d2bd63a59d0e79b9293a1b9b1"
+PLAYER_RELEASE_BUILD_INFO_SHA256 = "d3ad90e3b818c8d60190b3e61b96411aa6666217039716e4a9947c7397397c15"
+PLAYER_ASSET_PREFIX = "MesenCE-4b8a196e"
+PLAYER_BINARY_NAME = PLAYER_ASSET_PREFIX + "-Windows-x64-AOT.zip"
+PLAYER_SOURCE_NAME = PLAYER_ASSET_PREFIX + "-source.zip"
+PLAYER_PROVENANCE_NAME = PLAYER_ASSET_PREFIX + "-PROVENANCE.json"
+
+
+def player_download_url(name: str) -> str:
+    return f"https://github.com/{PLAYER_REPOSITORY}/releases/download/{PLAYER_RELEASE_TAG}/{name}"
+
 
 def target_capabilities() -> dict[str, dict[str, Any]]:
     """Return the upstream emulator capability used by the hardware-safe build."""
@@ -112,11 +132,32 @@ def validate_alias_metadata(
 
 
 def release_readme() -> str:
-    """Describe the upstream emulator target without project-specific patches."""
+    """Render the pinned player download independently of ROM qualification pins."""
 
-    return """Requires the current **MesenCE development build**. Download it for
-[Windows, Linux or macOS](https://github.com/nesdev-org/MesenCE#development-builds),
-then open `quake.sfc` in the emulator."""
+    return f"""On **Windows x64**, [download the tested MesenCE player]({player_download_url(PLAYER_BINARY_NAME)}).
+Extract the ZIP, run `Mesen.exe`, and open `quake.sfc`; no emulator build is needed.
+This is the unchanged official upstream AOT build at
+[`{PLAYER_COMMIT[:8]}`](https://github.com/nesdev-org/MesenCE/commit/{PLAYER_COMMIT}),
+without this project's development instrumentation.
+
+ZIP SHA-256: `{PLAYER_ZIP_SHA256}`.
+[Exact upstream source and license]({player_download_url(PLAYER_SOURCE_NAME)}) ·
+[Download provenance and qualification hashes]({player_download_url(PLAYER_PROVENANCE_NAME)}).
+
+For Linux or macOS, see the upstream
+[MesenCE development builds](https://github.com/nesdev-org/MesenCE#development-builds)."""
+
+
+def player_notices() -> str:
+    return f"""## MesenCE player download
+
+The separate Windows emulator download is the unmodified official MesenCE build
+at `{PLAYER_COMMIT}`. It is not part of this project's MIT-licensed source or
+the Quake ROM. [Corresponding upstream source]({player_download_url(PLAYER_SOURCE_NAME)})
+includes the exact upstream `LICENSE` and pinned dependency references;
+[provenance]({player_download_url(PLAYER_PROVENANCE_NAME)}) records its binary,
+source and qualification hashes. MesenCE retains its upstream GPL-3.0 terms.
+"""
 
 
 def release_rom_config() -> bytes:

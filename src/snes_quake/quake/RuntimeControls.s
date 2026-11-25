@@ -4,7 +4,45 @@
 ; available for benchmark/tool compatibility. Host-only setup uses the
 ; versioned frame-zero boot-parameter ABI rather than a hidden second pad.
 
-RUNTIME_MENU_ROW_RESUME   = 0
+.macro RecenterFlyCameraPose
+        lda     #BSP_START_YAW_INDEX*CAMERA_ANGLE_LEGACY_STEP
+        sta     yaw_index
+        stz     pitch_level
+        lda     #BSP_FLY_START_X_Q8
+        sta     camera_x
+        lda     #BSP_FLY_START_Y_Q8
+        sta     camera_y
+        lda     #BSP_FLY_START_Z_Q8
+        sta     camera_z
+        inc     control_revision
+        jsr     InvalidateScheduledFrameIdentity
+.endmacro
+
+RUNTIME_MENU_FIRST_ROW    = 0
+.ifdef PLAYABLE_MAP_ID
+RUNTIME_MENU_ROW_PLAYBACK = RUNTIME_MENU_FIRST_ROW
+RUNTIME_MENU_ROW_RENDER   = 1
+RUNTIME_MENU_ROW_BRUSHES  = 2
+RUNTIME_MENU_ROW_ENTITIES = 3
+RUNTIME_MENU_ROW_SCALE    = 4
+RUNTIME_MENU_ROW_SKILL    = 5
+RUNTIME_MENU_ROW_ALWAYS_RUN = 6
+RUNTIME_MENU_ROW_RESTART  = 7
+RUNTIME_MENU_ROW_COUNT    = 8
+RUNTIME_MENU_VALUE_BYTES  = 3
+RUNTIME_MENU_PLAYBACK_VALUE_BYTES = 7
+RUNTIME_MENU_RENDER_VALUE_BYTES = 9
+RUNTIME_MENU_SKILL_VALUE_BYTES = 9
+RUNTIME_MENU_GAP_X        = 128
+RUNTIME_MENU_GAP_COLUMNS  = 1
+RUNTIME_MENU_COLUMNS      = 22
+RUNTIME_MENU_Y            = 72
+RUNTIME_MENU_RESTART_GAP_PIXELS = 8
+RUNTIME_MENU_HIGHLIGHT_X = 40
+RUNTIME_MENU_HIGHLIGHT_COLUMNS = 22
+RUNTIME_MENU_HIGHLIGHT_OAM = RUNTIME_MENU_USED_ENTRIES * RUNTIME_MENU_ENTRY_BYTES
+.assert RUNTIME_MENU_USED_ENTRIES + RUNTIME_MENU_HIGHLIGHT_COLUMNS <= 128, error, "Runtime menu and highlight exceed OAM capacity"
+.else
 RUNTIME_MENU_ROW_PLAYBACK = 1
 RUNTIME_MENU_ROW_TEXTURES = 2
 RUNTIME_MENU_ROW_LIGHTING = 3
@@ -12,41 +50,53 @@ RUNTIME_MENU_ROW_BRUSHES  = 4
 RUNTIME_MENU_ROW_ENTITIES = 5
 RUNTIME_MENU_ROW_SCALE    = 6
 RUNTIME_MENU_ROW_RESTART  = 7
+.if BSP_QUAKEC_GAMEPLAY
+RUNTIME_MENU_ROW_SKILL    = 8
+RUNTIME_MENU_ROW_COUNT    = 9
+RUNTIME_MENU_SKILL_COLUMNS = 16
+.else
 RUNTIME_MENU_ROW_COUNT    = 8
+.endif
 RUNTIME_MENU_COLUMNS      = 14
 RUNTIME_MENU_VALUE_COLUMN = 8
 RUNTIME_MENU_VALUE_BYTES  = 6
 RUNTIME_MENU_PLAYBACK_VALUE_COLUMN = 4
 RUNTIME_MENU_PLAYBACK_VALUE_BYTES  = 10
-RUNTIME_MENU_PLAYBACK_RECORD_BYTES = 16
 RUNTIME_MENU_X            = 72
 RUNTIME_MENU_Y            = 72
+.endif
 RUNTIME_MENU_ENTRY_BYTES  = 4
-RUNTIME_MENU_ROW_BYTES    = RUNTIME_MENU_COLUMNS * RUNTIME_MENU_ENTRY_BYTES
-RUNTIME_MENU_USED_ENTRIES = RUNTIME_MENU_ROW_COUNT * RUNTIME_MENU_COLUMNS
+RUNTIME_MENU_USED_ENTRIES = RuntimeMenuTextEnd - RuntimeMenuText
+RUNTIME_MENU_PLAYBACK_OAM = (RuntimeMenuTextPlayback - RuntimeMenuText) * RUNTIME_MENU_ENTRY_BYTES
+.ifndef PLAYABLE_MAP_ID
+RUNTIME_MENU_TEXTURES_OAM = (RuntimeMenuTextTextures - RuntimeMenuText) * RUNTIME_MENU_ENTRY_BYTES
+RUNTIME_MENU_LIGHTING_OAM = (RuntimeMenuTextLighting - RuntimeMenuText) * RUNTIME_MENU_ENTRY_BYTES
+.endif
+RUNTIME_MENU_BRUSHES_OAM  = (RuntimeMenuTextBrushes - RuntimeMenuText) * RUNTIME_MENU_ENTRY_BYTES
+RUNTIME_MENU_ENTITIES_OAM = (RuntimeMenuTextEntities - RuntimeMenuText) * RUNTIME_MENU_ENTRY_BYTES
+RUNTIME_MENU_SCALE_OAM    = (RuntimeMenuTextScale - RuntimeMenuText) * RUNTIME_MENU_ENTRY_BYTES
+.if BSP_QUAKEC_GAMEPLAY
+RUNTIME_MENU_SKILL_OAM    = (RuntimeMenuTextSkill - RuntimeMenuText) * RUNTIME_MENU_ENTRY_BYTES
+.endif
+.ifdef PLAYABLE_MAP_ID
+RUNTIME_MENU_ALWAYS_RUN_OAM = (RuntimeMenuTextAlwaysRun - RuntimeMenuText) * RUNTIME_MENU_ENTRY_BYTES
+.endif
 RUNTIME_MENU_OBJ_ATTR     = $3F ; name bit 8, palette 7, priority 3
-RUNTIME_MENU_COLOR_MATH   = CG_BG1_ON | CG_BACK_ON | CG_HALF_ON
-RUNTIME_MENU_COLOR_WINDOW_OPEN   = $00 ; permit fixed-black math everywhere
+.ifndef PLAYABLE_MAP_ID
+RUNTIME_MENU_BLACK_BACKDROP = CG_BACK_ON | CG_MODE_SUB
+.endif
 RUNTIME_MENU_COLOR_WINDOW_CLOSED = $30 ; LibSFX idle state: prevent math
 RUNTIME_MENU_TILE_SPACE   = .lobyte(RUNTIME_MENU_TILE_BASE)
 RUNTIME_MENU_TILE_CURSOR  = .lobyte(RUNTIME_MENU_TILE_BASE + (62 - RUNTIME_MENU_ASCII_FIRST))
-RUNTIME_MENU_PLAYBACK_ORDERED_3HZ  = 0
-RUNTIME_MENU_PLAYBACK_REALTIME     = 1
 RUNTIME_MENU_PLAYBACK_FLY          = 2
-RUNTIME_MENU_PLAYBACK_HALF         = 3
-RUNTIME_MENU_PLAYBACK_QUARTER      = 4
-RUNTIME_MENU_PLAYBACK_ORDERED_30HZ = 5
 RUNTIME_MENU_PLAYBACK_FLY3X        = 6
-RUNTIME_MENU_PLAYBACK_COUNT        = 7
-DEMO_PLAYBACK_RATE_REALTIME    = 0
-DEMO_PLAYBACK_RATE_HALF        = 1
-DEMO_PLAYBACK_RATE_QUARTER     = 2
 RUNTIME_MENU_LIGHTING_NONE     = 0
 RUNTIME_MENU_LIGHTING_LIGHTMAP = 1
 RUNTIME_MENU_TEXTURES_OFF       = 0
 RUNTIME_MENU_TEXTURES_ON        = 1
 RUNTIME_MENU_TEXTURES_COUNT     = 2
 RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE = 2
+RUNTIME_MENU_TECHNIQUE_FACE_COLORS = 3
 RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP = BSP_TECHNIQUE_TEXTURED_LIGHTMAP
 RUNTIME_MENU_TECHNIQUE_UNTEXTURED_LIGHTMAP = BSP_TECHNIQUE_UNTEXTURED_LIGHTMAP
 CAMERA_PITCH_MIN               = .loword(-CAMERA_ANGLE_QUARTER) ; -90 degrees
@@ -80,9 +130,10 @@ BOOT_PARAMETERS_ERROR_ORDERED_STRIDE = $E9
 
 .assert RUNTIME_MENU_USED_ENTRIES <= 128, error, "Runtime menu exceeds SNES OAM capacity"
 .assert RUNTIME_MENU_COLUMNS <= 32, error, "Runtime menu exceeds the per-scanline OBJ limit"
+.ifndef PLAYABLE_MAP_ID
 .assert RUNTIME_MENU_VALUE_COLUMN + RUNTIME_MENU_VALUE_BYTES = RUNTIME_MENU_COLUMNS, error, "Runtime-menu values must end at the menu edge"
 .assert RUNTIME_MENU_PLAYBACK_VALUE_COLUMN + RUNTIME_MENU_PLAYBACK_VALUE_BYTES = RUNTIME_MENU_COLUMNS, error, "Runtime-menu playback value must end at the menu edge"
-.assert RUNTIME_MENU_PLAYBACK_RECORD_BYTES = 16, error, "Runtime-menu playback records must retain shift indexing"
+.endif
 .assert BOOT_PARAMETERS_SIZE = GSU_BOOT_PARAMETERS_BYTES, error, "Boot parameter ABI size disagrees with cartridge RAM"
 
 ; Consume an optional one-shot host request before the first render. The host
@@ -123,16 +174,21 @@ ApplyBootParameters:
         beq     BootParametersValidateTechnique
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
-        cmp     #RUNTIME_MENU_PLAYBACK_COUNT
-        bcc     :+
+        cmp     #RUNTIME_MENU_PLAYBACK_FLY
+        beq     BootParametersValidateTechnique
+        cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
+        beq     BootParametersValidateTechnique
         jmp     BootParametersErrorPlayback
-:
 BootParametersValidateTechnique:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_TECHNIQUE
         beq     BootParametersValidateBrushes
         lda     f:GSU_BOOT_PARAMETERS+13
         and     #$00FF
+.ifdef PLAYABLE_MAP_ID
+        cmp     #RUNTIME_MENU_TECHNIQUE_FACE_COLORS
+        beq     :+
+.endif
         cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE
         beq     :+
         cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP
@@ -155,20 +211,6 @@ BootParametersValidateFixedStepSample:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_FIXED_STEP_SAMPLE
         beq     BootParametersValidateCoverage
-        lda     f:GSU_BOOT_PARAMETERS+10
-        and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
-        beq     :+
-        lda     f:GSU_BOOT_PARAMETERS+12
-        and     #$00FF
-        beq     :+
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        beq     :+
-        jmp     BootParametersErrorFixedStepSample
-:
-        lda     f:GSU_BOOT_PARAMETERS+15
-        and     #$00FF
-        cmp     #BSP_DEMO_STEP_POSE_COUNT
-        bcc     BootParametersValidateCoverage
         jmp     BootParametersErrorFixedStepSample
 
 BootParametersValidateCoverage:
@@ -185,56 +227,12 @@ BootParametersValidateOrderedSourcePose:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_ORDERED_SOURCE_POSE
         beq     BootParametersValidateOrderedStride
-        lda     f:GSU_BOOT_PARAMETERS+10
-        and     #BOOT_PARAMETERS_PRESENT_FIXED_STEP_SAMPLE
-        beq     @ValidateSourcePlayback
-        jmp     BootParametersErrorOrderedSourcePose
-@ValidateSourcePlayback:
-        lda     f:GSU_BOOT_PARAMETERS+10
-        and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
-        beq     @ValidateSourceRange
-        lda     f:GSU_BOOT_PARAMETERS+12
-        and     #$00FF
-        beq     @ValidateSourceRange
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        beq     @ValidateSourceRange
-        jmp     BootParametersErrorOrderedSourcePose
-@ValidateSourceRange:
-        lda     f:GSU_BOOT_PARAMETERS+18
-        cmp     #BSP_DEMO_PRECISE_TRACK_POSE_COUNT
-        bcc     BootParametersValidateOrderedStride
         jmp     BootParametersErrorOrderedSourcePose
 
 BootParametersValidateOrderedStride:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_ORDERED_STRIDE
         beq     BootParametersApplyPlayback
-        lda     f:GSU_BOOT_PARAMETERS+10
-        and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
-        beq     @ValidateStrideValue
-        lda     f:GSU_BOOT_PARAMETERS+12
-        and     #$00FF
-        beq     @ValidateStrideValue
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        beq     @ValidateStrideValue
-        jmp     BootParametersErrorOrderedStride
-@ValidateStrideValue:
-        lda     f:GSU_BOOT_PARAMETERS+17
-        and     #$00FF
-        cmp     #$0001
-        beq     BootParametersApplyPlayback
-        cmp     #BSP_DEMO_ORDERED_POSE_STRIDE
-        beq     :+
-        jmp     BootParametersErrorOrderedStride
-:
-        ; The explicit 30 Hz mode cannot be contradicted by a 3 Hz stride.
-        lda     f:GSU_BOOT_PARAMETERS+10
-        and     #BOOT_PARAMETERS_PRESENT_PLAYBACK
-        beq     BootParametersApplyPlayback
-        lda     f:GSU_BOOT_PARAMETERS+12
-        and     #$00FF
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        bne     BootParametersApplyPlayback
         jmp     BootParametersErrorOrderedStride
 
 BootParametersApplyPlayback:
@@ -245,58 +243,15 @@ BootParametersApplyPlayback:
 :
         lda     f:GSU_BOOT_PARAMETERS+12
         and     #$00FF
-        sta     runtime_menu_draft_playback
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        beq     BootParametersPlaybackOrdered30Hz
-        cmp     #RUNTIME_MENU_PLAYBACK_REALTIME
-        beq     BootParametersPlaybackRealtime
         cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
-        beq     BootParametersPlaybackFly3x
-        cmp     #RUNTIME_MENU_PLAYBACK_FLY
-        beq     BootParametersPlaybackFly
-        cmp     #RUNTIME_MENU_PLAYBACK_HALF
-        beq     BootParametersPlaybackHalf
-        cmp     #RUNTIME_MENU_PLAYBACK_QUARTER
-        beq     BootParametersPlaybackQuarter
-        lda     #BSP_DEMO_ORDERED_POSE_STRIDE
-        sta     demo_ordered_pose_stride
-        bra     BootParametersPlaybackOrdered
-BootParametersPlaybackOrdered30Hz:
-        lda     #$0001
-        sta     demo_ordered_pose_stride
-BootParametersPlaybackOrdered:
-        lda     #$0001
-        sta     demo_mode
-        stz     demo_schedule
-        stz     demo_playback_rate_shift
-        bra     BootParametersApplyTechnique
-BootParametersPlaybackRealtime:
-        lda     #$0001
-        sta     demo_mode
-        sta     demo_schedule
-        stz     demo_playback_rate_shift
-        bra     BootParametersApplyTechnique
-BootParametersPlaybackFly3x:
-        lda     #RUNTIME_MENU_SCALE_WARP
+        beq     @Three
+        stz     runtime_menu_draft_scale
+        bra     @ApplyViewport
+@Three:
+        lda     #RUNTIME_MENU_SCALE_X3
         sta     runtime_menu_draft_scale
+@ApplyViewport:
         jsr     RequestFlyViewport
-BootParametersPlaybackFly:
-        stz     demo_mode
-        stz     demo_schedule
-        stz     demo_playback_rate_shift
-        bra     BootParametersApplyTechnique
-BootParametersPlaybackHalf:
-        lda     #$0001
-        sta     demo_mode
-        sta     demo_schedule
-        sta     demo_playback_rate_shift
-        bra     BootParametersApplyTechnique
-BootParametersPlaybackQuarter:
-        lda     #$0001
-        sta     demo_mode
-        sta     demo_schedule
-        lda     #DEMO_PLAYBACK_RATE_QUARTER
-        sta     demo_playback_rate_shift
 
 BootParametersApplyTechnique:
         lda     f:GSU_BOOT_PARAMETERS+10
@@ -309,45 +264,20 @@ BootParametersApplyTechnique:
 BootParametersApplyBrushes:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_BRUSHES
-        beq     BootParametersApplyFixedStepSample
+        beq     BootParametersApplyCoverage
         lda     f:GSU_BOOT_PARAMETERS+14
         and     #$00FF
         and     #BSP_BRUSH_DYNAMIC_REPLAY_SUPPORTED
         sta     dynamic_brushes_enabled
         sta     runtime_menu_draft_brushes
 
-BootParametersApplyFixedStepSample:
-        lda     f:GSU_BOOT_PARAMETERS+10
-        and     #BOOT_PARAMETERS_PRESENT_FIXED_STEP_SAMPLE
-        beq     BootParametersApplyCoverage
-        lda     f:GSU_BOOT_PARAMETERS+15
-        and     #$00FF
-        inc
-        sta     boot_fixed_step_sample
-
 BootParametersApplyCoverage:
         lda     f:GSU_BOOT_PARAMETERS+10
         and     #BOOT_PARAMETERS_PRESENT_COVERAGE
-        beq     BootParametersApplyOrderedSourcePose
+        beq     BootParametersPublishApplied
         lda     f:GSU_BOOT_PARAMETERS+16
         and     #$00FF
         sta     coverage_debug
-
-BootParametersApplyOrderedSourcePose:
-        lda     f:GSU_BOOT_PARAMETERS+10
-        and     #BOOT_PARAMETERS_PRESENT_ORDERED_SOURCE_POSE
-        beq     BootParametersApplyOrderedStride
-        lda     f:GSU_BOOT_PARAMETERS+18
-        inc
-        sta     boot_ordered_source_pose
-
-BootParametersApplyOrderedStride:
-        lda     f:GSU_BOOT_PARAMETERS+10
-        and     #BOOT_PARAMETERS_PRESENT_ORDERED_STRIDE
-        beq     BootParametersPublishApplied
-        lda     f:GSU_BOOT_PARAMETERS+17
-        and     #$00FF
-        sta     demo_ordered_pose_stride
 
 BootParametersPublishApplied:
         RW      a8
@@ -395,65 +325,59 @@ BootParametersDone:
         RW_forced a16i16
         rts
 
-; Seed an ordered restart at either an exact source row or a 3 Hz sample. The
-; one-based fields distinguish row/sample zero from an omitted request and are
-; consumed once.
-ApplyBootDemoCursor:
-        RW_assume a16i16
-        lda     boot_ordered_source_pose
-        beq     ApplyBootFixedStepSample
-        dec
-        sta     demo_next_pose
-        asl
-        sta     demo_timing_offset
-        lda     demo_next_pose
-        asl
-        sta     demo_offset
-        asl
-        asl
-        clc
-        adc     demo_offset
-        sta     demo_offset
-        rts
-ApplyBootFixedStepSample:
-        lda     boot_fixed_step_sample
-        beq     ApplyBootFixedStepSampleDone
-        stz     boot_fixed_step_sample
-        dec
-        tax
-        stz     demo_next_pose
-ApplyBootFixedStepSamplePoseLoop:
-        cpx     #0
-        beq     ApplyBootFixedStepSamplePoseReady
-        lda     demo_next_pose
-        clc
-        adc     #BSP_DEMO_ORDERED_POSE_STRIDE
-        sta     demo_next_pose
-        dex
-        bra     ApplyBootFixedStepSamplePoseLoop
-ApplyBootFixedStepSamplePoseReady:
-        asl
-        sta     demo_timing_offset
-        lda     demo_next_pose
-        asl
-        sta     demo_offset
-        asl
-        asl
-        clc
-        adc     demo_offset
-        sta     demo_offset
-ApplyBootFixedStepSampleDone:
-        rts
-
 ; Called once per VBlank before Controller-1 gameplay input. While open, the
-; menu consumes Controller 1 and the caller skips camera/demo progression.
+; menu consumes Controller 1 and the caller skips camera controls.
 UpdateRuntimeMenu:
-        RW_forced a16i16
+        RW_assume a16i16
+.if BSP_QUAKEC_GAMEPLAY
+        lda     quake_restart_pending
+        beq     :+
+        jmp     RuntimeMenuUpdateDone
+:
+.endif
         lda     runtime_menu_open
         bne     RuntimeMenuHandleOpen
+.ifdef PLAYABLE_WEAPON_OBJ
+        lda     weapon_obj_menu_pending
+        beq     :+
+        lda     SFX_inidisp
+        and     #$0080
+        ora     weapon_obj_presented_mask
+        beq     @Ready
+        rts
+@Ready:
+        stz     weapon_obj_menu_pending
+        bra     @Show
+:
+.endif
+.ifdef QC_QUEUED_INPUT
+        lda     qc_input_replay
+        bne     :+
+        jsr     GameplayLiveMenuInput
+        bcs     @Open
+        jmp     RuntimeMenuUpdateDone
+:
+.endif
         lda     z:SFX_joy1trig
         and     #JOY_START
+.ifdef PLAYABLE_WEAPON_OBJ
+        bne     @Open
+        rts
+.else
         beq     RuntimeMenuUpdateDone
+.endif
+@Open:
+.ifdef PLAYABLE_WEAPON_OBJ
+        lda     SFX_inidisp
+        and     #$0080
+        ora     weapon_obj_presented_mask
+        beq     @Show
+        lda     #1
+        sta     weapon_obj_menu_pending
+        jsr     InvalidateScheduledFrameIdentity
+        bra     RuntimeMenuUpdateDone
+@Show:
+.endif
         jsr     OpenRuntimeMenu
         bra     RuntimeMenuUpdateDone
 
@@ -483,7 +407,7 @@ RuntimeMenuCheckDown:
         inc
         cmp     #RUNTIME_MENU_ROW_COUNT
         bcc     :+
-        lda     #RUNTIME_MENU_ROW_RESUME
+        lda     #RUNTIME_MENU_FIRST_ROW
 :
         sta     runtime_menu_selection
         jsr     RefreshRuntimeMenuOAM
@@ -505,10 +429,16 @@ RuntimeMenuCheckActivate:
         and     #JOY_A
         beq     RuntimeMenuUpdateDone
         lda     runtime_menu_selection
+.ifndef PLAYABLE_MAP_ID
         beq     RuntimeMenuActivateClose
+.endif
         cmp     #RUNTIME_MENU_ROW_RESTART
         beq     RuntimeMenuActivateRestart
+.ifdef PLAYABLE_MAP_ID
+        jsr     PlayableMenuActivateValue
+.else
         jsr     RuntimeMenuNextValue
+.endif
         bra     RuntimeMenuUpdateDone
 RuntimeMenuActivateRestart:
         lda     #$0001
@@ -516,7 +446,7 @@ RuntimeMenuActivateRestart:
 RuntimeMenuActivateClose:
         jsr     CloseRuntimeMenu
 RuntimeMenuUpdateDone:
-        RW_forced a8i16
+        RW_assume a16i16
         rts
 
 OpenRuntimeMenu:
@@ -527,22 +457,58 @@ OpenRuntimeMenu:
         jsr     SyncRuntimeMenuDrafts
         stz     runtime_menu_selection
         stz     runtime_menu_restart_action
-        lda     video_tick
-        sec
-        sbc     demo_playhead_origin
-        dec
-        sta     runtime_menu_saved_playhead_tick
         lda     #$0001
         sta     runtime_menu_open
-        stz     warp_background_active
+.ifdef PLAYABLE_WEAPON_OBJ
+        stz     weapon_obj_oam_word
+        stz     status_hud_obj_blanked
+        RW      a8
+        lda     #objsel(VRAM_RUNTIME_MENU_OBJ_BASE, OBJ_8x8_16x16, 0)
+        sta     OBJSEL
+        lda     weapon_obj_menu_shadow_dirty
+        beq     :+
+        stz     weapon_obj_menu_shadow_dirty
+        stz     RuntimeMenuBuildRow+1
+        jsr     BuildRuntimeMenuOAM
+:
+        RW      a16
+.endif
         jsr     RefreshRuntimeMenuOAM
         RW      a8
-        lda     #tm(ON, OFF, OFF, OFF, ON)
+.ifdef PLAYABLE_MAP_ID
+        lda     SFX_inidisp
+        sta     runtime_menu_saved_inidisp
+        lda     #inidisp(ON, DISP_BRIGHTNESS_MAX)
+        sta     SFX_inidisp
+        stz     CGADD
+        lda     CGDATAREAD
+        sta     runtime_menu_saved_backdrop
+        lda     CGDATAREAD
+        and     #$7f
+        sta     runtime_menu_saved_backdrop+1
+        stz     HDMAEN
+        stz     TMW
+.endif
+        lda     #tm(OFF, OFF, OFF, OFF, ON)
         sta     TM
-        lda     #RUNTIME_MENU_COLOR_WINDOW_OPEN
+.ifdef PLAYABLE_MAP_ID
+        stz     CGADSUB
+        lda     #RUNTIME_MENU_COLOR_WINDOW_CLOSED
         sta     CGSWSEL
-        lda     #RUNTIME_MENU_COLOR_MATH
+        stz     CGADD
+        stz     CGDATA
+        stz     CGDATA
+.else
+        ; Pending demo uploads may still change CGRAM. Subtract white from
+        ; the backdrop only so those writes cannot color the menu background.
+        lda     #inidisp(ON, DISP_BRIGHTNESS_MAX)
+        sta     SFX_inidisp
+        lda     #$FF
+        sta     COLDATA
+        stz     CGSWSEL
+        lda     #RUNTIME_MENU_BLACK_BACKDROP
         sta     CGADSUB
+.endif
         RW_forced a16i16
         rts
 
@@ -558,46 +524,47 @@ CloseRuntimeMenu:
         stz     CGADSUB
         lda     #RUNTIME_MENU_COLOR_WINDOW_CLOSED
         sta     CGSWSEL
-        jsr     RefreshWarpBackground
+.ifdef PLAYABLE_MAP_ID
+        lda     runtime_menu_saved_inidisp
+        sta     SFX_inidisp
+        stz     CGADD
+        lda     runtime_menu_saved_backdrop
+        sta     CGDATA
+        lda     runtime_menu_saved_backdrop+1
+        sta     CGDATA
+.else
+        lda     #CDAT_RED | CDAT_GREEN | CDAT_BLUE
+        sta     COLDATA
+        ; If a hidden format upload is unfinished, keep its partial page
+        ; blank until the regular presentation path commits the new format.
+        lda     upload_active
+        beq     :+
+        lda     upload_format
+        cmp     presented_format
+        beq     :+
+        lda     #inidisp(OFF, DISP_BRIGHTNESS_MIN)
+        sta     SFX_inidisp
+:
+.endif
         RW_forced a16i16
+.ifdef PLAYABLE_WEAPON_OBJ
+        jsr     WeaponObjPresent
+.endif
         rts
 
 ; Synchronize the supported renderer draft fields before displaying the menu.
 SyncRuntimeMenuDrafts:
         RW_assume a16i16
-        lda     demo_mode
-        beq     @Fly
-        lda     demo_schedule
-        beq     @Ordered
-        lda     demo_playback_rate_shift
-        cmp     #DEMO_PLAYBACK_RATE_HALF
-        beq     @Half
-        cmp     #DEMO_PLAYBACK_RATE_QUARTER
-        beq     @Quarter
-        lda     #RUNTIME_MENU_PLAYBACK_REALTIME
-        bra     @PlaybackReady
-@Half:
-        lda     #RUNTIME_MENU_PLAYBACK_HALF
-        bra     @PlaybackReady
-@Quarter:
-        lda     #RUNTIME_MENU_PLAYBACK_QUARTER
-        bra     @PlaybackReady
-@Ordered:
-        lda     demo_ordered_pose_stride
-        cmp     #$0001
-        beq     @Ordered30Hz
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
-        bra     @PlaybackReady
-@Ordered30Hz:
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        bra     @PlaybackReady
-@Fly:
+.ifdef PLAYABLE_MAP_ID
+        lda     #PLAYABLE_MAP_ID
+        sta     runtime_menu_draft_map
+.endif
         lda     #RUNTIME_MENU_PLAYBACK_FLY
-@PlaybackReady:
         sta     runtime_menu_draft_playback
         jsr     SyncRuntimeMenuScaleDraft
         lda     technique
         sta     runtime_menu_draft_technique
+.ifndef PLAYABLE_MAP_ID
         cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE
         beq     @TexturedNone
         cmp     #RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP
@@ -617,13 +584,15 @@ SyncRuntimeMenuDrafts:
         lda     #RUNTIME_MENU_TEXTURES_ON
         sta     runtime_menu_draft_textures
 @RendererReady:
+.endif
         lda     dynamic_brushes_enabled
         sta     runtime_menu_draft_brushes
         lda     mdl_entities_enabled
         sta     runtime_menu_draft_entities
         rts
 
-; Compose the supported texture/lighting drafts into techniques 2, 4, or 7.
+; Compose the texture and lighting drafts into a renderer technique.
+.ifndef PLAYABLE_MAP_ID
 ComposeRuntimeMenuTechnique:
         RW_assume a16i16
         lda     runtime_menu_draft_textures
@@ -642,12 +611,41 @@ ComposeRuntimeMenuTechnique:
 @Store:
         sta     runtime_menu_draft_technique
         rts
+.else
+; Find the draft in display order. Unknown techniques show Full.
+RuntimeMenuRenderIndex:
+        RW_assume a16i16
+        ldx     #0
+        lda     runtime_menu_draft_technique
+@Search:
+        cmp     f:RuntimeMenuRenderTechniques,x
+        beq     @Done
+        inx
+        inx
+        cpx     #8
+        bcc     @Search
+        ldx     #0
+@Done:
+        rts
+
+StoreRuntimeMenuRender:
+        txa
+        and     #6
+        tax
+        lda     f:RuntimeMenuRenderTechniques,x
+        sta     runtime_menu_draft_technique
+        jmp     RefreshRuntimeMenuOAM
+
+.pushseg
+.segment "RODATA"
+RuntimeMenuRenderTechniques:
+        .word   RUNTIME_MENU_TECHNIQUE_TEXTURED_LIGHTMAP, RUNTIME_MENU_TECHNIQUE_FACE_COLORS
+        .word   RUNTIME_MENU_TECHNIQUE_TEXTURED_NONE, RUNTIME_MENU_TECHNIQUE_UNTEXTURED_LIGHTMAP
+.popseg
+.endif
 
 ; Public state application path for both the UI and host tooling:
-;   runtime_menu_draft_playback: 0 ordered 3 Hz, 1 real-time, 2 fly,
-;                                3 half real-time, 4 quarter real-time,
-;                                5 ordered 30 Hz
-;   runtime_menu_draft_technique: supported numeric technique 2, 4, or 7
+;   runtime_menu_draft_technique: 2, 3 (playable only), 4, or 7
 ;   runtime_menu_draft_textures: 0 off, 1 on
 ;   runtime_menu_draft_lighting: 0 None, 1 LightMap
 ;   runtime_menu_draft_brushes: 0 off, 1 on
@@ -655,139 +653,16 @@ ComposeRuntimeMenuTechnique:
 ; Set runtime_menu_restart_action for restart/recenter semantics.
 ApplyRuntimeMenuSelection:
         RW_forced a16i16
-        stz     runtime_menu_apply_flags
-        lda     runtime_menu_draft_playback
-        cmp     #RUNTIME_MENU_PLAYBACK_REALTIME
-        beq     @ApplyRealtime
-        cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
-        bne     :+
-        jmp     @ApplyFly
-:
-        cmp     #RUNTIME_MENU_PLAYBACK_FLY
-        bne     :+
-        jmp     @ApplyFly
-:
-        cmp     #RUNTIME_MENU_PLAYBACK_HALF
-        beq     @ApplyHalf
-        cmp     #RUNTIME_MENU_PLAYBACK_QUARTER
-        beq     @ApplyQuarter
-        cmp     #RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        beq     @ApplyOrdered30Hz
-
-@ApplyOrdered:
-        ldx     #BSP_DEMO_ORDERED_POSE_STRIDE
-        bra     @ApplyOrderedStride
-@ApplyOrdered30Hz:
-        ldx     #$0001
-@ApplyOrderedStride:
-        txa
-        cmp     demo_ordered_pose_stride
-        beq     @CheckOrderedPlayback
-        sta     demo_ordered_pose_stride
-        inc     runtime_menu_apply_flags
-@CheckOrderedPlayback:
-        lda     demo_mode
-        cmp     #$0001
-        bne     @OrderedChanged
-        lda     demo_schedule
-        bne     @OrderedChanged
-        lda     demo_playback_rate_shift
-        beq     @PlaybackApplied
-@OrderedChanged:
-        lda     #$0001
-        sta     demo_mode
-        stz     demo_schedule
-        stz     demo_playback_rate_shift
-        inc     runtime_menu_apply_flags
-        bra     @PlaybackApplied
-
-@ApplyRealtime:
-        ldx     #DEMO_PLAYBACK_RATE_REALTIME
-        bra     @ApplyRealtimeRate
-@ApplyHalf:
-        ldx     #DEMO_PLAYBACK_RATE_HALF
-        bra     @ApplyRealtimeRate
-@ApplyQuarter:
-        ldx     #DEMO_PLAYBACK_RATE_QUARTER
-@ApplyRealtimeRate:
-        lda     demo_mode
-        cmp     #$0001
-        bne     @RealtimeChanged
-        lda     demo_schedule
-        cmp     #$0001
-        bne     @RealtimeChanged
-        txa
-        cmp     demo_playback_rate_shift
-        beq     @PlaybackApplied
-@RealtimeChanged:
-        lda     #$0001
-        sta     demo_mode
-        sta     demo_schedule
-        txa
-        sta     demo_playback_rate_shift
-        inc     runtime_menu_apply_flags
-        bra     @PlaybackApplied
-
-@ApplyFly:
-        lda     demo_mode
-        beq     @PlaybackApplied
-@FlyChanged:
-        jsr     SeedFlySkyClockFromDemo
-        jsr     SeedFlyAliasClockFromDemo
-        jsr     SeedFlyTurbulenceClockFromDemo
-        stz     demo_mode
-        inc     runtime_menu_apply_flags
-
-@PlaybackApplied:
         lda     runtime_menu_restart_action
-        bne     @RestartOrRecenter
-        lda     runtime_menu_apply_flags
-        beq     @PreserveRealtimeClock
-        lda     demo_mode
-        beq     @EnteredFly
-        jsr     RestartDemoPlayback
-        bra     @ApplyRenderer
-@EnteredFly:
-        inc     control_revision
-        jsr     InvalidateScheduledFrameIdentity
-        bra     @ApplyRenderer
-
-@PreserveRealtimeClock:
-        lda     runtime_menu_open
         beq     @ApplyRenderer
-        lda     demo_mode
-        beq     @ApplyRenderer
-        lda     demo_schedule
-        beq     @ApplyRenderer
-        lda     video_tick
-        sec
-        sbc     runtime_menu_saved_playhead_tick
-        sta     demo_playhead_origin
-        bra     @ApplyRenderer
-
-@RestartOrRecenter:
         stz     runtime_menu_restart_action
-        lda     demo_mode
-        beq     @RecenterFlyCamera
-        jsr     RestartDemoPlayback
-        bra     @ApplyRenderer
-@RecenterFlyCamera:
-        lda     #BSP_START_YAW_INDEX*CAMERA_ANGLE_LEGACY_STEP
-        sta     yaw_index
-        stz     pitch_level
-        lda     #BSP_WORLD_START_X_Q8
-        sta     camera_x
-        lda     #BSP_WORLD_START_Y_Q8
-        sta     camera_y
-        lda     #BSP_WORLD_START_Z_Q8
-        sta     camera_z
-        lda     #$FFFF
-        sta     monster_camera_index
-        inc     control_revision
-        jsr     InvalidateScheduledFrameIdentity
+.if BSP_QUAKEC_GAMEPLAY
+        jsr     QueueQuakeRestart
+.else
+        RecenterFlyCameraPose
+.endif
 
 @ApplyRenderer:
-        jsr     ApplyRuntimeMenuScale
         jsr     RequestFlyViewport
         lda     runtime_menu_draft_technique
         cmp     technique
@@ -805,7 +680,7 @@ ApplyRuntimeMenuSelection:
         jsr     InvalidateDynamicBrushRenderState
 @ApplyEntities:
         lda     runtime_menu_draft_entities
-        and     #BSP_ALIAS_ENTITY_SUPPORTED
+        and     #BSP_RENDER_ENTITIES_SUPPORTED
         cmp     mdl_entities_enabled
         beq     @ApplyDone
         sta     mdl_entities_enabled
@@ -836,10 +711,15 @@ RuntimeMenuPreviousValue:
         lda     runtime_menu_selection
         cmp     #RUNTIME_MENU_ROW_PLAYBACK
         beq     @Playback
+.ifdef PLAYABLE_MAP_ID
+        cmp     #RUNTIME_MENU_ROW_RENDER
+        beq     @Render
+.else
         cmp     #RUNTIME_MENU_ROW_TEXTURES
         beq     @Textures
         cmp     #RUNTIME_MENU_ROW_LIGHTING
         beq     @Lighting
+.endif
         cmp     #RUNTIME_MENU_ROW_BRUSHES
         beq     @Brushes
         cmp     #RUNTIME_MENU_ROW_ENTITIES
@@ -848,18 +728,36 @@ RuntimeMenuPreviousValue:
         bne     :+
         jmp     PreviousRuntimeMenuScale
 :
+.ifdef PLAYABLE_MAP_ID
+        cmp     #RUNTIME_MENU_ROW_ALWAYS_RUN
+        bne     :+
+        jmp     RuntimeMenuToggleAlwaysRun
+:
+.endif
+.if BSP_QUAKEC_GAMEPLAY
+        cmp     #RUNTIME_MENU_ROW_SKILL
+        bne     :+
+        lda     quake_skill_selected
+        dec
+        and     #3
+        sta     quake_skill_selected
+        jmp     RefreshRuntimeMenuOAM
+:
+.endif
         rts
 @Playback:
-        lda     runtime_menu_draft_playback
-        cmp     #RUNTIME_MENU_PLAYBACK_COUNT
-        bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
-:
-        asl
-        tax
-        lda     f:RuntimeMenuPlaybackPrevious,x
-        sta     runtime_menu_draft_playback
-        bra     @Refresh
+.ifdef PLAYABLE_MAP_ID
+        jmp     PlayableMenuPreviousMap
+.else
+        rts
+.endif
+.ifdef PLAYABLE_MAP_ID
+@Render:
+        jsr     RuntimeMenuRenderIndex
+        dex
+        dex
+        jmp     StoreRuntimeMenuRender
+.else
 @Textures:
         lda     runtime_menu_draft_textures
         bne     :+
@@ -884,6 +782,7 @@ RuntimeMenuPreviousValue:
         sta     runtime_menu_draft_lighting
         jsr     ComposeRuntimeMenuTechnique
         bra     @Refresh
+.endif
 @Brushes:
         lda     runtime_menu_draft_brushes
         eor     #$0001
@@ -893,7 +792,7 @@ RuntimeMenuPreviousValue:
 @Entities:
         lda     runtime_menu_draft_entities
         eor     #$0001
-        and     #BSP_ALIAS_ENTITY_SUPPORTED
+        and     #BSP_RENDER_ENTITIES_SUPPORTED
         sta     runtime_menu_draft_entities
         bra     @Refresh
 @Refresh:
@@ -905,10 +804,15 @@ RuntimeMenuNextValue:
         lda     runtime_menu_selection
         cmp     #RUNTIME_MENU_ROW_PLAYBACK
         beq     @NextPlayback
+.ifdef PLAYABLE_MAP_ID
+        cmp     #RUNTIME_MENU_ROW_RENDER
+        beq     @NextRender
+.else
         cmp     #RUNTIME_MENU_ROW_TEXTURES
         beq     @NextTextures
         cmp     #RUNTIME_MENU_ROW_LIGHTING
         beq     @NextLighting
+.endif
         cmp     #RUNTIME_MENU_ROW_BRUSHES
         beq     @NextBrushes
         cmp     #RUNTIME_MENU_ROW_ENTITIES
@@ -917,18 +821,36 @@ RuntimeMenuNextValue:
         bne     :+
         jmp     NextRuntimeMenuScale
 :
+.ifdef PLAYABLE_MAP_ID
+        cmp     #RUNTIME_MENU_ROW_ALWAYS_RUN
+        bne     :+
+        jmp     RuntimeMenuToggleAlwaysRun
+:
+.endif
+.if BSP_QUAKEC_GAMEPLAY
+        cmp     #RUNTIME_MENU_ROW_SKILL
+        bne     :+
+        lda     quake_skill_selected
+        inc
+        and     #3
+        sta     quake_skill_selected
+        jmp     RefreshRuntimeMenuOAM
+:
+.endif
         rts
 @NextPlayback:
-        lda     runtime_menu_draft_playback
-        cmp     #RUNTIME_MENU_PLAYBACK_COUNT
-        bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
-:
-        asl
-        tax
-        lda     f:RuntimeMenuPlaybackNext,x
-        sta     runtime_menu_draft_playback
-        bra     @NextRefresh
+.ifdef PLAYABLE_MAP_ID
+        jmp     PlayableMenuNextMap
+.else
+        rts
+.endif
+.ifdef PLAYABLE_MAP_ID
+@NextRender:
+        jsr     RuntimeMenuRenderIndex
+        inx
+        inx
+        jmp     StoreRuntimeMenuRender
+.else
 @NextTextures:
         lda     runtime_menu_draft_textures
         inc
@@ -955,6 +877,7 @@ RuntimeMenuNextValue:
         sta     runtime_menu_draft_lighting
         jsr     ComposeRuntimeMenuTechnique
         bra     @NextRefresh
+.endif
 @NextBrushes:
         lda     runtime_menu_draft_brushes
         eor     #$0001
@@ -964,291 +887,62 @@ RuntimeMenuNextValue:
 @NextEntities:
         lda     runtime_menu_draft_entities
         eor     #$0001
-        and     #BSP_ALIAS_ENTITY_SUPPORTED
+        and     #BSP_RENDER_ENTITIES_SUPPORTED
         sta     runtime_menu_draft_entities
         bra     @NextRefresh
 @NextRefresh:
         jsr     RefreshRuntimeMenuOAM
         rts
 
-; Static OAM positions and labels are built once before display is enabled.
-; Glyph tiles use transparent color zero, leaving the paused scene visible.
-BuildRuntimeMenuOAM:
-        RW_forced a8i16
-        OAM_init RuntimeMenuOAM, 0, $F0, 0
-        stz     RuntimeMenuBuildRow
-        ldx     #$0000
-        ldy     #$0000
-@Row:
-        lda     RuntimeMenuBuildRow
-        asl
-        asl
-        asl
-        clc
-        adc     #RUNTIME_MENU_Y
-        sta     RuntimeMenuBuildY
-        lda     #RUNTIME_MENU_X
-        sta     RuntimeMenuBuildX
-        lda     #RUNTIME_MENU_COLUMNS
-        sta     RuntimeMenuBuildColumns
-@Column:
-        lda     RuntimeMenuBuildX
-        sta     a:RuntimeMenuOAM+0,y
-        lda     RuntimeMenuBuildY
-        sta     a:RuntimeMenuOAM+1,y
-        lda     f:RuntimeMenuText,x
-        sec
-        sbc     #RUNTIME_MENU_ASCII_FIRST
-        clc
-        adc     #.lobyte(RUNTIME_MENU_TILE_BASE)
-        sta     a:RuntimeMenuOAM+2,y
-        lda     #RUNTIME_MENU_OBJ_ATTR
-        sta     a:RuntimeMenuOAM+3,y
-        inx
-        iny
-        iny
-        iny
-        iny
-        lda     RuntimeMenuBuildX
-        clc
-        adc     #$08
-        sta     RuntimeMenuBuildX
-        dec     RuntimeMenuBuildColumns
-        bne     @Column
-        inc     RuntimeMenuBuildRow
-        lda     RuntimeMenuBuildRow
-        cmp     #RUNTIME_MENU_ROW_COUNT
-        bne     @Row
-        jsr     PatchRuntimeMenuOAM
-        RW_forced a8i16
-        rts
+.include "RuntimeMenuOAM.s"
 
-RefreshRuntimeMenuOAM:
-        RW_forced a8i16
-        jsr     PatchRuntimeMenuOAM
-        OAM_memcpy RuntimeMenuOAM
-        RW_forced a16i16
-        rts
-
-PatchRuntimeMenuOAM:
-        RW_forced a8i16
-        lda     #RUNTIME_MENU_TILE_SPACE
-        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 0) + 2
-        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 1) + 2
-        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 2) + 2
-        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 3) + 2
-        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 4) + 2
-        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 5) + 2
-        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 6) + 2
-        sta     a:RuntimeMenuOAM + (RUNTIME_MENU_ROW_BYTES * 7) + 2
-        RW      a16
-        lda     runtime_menu_selection
-        cmp     #RUNTIME_MENU_ROW_PLAYBACK
-        beq     @CursorPlayback
-        cmp     #RUNTIME_MENU_ROW_TEXTURES
-        beq     @CursorTextures
-        cmp     #RUNTIME_MENU_ROW_LIGHTING
-        beq     @CursorLighting
-        cmp     #RUNTIME_MENU_ROW_BRUSHES
-        beq     @CursorBrushes
-        cmp     #RUNTIME_MENU_ROW_ENTITIES
-        beq     @CursorEntities
-        cmp     #RUNTIME_MENU_ROW_SCALE
-        beq     @CursorScale
-        cmp     #RUNTIME_MENU_ROW_RESTART
-        beq     @CursorRestart
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_RESUME) + 2
-        bra     @CursorReady
-@CursorPlayback:
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_PLAYBACK) + 2
-        bra     @CursorReady
-@CursorTextures:
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_TEXTURES) + 2
-        bra     @CursorReady
-@CursorLighting:
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_LIGHTING) + 2
-        bra     @CursorReady
-@CursorBrushes:
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_BRUSHES) + 2
-        bra     @CursorReady
-@CursorEntities:
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_ENTITIES) + 2
-        bra     @CursorReady
-@CursorScale:
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_SCALE) + 2
-        bra     @CursorReady
-@CursorRestart:
-        ldx     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_RESTART) + 2
-@CursorReady:
-        RW      a8
-        lda     #RUNTIME_MENU_TILE_CURSOR
-        sta     a:RuntimeMenuOAM,x
-
-        RW      a16
-        lda     runtime_menu_draft_playback
-        cmp     #RUNTIME_MENU_PLAYBACK_COUNT
-        bcc     :+
-        lda     #RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
-:
-        asl
-        asl
-        asl
-        asl
-        tax
-        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_PLAYBACK) + (RUNTIME_MENU_PLAYBACK_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
-        RW      a8
-        lda     #RUNTIME_MENU_PLAYBACK_VALUE_BYTES
-        sta     RuntimeMenuBuildColumns
-@PlaybackValue:
-        lda     f:RuntimeMenuPlaybackValues,x
-        sec
-        sbc     #RUNTIME_MENU_ASCII_FIRST
-        clc
-        adc     #.lobyte(RUNTIME_MENU_TILE_BASE)
-        sta     a:RuntimeMenuOAM,y
-        inx
-        iny
-        iny
-        iny
-        iny
-        dec     RuntimeMenuBuildColumns
-        bne     @PlaybackValue
-
-        RW      a16
-        lda     runtime_menu_draft_textures
-        cmp     #RUNTIME_MENU_TEXTURES_COUNT
-        bcc     :+
-        lda     #RUNTIME_MENU_TEXTURES_OFF
-:
-        asl
-        asl
-        asl
-        tax
-        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_TEXTURES) + (RUNTIME_MENU_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
-        RW      a8
-        lda     #RUNTIME_MENU_VALUE_BYTES
-        sta     RuntimeMenuBuildColumns
-@TexturesValue:
-        lda     f:RuntimeMenuTextureValues,x
-        sec
-        sbc     #RUNTIME_MENU_ASCII_FIRST
-        clc
-        adc     #.lobyte(RUNTIME_MENU_TILE_BASE)
-        sta     a:RuntimeMenuOAM,y
-        inx
-        iny
-        iny
-        iny
-        iny
-        dec     RuntimeMenuBuildColumns
-        bne     @TexturesValue
-
-        RW      a16
-        lda     runtime_menu_draft_lighting
-        and     #$0007
-        asl
-        asl
-        asl
-        tax
-        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_LIGHTING) + (RUNTIME_MENU_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
-        RW      a8
-        lda     #RUNTIME_MENU_VALUE_BYTES
-        sta     RuntimeMenuBuildColumns
-@LightingValue:
-        lda     f:RuntimeMenuLightingValues,x
-        sec
-        sbc     #RUNTIME_MENU_ASCII_FIRST
-        clc
-        adc     #.lobyte(RUNTIME_MENU_TILE_BASE)
-        sta     a:RuntimeMenuOAM,y
-        inx
-        iny
-        iny
-        iny
-        iny
-        dec     RuntimeMenuBuildColumns
-        bne     @LightingValue
-
-        RW      a16
-        lda     runtime_menu_draft_brushes
-        and     #$0001
-        asl
-        asl
-        asl
-        tax
-        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_BRUSHES) + (RUNTIME_MENU_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
-        RW      a8
-        lda     #RUNTIME_MENU_VALUE_BYTES
-        sta     RuntimeMenuBuildColumns
-@BrushesValue:
-        lda     f:RuntimeMenuToggleValues,x
-        sec
-        sbc     #RUNTIME_MENU_ASCII_FIRST
-        clc
-        adc     #.lobyte(RUNTIME_MENU_TILE_BASE)
-        sta     a:RuntimeMenuOAM,y
-        inx
-        iny
-        iny
-        iny
-        iny
-        dec     RuntimeMenuBuildColumns
-        bne     @BrushesValue
-
-        RW      a16
-        lda     runtime_menu_draft_entities
-        and     #$0001
-        asl
-        asl
-        asl
-        tax
-        ldy     #(RUNTIME_MENU_ROW_BYTES * RUNTIME_MENU_ROW_ENTITIES) + (RUNTIME_MENU_VALUE_COLUMN * RUNTIME_MENU_ENTRY_BYTES) + 2
-        RW      a8
-        lda     #RUNTIME_MENU_VALUE_BYTES
-        sta     RuntimeMenuBuildColumns
-@EntitiesValue:
-        lda     f:RuntimeMenuToggleValues,x
-        sec
-        sbc     #RUNTIME_MENU_ASCII_FIRST
-        clc
-        adc     #.lobyte(RUNTIME_MENU_TILE_BASE)
-        sta     a:RuntimeMenuOAM,y
-        inx
-        iny
-        iny
-        iny
-        iny
-        dec     RuntimeMenuBuildColumns
-        bne     @EntitiesValue
-
-@PatchDone:
-        jsr     PatchRuntimeMenuScaleOAM
-        RW_forced a8i16
-        rts
-
-; Closed-menu Controller 1. Exact fly layout:
-;   X/B forward/back, Y/A strafe, L/R monster placements, D-pad look.
+; Closed-menu controller and mouse look.
 UpdateCameraControls:
         RW_forced a16i16
+.if .defined(QC_QUEUED_INPUT) .and .defined(PLAYABLE_RECORDED_TAPE)
+        lda     qc_input_replay
+        bpl     :+
+        rts
+:
+.endif
         stz     control_dirty
         inc     control_divider
         lda     #CAMERA_ANGLE_LEGACY_STEP
         sta     fly_look_step_limit
+.ifndef QC_QUEUED_INPUT
         lda     fly_playback_mode
         cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
         bne     :+
         lsr     fly_look_step_limit
 :
+.endif
         lda     z:SFX_joy1cont
         sta     camera_input_buttons
-        lda     demo_mode
+.ifdef QC_QUEUED_INPUT
+        ldx     qc_input_replay
         bne     :+
-        jsr     ReadFlyMouseControls
+        jsr     MapLiveGameplayButtons
 :
+.endif
+        jsr     ReadFlyMouseControls
 
         lda     runtime_menu_release_gate
         beq     @TechniqueToggle
         lda     camera_input_buttons
+.ifdef QC_QUEUED_INPUT
+        ora     z:SFX_joy1cont
+  .ifdef PLAYABLE_RECORDED_TAPE
+        pha
+        lda     qc_input_replay
+        bit     #QC_INPUT_RECORDED_TAPE
+        beq     :+
+        pla
+        and     #$FFFF-JOY_SELECT
+        bra     :++
+:       pla
+:
+  .endif
+.endif
         beq     :+
         jmp     @Return
 :
@@ -1256,6 +950,25 @@ UpdateCameraControls:
         jmp     @Return
 
 @TechniqueToggle:
+.ifdef QC_QUEUED_INPUT
+        lda     qc_input_replay
+  .ifdef PLAYABLE_RECORDED_TAPE
+        cmp     #1                     ; Legacy timing tape SELECT changes technique.
+        bne     @AngleControls
+  .else
+        beq     @AngleControls
+  .endif
+.endif
+.if BSP_QUAKEC_GAMEPLAY && !.defined(QC_QUEUED_INPUT)
+        lda     f:ShotgunPlayer+QC_FIELD_HEALTH
+        beq     @CheckRespawn
+        bpl     @TechniqueInput
+@CheckRespawn:
+        jsr     TryQuakeRespawn
+        bcc     @TechniqueInput
+        jmp     @Return
+@TechniqueInput:
+.endif
         lda     z:SFX_joy1trig
         and     #JOY_SELECT
         beq     @AngleControls
@@ -1276,35 +989,29 @@ UpdateCameraControls:
         inc     control_dirty
 
 @AngleControls:
-        lda     demo_mode
-        beq     @ManualControls
-        jmp     @Clamp
-@ManualControls:
-        lda     z:SFX_joy1trig
-        and     #JOY_L
-        beq     @NextMonsterCamera
-        jsr     SelectPreviousMonsterCamera
-        jmp     @Clamp
-@NextMonsterCamera:
-        lda     z:SFX_joy1trig
-        and     #JOY_R
-        beq     @AngleStep
-        jsr     SelectNextMonsterCamera
-        jmp     @Clamp
-
 @AngleStep:
+.ifndef QC_QUEUED_INPUT
         lda     fly_playback_mode
         cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
         beq     @ApplyAngles
+.endif
         lda     control_divider
         and     #$0001
         beq     :+
-        jmp     @MovementControls
+        jmp     @Clamp
 :
 @ApplyAngles:
         ; 3x takes half-sized joypad/capped mouse steps every video frame;
         ; 2x retains the old alternate-frame cadence and the same turn speed.
         ldx     camera_input_buttons
+.ifdef QC_QUEUED_INPUT
+        ; Live pad look is sampled in the foreground. Only accumulate mouse
+        ; motion here so old held turns cannot survive release or reversal.
+        lda     qc_input_replay
+        bne     :+
+        ldx     #0
+:
+.endif
         txa
         and     #JOY_LEFT
         beq     @YawRight
@@ -1323,12 +1030,29 @@ UpdateCameraControls:
 @YawMouse:
         lda     fly_mouse_yaw_step
 @YawApply:
+.if BSP_QUAKEC_GAMEPLAY
+        eor     #$FFFF                 ; Stock right looks toward decreasing yaw.
+        inc
+.endif
+.ifdef QC_QUEUED_INPUT
+        ldy     qc_sample_pending
+        bne     @PitchUp
+        clc
+        adc     qc_sample_yaw
+        ldy     qc_input_replay
+        bne     :+
+        ora     #$0000                 ; Restore N from the signed sum after LDY.
+        jsr     ClampFlyMouseDelta
+:
+        sta     qc_sample_yaw
+.else
         beq     @PitchUp
         clc
         adc     yaw_index
         and     #CAMERA_ANGLE_MASK
         sta     yaw_index
         inc     control_dirty
+.endif
 @PitchUp:
         txa
         and     #JOY_UP
@@ -1348,7 +1072,19 @@ UpdateCameraControls:
 @PitchMouse:
         lda     fly_mouse_pitch_step
 @PitchApply:
-        beq     @MovementControls
+.ifdef QC_QUEUED_INPUT
+        ldy     qc_sample_pending
+        bne     @Clamp
+        clc
+        adc     qc_sample_pitch
+        ldy     qc_input_replay
+        bne     :+
+        ora     #$0000
+        jsr     ClampFlyMouseDelta
+:
+        sta     qc_sample_pitch
+.else
+        beq     @Clamp
         clc
         adc     pitch_level
         bmi     @PitchNegative
@@ -1362,124 +1098,10 @@ UpdateCameraControls:
         lda     #CAMERA_PITCH_MIN
 @PitchStore:
         cmp     pitch_level
-        beq     @MovementControls
+        beq     @Clamp
         sta     pitch_level
         inc     control_dirty
-
-@MovementControls:
-        lda     camera_input_buttons
-        and     #(JOY_X | JOY_B | JOY_Y | JOY_A)
-        bne     :+
-        jmp     @Clamp
-:
-        ; Preserve non-movement changes separately. A completely rejected
-        ; collision attempt is not a new camera command, while an angle or
-        ; technique change from the same input tick still must publish.
-        lda     control_dirty
-        pha
-        lda     camera_x
-        sta     camera_collision_previous_x
-        lda     camera_y
-        sta     camera_collision_previous_y
-        lda     camera_z
-        sta     camera_collision_previous_z
-
-        lda     camera_input_buttons
-        and     #(JOY_X | JOY_B)
-        beq     @StrafeBasis
-        jsr     BuildCameraForwardVector
-
-        lda     camera_input_buttons
-        and     #JOY_X
-        beq     @Backward
-        lda     camera_x
-        clc
-        adc     camera_forward_x
-        sta     camera_x
-        lda     camera_y
-        clc
-        adc     camera_forward_y
-        sta     camera_y
-        lda     camera_z
-        clc
-        adc     camera_forward_z
-        sta     camera_z
-        inc     control_dirty
-@Backward:
-        lda     camera_input_buttons
-        and     #JOY_B
-        beq     @StrafeBasis
-        lda     camera_x
-        sec
-        sbc     camera_forward_x
-        sta     camera_x
-        lda     camera_y
-        sec
-        sbc     camera_forward_y
-        sta     camera_y
-        lda     camera_z
-        sec
-        sbc     camera_forward_z
-        sta     camera_z
-        inc     control_dirty
-
-@StrafeBasis:
-        lda     yaw_index
-        and     #CAMERA_ANGLE_MASK
-        asl
-        tax
-
-@StrafeLeft:
-        lda     camera_input_buttons
-        and     #JOY_Y
-        beq     @StrafeRight
-        lda     camera_x
-        clc
-        adc     f:CameraMoveSin,x
-        sta     camera_x
-        lda     camera_y
-        sec
-        sbc     f:CameraMoveCos,x
-        sta     camera_y
-        inc     control_dirty
-@StrafeRight:
-        lda     camera_input_buttons
-        and     #JOY_A
-        beq     @ResolveMovement
-        lda     camera_x
-        sec
-        sbc     f:CameraMoveSin,x
-        sta     camera_x
-        lda     camera_y
-        clc
-        adc     f:CameraMoveCos,x
-        sta     camera_y
-        inc     control_dirty
-
-@ResolveMovement:
-        jsr     ClampCamera
-        jsr     ResolveFlyCameraCollision
-        lda     camera_x
-        cmp     camera_collision_previous_x
-        bne     @MovementChanged
-        lda     camera_y
-        cmp     camera_collision_previous_y
-        bne     @MovementChanged
-        lda     camera_z
-        cmp     camera_collision_previous_z
-        bne     @MovementChanged
-        pla
-        sta     control_dirty
-        bra     @MovementResolved
-@MovementChanged:
-        pla
-        inc
-        sta     control_dirty
-        jsr     AccumulateFlyMode7Movement
-@MovementResolved:
-        lda     control_dirty
-        beq     @Return
-        bra     @PublishDirty
+.endif
 
 @Clamp:
         lda     control_dirty
@@ -1489,123 +1111,6 @@ UpdateCameraControls:
         inc     control_revision
 @Return:
         RW_forced a8i16
-        rts
-
-; L/R cycle the BSP entity-order monster viewpoints at the default player eye
-; height. The invalid startup index makes first R select zero and first L last.
-SelectNextMonsterCamera:
-        RW_assume a16i16
-        lda     monster_camera_index
-        inc
-        cmp     #BSP_MONSTER_CAMERA_COUNT
-        bcc     @StoreNext
-        lda     #$0000
-@StoreNext:
-        sta     monster_camera_index
-        bra     LoadMonsterCamera
-
-SelectPreviousMonsterCamera:
-        RW_assume a16i16
-        lda     monster_camera_index
-        cmp     #BSP_MONSTER_CAMERA_COUNT
-        bcs     @Wrap
-        cmp     #$0000
-        beq     @Wrap
-        dec
-        bra     @StorePrevious
-@Wrap:
-        lda     #BSP_MONSTER_CAMERA_COUNT-1
-@StorePrevious:
-        sta     monster_camera_index
-
-LoadMonsterCamera:
-        asl
-        asl
-        asl
-        tax
-        lda     f:QuakeBSPMonsterCameras+0,x
-        sta     camera_x
-        lda     f:QuakeBSPMonsterCameras+2,x
-        sta     camera_y
-        lda     f:QuakeBSPMonsterCameras+4,x
-        sta     camera_z
-        lda     f:QuakeBSPMonsterCameras+6,x
-        asl
-        asl
-        asl
-        sta     yaw_index
-        stz     pitch_level
-        inc     control_dirty
-        rts
-
-; Build the camera's full forward vector at the existing Q8 step length.
-; Horizontal yaw components and pitch cosine are both Q5; Z is already Q5.
-BuildCameraForwardVector:
-        RW_assume a16i16
-        lda     pitch_level
-        and     #CAMERA_ANGLE_MASK
-        asl
-        tax
-        lda     f:CameraMoveCos,x
-        sta     camera_forward_pitch_cos
-        lda     f:CameraMoveSin,x
-        sta     camera_forward_z
-
-        lda     yaw_index
-        and     #CAMERA_ANGLE_MASK
-        asl
-        tax
-        lda     f:CameraMoveCos,x
-        tax
-        jsr     ScaleCameraForwardHorizontal
-        sta     camera_forward_x
-
-        lda     yaw_index
-        and     #CAMERA_ANGLE_MASK
-        asl
-        tax
-        lda     f:CameraMoveSin,x
-        tax
-        jsr     ScaleCameraForwardHorizontal
-        sta     camera_forward_y
-        rts
-
-; Signed round-to-nearest of X * pitchCos / 32. |X| <= 32; the clamped
-; pitch keeps pitchCos in 0..32. Use the S-CPU's unsigned multiplier:
-; M7A/M7B belong to the live FLY3X display, including between page flips.
-ScaleCameraForwardHorizontal:
-        RW_assume a16i16
-        txa
-        bpl     @Magnitude
-        neg
-@Magnitude:
-        RW      a8
-        sta     WRMPYA
-        lda     camera_forward_pitch_cos
-        sta     WRMPYB
-        RW      a16
-        ; REP + TXA + branch + LDA delay the read past the 8-cycle product.
-        txa
-        bpl     @Positive
-        lda     RDMPYL
-        clc
-        adc     #CAMERA_FORWARD_SCALE_ROUND
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        neg
-        rts
-@Positive:
-        lda     RDMPYL
-        clc
-        adc     #CAMERA_FORWARD_SCALE_ROUND
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
         rts
 
 ClampCamera:
@@ -1651,256 +1156,16 @@ ClampCamera:
 @ClampDone:
         rts
 
-; Resolve a combined fly step one axis at a time. Every accepted intermediate
-; remains non-solid, so a blocked normal component still preserves tangent
-; movement along the wall. The candidate has already passed the outer clamp.
-ResolveFlyCameraCollision:
-        RW_assume a16i16
-        stz     camera_collision_rejected
-        lda     camera_x
-        sta     camera_collision_candidate_x
-        lda     camera_y
-        sta     camera_collision_candidate_y
-        lda     camera_z
-        sta     camera_collision_candidate_z
-
-        lda     camera_collision_previous_x
-        sta     camera_x
-        lda     camera_collision_previous_y
-        sta     camera_y
-        lda     camera_collision_previous_z
-        sta     camera_z
-
-        lda     camera_collision_candidate_x
-        cmp     camera_collision_previous_x
-        beq     @TryY
-        sta     camera_x
-        jsr     CameraPointIsSolid
-        bcc     @TryY
-        lda     camera_collision_previous_x
-        sta     camera_x
-        inc     camera_collision_rejected
-@TryY:
-        lda     camera_collision_candidate_y
-        cmp     camera_collision_previous_y
-        beq     @TryZ
-        sta     camera_y
-        jsr     CameraPointIsSolid
-        bcc     @TryZ
-        lda     camera_collision_previous_y
-        sta     camera_y
-        inc     camera_collision_rejected
-@TryZ:
-        lda     camera_collision_candidate_z
-        cmp     camera_collision_previous_z
-        beq     @Done
-        sta     camera_z
-        jsr     CameraPointIsSolid
-        bcc     @Done
-        lda     camera_collision_previous_z
-        sta     camera_z
-        inc     camera_collision_rejected
-@Done:
-        lda     camera_collision_rejected
-        beq     :+
-        inc     camera_collision_reject_counter
-:
-        rts
-
-; Multiply A by a generated layout constant without a general 16-bit loop.
-; Binary Horner expansion needs at most seven shifts for the current layout.
-; The collision address products are all proven to fit an unsigned word.
-.macro COLLISION_MULTIPLY_CONSTANT Factor
-        .assert Factor > 0 .and Factor <= $FFFF, error, "Invalid collision multiplier"
-        sta     camera_collision_cell
-        .repeat 15, Bit
-        .if (Factor >> (15-Bit)) <> 0
-        asl
-        .if (Factor & (1 << (14-Bit))) <> 0
-        clc
-        adc     camera_collision_cell
-        .endif
-        .endif
-        .endrepeat
-.endmacro
-
-; Return carry set when the current camera's packed integer coordinate is in
-; BSP solid leaf zero. The generated packed XY map selects a bit-packed Z
-; column, replacing a BSP walk with two bounded WRAM reads.
-; The boot copy is necessary because the GSU can own cartridge ROM during NMI.
-CameraPointIsSolid:
-        RW_assume a16i16
-        lda     camera_z
-        xba
-        and     #$00FF
-        sec
-        sbc     #.lobyte(BSP_COLLISION_MIN_Z)
-        and     #$00FF
-        sta     camera_collision_z_byte
-
-        lda     camera_x
-        xba
-        and     #$00FF
-        sec
-        sbc     #.lobyte(BSP_COLLISION_MIN_X)
-        and     #$00FF
-        sta     camera_collision_x_index
-        lda     camera_y
-        xba
-        and     #$00FF
-        sec
-        sbc     #.lobyte(BSP_COLLISION_MIN_Y)
-        and     #$00FF
-        sta     camera_collision_y_index
-
-        ; cell = y*generated_width + x.
-        lda     camera_collision_y_index
-        COLLISION_MULTIPLY_CONSTANT BSP_COLLISION_X_COUNT
-        clc
-        adc     camera_collision_x_index
-        sta     camera_collision_cell
-
-        ; Split cell into q*8+r before multiplying by the generated bit width.
-        ; This keeps the intermediate below 64 KiB even when the bit offset
-        ; itself exceeds 16 bits: byte=q*bits+floor(r*bits/8).
-        and     #$0007
-        sta     camera_collision_x_index
-        lda     camera_collision_cell
-        lsr
-        lsr
-        lsr
-        COLLISION_MULTIPLY_CONSTANT BSP_COLLISION_COLUMN_ID_BITS
-        sta     camera_collision_column
-
-        lda     camera_collision_x_index
-        COLLISION_MULTIPLY_CONSTANT BSP_COLLISION_COLUMN_ID_BITS
-        sta     camera_collision_offset
-        lsr
-        lsr
-        lsr
-        clc
-        adc     camera_collision_column
-        tax
-        lda     f:QuakeBSPCollisionMapRAM,x
-        sta     camera_collision_cell
-        lda     camera_collision_offset
-        and     #$0007
-        tax
-        beq     @ColumnNoShift
-        lda     camera_collision_cell
-@ColumnShift:
-        lsr
-        dex
-        bne     @ColumnShift
-        bra     @ColumnReady
-@ColumnNoShift:
-        lda     camera_collision_cell
-@ColumnReady:
-        and     #((1 << BSP_COLLISION_COLUMN_ID_BITS) - 1)
-        sta     camera_collision_column
-
-        ; Dictionary bit = column_id*generated_depth + Z.
-        COLLISION_MULTIPLY_CONSTANT BSP_COLLISION_Z_COUNT
-        clc
-        adc     camera_collision_z_byte
-        sta     camera_collision_cell
-        and     #$0007
-        tax
-        RW      a8
-        lda     f:BSPCollisionBitMasks,x
-        sta     z:camera_collision_mask
-        RW      a16
-        lda     camera_collision_cell
-        lsr
-        lsr
-        lsr
-        tax
-        RW      a8
-        lda     f:QuakeBSPCollisionDictionaryRAM,x
-        and     z:camera_collision_mask
-        clc
-        beq     @Result
-        sec
-@Result:
-        ; Both lookup outcomes must execute the runtime width restore. A plain
-        ; RW transition on separate branches lets assembler state from the
-        ; first branch suppress the REP needed by the empty branch.
-        RW_forced a16i16
-        rts
-
 .segment "RODATA"
 BSPCollisionBitMasks:
         .byte   $01, $02, $04, $08, $10, $20, $40, $80
 BSPCollisionBitMasksEnd:
 .assert BSPCollisionBitMasksEnd - BSPCollisionBitMasks = 8, error, "Fly collision bit-mask table size changed"
 
-QuakeBSPMonsterCameras:
-        .incbin "../Data/QuakeBSPMonsterCameras.bin"
-QuakeBSPMonsterCamerasEnd:
-.assert QuakeBSPMonsterCamerasEnd - QuakeBSPMonsterCameras = BSP_MONSTER_CAMERA_COUNT * BSP_MONSTER_CAMERA_RECORD_BYTES, error, "Monster-camera table size disagrees with generated constants"
-
 RuntimeMenuPalette:
         .incbin "../Data/QuakeBSPTexturePalette.bin", 480, 32
 RuntimeMenuPaletteEnd:
 .assert RuntimeMenuPaletteEnd - RuntimeMenuPalette = 32, error, "Runtime-menu palette tail size changed"
-
-RuntimeMenuText:
-        .byte   " RESUME       "
-        .byte   " PB           "
-        .byte   " TEXTURE      "
-        .byte   " LIGHT        "
-        .byte   " D-BRSH       "
-        .byte   " ENTITY       "
-        .byte   " SCALE        "
-        .byte   " RESTART      "
-RuntimeMenuTextEnd:
-.assert RuntimeMenuTextEnd - RuntimeMenuText = RUNTIME_MENU_ROW_COUNT * RUNTIME_MENU_COLUMNS, error, "Runtime-menu text dimensions changed"
-
-RuntimeMenuPlaybackValues:
-        .byte   "ORDER 3HZ       "
-        .byte   "REALTIME        "
-        .byte   "FLY             "
-        .byte   "HALF            "
-        .byte   "QUARTER         "
-        .byte   "ORDER 30HZ      "
-        .byte   "FLY3X           "
-RuntimeMenuPlaybackValuesEnd:
-.assert RuntimeMenuPlaybackValuesEnd - RuntimeMenuPlaybackValues = RUNTIME_MENU_PLAYBACK_COUNT * RUNTIME_MENU_PLAYBACK_RECORD_BYTES, error, "Runtime-menu playback values must stay fixed-width"
-
-RuntimeMenuPlaybackNext:
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        .word   RUNTIME_MENU_PLAYBACK_HALF
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
-        .word   RUNTIME_MENU_PLAYBACK_QUARTER
-        .word   RUNTIME_MENU_PLAYBACK_FLY
-        .word   RUNTIME_MENU_PLAYBACK_REALTIME
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
-RuntimeMenuPlaybackPrevious:
-        .word   RUNTIME_MENU_PLAYBACK_FLY
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_30HZ
-        .word   RUNTIME_MENU_PLAYBACK_QUARTER
-        .word   RUNTIME_MENU_PLAYBACK_REALTIME
-        .word   RUNTIME_MENU_PLAYBACK_HALF
-        .word   RUNTIME_MENU_PLAYBACK_ORDERED_3HZ
-        .word   RUNTIME_MENU_PLAYBACK_FLY
-
-RuntimeMenuLightingValues:
-        .byte   "NONE    "
-        .byte   "L-MAP   "
-RuntimeMenuLightingValuesEnd:
-.assert RuntimeMenuLightingValuesEnd - RuntimeMenuLightingValues = 2 * 8, error, "Runtime-menu lighting values must stay fixed-width"
-
-RuntimeMenuTextureValues:
-        .byte   "OFF     "
-        .byte   "ON      "
-RuntimeMenuTextureValuesEnd:
-.assert RuntimeMenuTextureValuesEnd - RuntimeMenuTextureValues = RUNTIME_MENU_TEXTURES_COUNT * 8, error, "Runtime-menu texture values must stay fixed-width"
-
-RuntimeMenuToggleValues:
-        .byte   "OFF     "
-        .byte   "ON      "
-RuntimeMenuToggleValuesEnd:
-.assert RuntimeMenuToggleValuesEnd - RuntimeMenuToggleValues = 2 * 8, error, "Runtime-menu toggle values must stay fixed-width"
 
 .include "RuntimeMenuFont.s"
 .include "FlyMouse.s"

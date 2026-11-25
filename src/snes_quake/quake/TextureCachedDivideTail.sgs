@@ -1,47 +1,37 @@
-        ; Prepared Q12 divisions enter inside this otherwise-unreachable cache
-        ; gap and fall directly into the resident reciprocal-multiply prefix.
-TextureDivideQ12Prepared:
-        move    R8, R0                  ; numerator
-        move    R9, R2                  ; denominator
-        lm      R12, (TEXTURE_RECIPROCAL_HIGH)
-        lm      R13, (TEXTURE_RECIPROCAL_LOW)
-TextureLightmapSpanWithinBlock:
-        ; This gap is unreachable after the indirect jump but resident in the
-        ; lightmap cache. Keep the repeated reciprocal-multiply prefix here.
-TextureDivideQ12LoadedCached:
-        ; The reciprocal estimate is exact or one high. Form its Q12 quotient
-        ; and full-width estimate product before the cold correction compare.
-        move    R6, R12
-        from    R8
-        lmult
-        move    R3, R4
-        move    R6, R13
-        from    R8
-        lmult
-        ; floor(product/32768) = high*2 + low bit 15.
-        with    R4
-        add     R4
-        adc     R0
-        with    R3
-        add     R0
-        ; Let t be the low 15 bits of numerator*reciprocal. R4 already holds
-        ; 2*t after the quotient extraction above. With
-        ; delta=reciprocal*denominator-2^27 and 0<=delta<denominator, the
-        ; estimate can only be high when numerator*delta > t*denominator.
-        ; Therefore t>=numerator proves the estimate exact without either
-        ; correction product. Preserve the complete comparison in cold AUX
-        ; code for the remaining inputs.
-        ; Recover t from the doubled low product already left in R4.
-        with    R4
+.if .defined(PLAYABLE_SAME_T_LIGHTMAP_BLOCK) && (BSP_RENDER_SCALE = 2)
+.assert .defined(QUAKE_CACHED_LIGHTMAP_BLOCK8), error, "Same-T sampling requires the cached X2 lightmap setup"
+; R5 contains the original Q4 S. Schedule the ROM fetch before decoding
+; S's light-grid block and loading the already qualified T row and fraction.
+TextureLightmapSameTPixel:
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+        from    R5
+        and     R1
+  .repeat 4
         lsr
+  .endrepeat
+        lm      R4, (TEXTURE_CUR_S)
         with    R4
-        cmp     R8
-        bcs     TextureDivideQ12Ready
-        nop
-        GSU_ABSOLUTE_GOTO TextureDivideQ12CorrectionCold
-TextureDivideQ12Ready:
-        ret
-        nop
+        add     R0
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        iwt     R1, #$00F0
+        to      R3
+        from    R5
+        and     R1
+        from    R5
+        hib
+        to      R6
+        sex
+        lm      R5, (TEXTURE_COORD_RETURN)
+        lm      R4, (TEXTURE_CUR_T)
+        lm      R1, (LIGHTMAP_WIDTH)
+        to      R12
+        getb
+        GSU_ABSOLUTE_GOTO LightmapSampleBaseReady, shared_delay
+        cache
+        .res $2B - (* - TextureLightmapSameTPixel), $01
+.else
+.include "quake/TextureCachedDivideEntries.sgs"
+.endif
 ; Strict nonfinal projective blocks are always eight pixels wide. Reuse the
 ; otherwise-unreachable cached-divide tail to prepare their endpoint without
 ; reloading or comparing the block bounds in cold code. Final blocks retain
@@ -57,8 +47,12 @@ TextureLightmapBlock8CachedSetup:
         sm      (TEXTURE_SPAN_DEN), R0
         ; TextureLightmapSpanDone's first LM is the jump delay slot and remains
         ; its normal entry instruction when a span finishes directly.
-        GSU_ABSOLUTE_GOTO TextureLightmapBlock8Setup, shared_delay
+        GSU_ABSOLUTE_GOTO TextureLightmapBlock8SetupOrdinary, shared_delay
+.if .defined(PLAYABLE_SAME_T_LIGHTMAP_BLOCK) && (BSP_RENDER_SCALE = 2)
+        .res $1F - (* - TextureLightmapBlock8CachedSetup), $01
+.else
   .repeat 64 - (* - TextureDivideQ12LoadedCached)
         nop
   .endrepeat
         .assert * - TextureDivideQ12LoadedCached = 64, error, "Cached Q12 divide and correction no longer fill their pinned gap"
+.endif

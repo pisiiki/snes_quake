@@ -49,6 +49,9 @@ ALIAS_DIRECTIONAL_COS          = ALIAS_STATE + $5A
 ALIAS_DIRECTIONAL_FORWARD      = ALIAS_STATE + $5C
 ALIAS_DIRECTIONAL_RIGHT        = ALIAS_STATE + $5E
 ALIAS_DIRECTORY_RETURN         = ALIAS_AXIS_RETURN
+ALIAS_ROW_SOURCE_IN_REGISTER   = .defined(PLAYABLE_SPRITE_STREAM) && .defined(QC_NAIL_COUNT) && (BSP_RENDER_SCALE = 2)
+; Axis projection and directory lookup finish before the first destination row.
+ALIAS_ROW_SOURCE_Y             = ALIAS_AXIS_RETURN
 .assert ALIAS_DIRECTIONAL_RIGHT + 2 <= GSU_FACE_PLANES_OFFSET + GSU_FACE_PLANES_CAPACITY, error, "Alias raster state escapes face-plane phase"
 
 AliasRenderBillboard:
@@ -65,6 +68,82 @@ AliasRenderBillboard:
         nop
         GSU_ABSOLUTE_GOTO AliasRenderDone
 AliasVisibilityReady:
+.if BSP_ALIAS_LIVE_POSES
+.ifdef QC_KNIGHT_ROSTER
+        mult    #GSU_GRUNT_POSE_BYTES
+        iwt     R10, #GSU_GRUNT_POSES_OFFSET
+        with    R10
+        add     R0
+        ; Keep the pose checks in the deferred alias overlay.
+        GSU_ABSOLUTE_GOTO AliasLoadLivePose
+.segment "GSU_ALIAS_FLY_CODE"
+AliasLoadLivePose:
+.else
+        ; Gameplay ordinals directly name eight-byte immutable pose records.
+        move    R2, #GSU_GRUNT_POSE_BYTES
+        with    R0
+        umult   R2
+.ifdef QC_NAIL_COUNT
+        iwt     R10, #GSU_LIVE_POSE_OFFSET
+.else
+        iwt     R10, #GSU_GRUNT_POSES_OFFSET
+.endif
+        with    R10
+        add     R0
+.endif
+.ifdef QC_NAIL_COUNT
+        jal     NailReadPose
+        nop
+.else
+        movew   R0, (R10)
+.endif
+.if .defined(QC_GIB_FIRST_ROW) || .defined(QC_NAIL_COUNT)
+        inc     R0
+        bne     :+
+        dec     R0                      ; Restore the packed pose in the delay slot.
+.else
+        moves   R0, R0
+        bpl     :+
+        nop
+.endif
+        GSU_ABSOLUTE_GOTO AliasRenderDone
+:
+.ifdef QC_KNIGHT_ROSTER
+        GSU_ABSOLUTE_GOTO AliasLivePoseReady
+.segment "GSU_AUX_CODE"
+AliasLivePoseReady:
+        to      R1
+        lob
+        sm      (ALIAS_DIRECTIONAL_SIN), R1
+        hib
+        mult    #8
+.else
+        move    R1, R0
+        iwt     R2, #$00ff
+        with    R1
+        and     R2
+        sm      (ALIAS_DIRECTIONAL_SIN), R1
+        swap
+        and     R2
+        move    R2, #8
+        umult   R2
+.endif
+        sm      (ALIAS_SPRITE_ID), R0
+        inc     R10
+        inc     R10
+.ifdef QC_NAIL_COUNT
+        jal     NailReadOrigin
+        nop
+.else
+        movew   R1, (R10)
+        inc     R10
+        inc     R10
+        movew   R2, (R10)
+        inc     R10
+        inc     R10
+        movew   R3, (R10)
+.endif
+.else
         iwt     R10, #GSU_ALIAS_TOKENS_OFFSET
         with    R10
         add     R0
@@ -104,6 +183,7 @@ AliasStatePointerReady:
         BSP_ROM_LOAD_WORD R1
         BSP_ROM_LOAD_WORD R2
         BSP_ROM_LOAD_WORD R3
+.endif
         jal     ClipTransformQ2Registers
         nop
         lm      R0, (CLIP_DEPTH)
@@ -180,6 +260,18 @@ AliasStatePointerReady:
         nop
         GSU_ABSOLUTE_GOTO AliasRenderDone
 :
+.ifdef PLAYABLE_SPRITE_STREAM
+        ; Projection and offscreen rejection need only the sprite descriptor.
+        ; Wait until both axes pass before allowing an MSU refill STOP.
+        sm      (AliasSpriteStreamRegisters+16), R8
+        sm      (AliasSpriteStreamRegisters+18), R9
+        sm      (AliasSpriteStreamRegisters+0), R0
+        iwt     R0, #.loword(AliasSpriteStreamResume)
+        sm      (.loword(SpriteStreamRequestResume)), R0
+        jal     AliasResolveStreamedSprite
+        nop
+.endif
+
         ; Technique 2 has render mode two. Techniques 4 and 7 share render
         ; mode one, so use the T4-only composed-cache admission word to tell
         ; textured lightmaps from untextured lightmaps. Resolve this once per
@@ -193,8 +285,17 @@ AliasStatePointerReady:
 AliasColorModeReady:
         sm      (ALIAS_FLAT_COLOR), R0
 AliasColorReady:
+.ifdef PLAYABLE_SPRITE_STREAM
+        lm      R0, (AliasSpriteStreamPixelRam)
+        moves   R0, R0
+        bne     AliasPixelSourceReady
+        nop
+.endif
         lm      R0, (ALIAS_PIXEL_BANK)
         romb
+.ifdef PLAYABLE_SPRITE_STREAM
+AliasPixelSourceReady:
+.endif
 
         ; Seed U from the first covered pixel center, not from the projected
         ; rectangle edge. Keeping the exact half-Q7 remainder makes silhouettes
@@ -223,7 +324,11 @@ AliasColorReady:
         sm      (ALIAS_DEST_Y), R0
         jal     AliasClipInitialX
         nop
+.if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2) && BSP_ALIAS_LIVE_POSES
+        jal     AliasInvalidateResidentWorldAndPrepareSteps
+.else
         jal     AliasPrepareRasterSteps
+.endif
         nop
 AliasRowLoop:
         move    R0, R7
@@ -258,12 +363,37 @@ AliasVisibleRow:
         jal     AliasStageVisibleRow
         nop
 AliasPixelLoop:
+.if ALIAS_ROW_SOURCE_IN_REGISTER
+        to      R4
+        from    R5
+        add     R6
+        moves   R0, R7
+        beq     AliasSampleResidentPixel
+        nop
+        moveb   R0, (R4)
+AliasStreamedTexelReady:
+.else
         move    R4, R6
         move    R0, R5
         with    R4
         add     R0
+.ifdef PLAYABLE_SPRITE_STREAM
+        lm      R0, (AliasSpriteStreamPixelRam)
+        moves   R0, R0
+        beq     AliasSampleResidentPixel
+        nop
+        moveb   R0, (R4)              ; LDB zero-extends; RAMBR remains one.
+        bra     AliasStreamedTexelReady
+        nop
+AliasSampleResidentPixel:
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_BYTE R0
+AliasStreamedTexelReady:
+.else
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+.endif
+.endif
         ; Assets bias opaque colors by one and reserve zero for transparency.
         ; DEC restores the palette index and makes transparency negative.
         dec     R0
@@ -272,9 +402,11 @@ AliasPixelLoop:
         move    R4, R0
         ; Visibility dispatch uses R8 as its legal indirect-jump register.
         lm      R8, (ALIAS_VISIBILITY_ROUTINE)
+        ; JMP installs the selected visibility target before its real delay.
+        ; Warm that helper; LINK still returns to the following MOVES.
         link    #2
         jmp     R8
-        nop
+        cache
         moves   R0, R0
         beq     AliasPixelTransparent
         nop
@@ -287,7 +419,11 @@ AliasPixelVisibilityPassed:
         bra     AliasPixelColorReady
         nop
 AliasPixelFlatColor:
+.ifdef PLAYABLE_TEXTURELESS_WHITE
+        move    R0, #PLAYABLE_TEXTURELESS_WHITE
+.else
         move    R0, #63
+.endif
 AliasPixelColorReady:
         color
         ; Textured presentation mirrors and mosaics tile quads. Map logical
@@ -304,18 +440,26 @@ AliasPixelColorReady:
         lm      R2, (ALIAS_U_STEP)
 AliasPixelTransparent:
         dec     R3
-        bmi     AliasRowPixelsDone
+        bmi     AliasVisibleRowPixelsDone
         inc     R10
         inc     R12
+.if ALIAS_ROW_SOURCE_IN_REGISTER
+        from    R9
+.else
         move    R0, R9
         with    R0
+.endif
         add     R2
 AliasAdvanceSourceX:
+.if !ALIAS_ROW_SOURCE_IN_REGISTER
         with    R0
+.endif
         cmp     R13
         bcc     AliasSourceXReady
         nop
+.if !ALIAS_ROW_SOURCE_IN_REGISTER
         with    R0
+.endif
         sub     R13
         inc     R6
 AliasClampSourceX:
@@ -334,6 +478,17 @@ AliasSourceXReady:
         move    R9, R0
         GSU_ABSOLUTE_GOTO AliasPixelLoop
 
+.if ALIAS_ROW_SOURCE_IN_REGISTER
+AliasSampleResidentPixel:
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R0
+        bra     AliasStreamedTexelReady
+        nop
+.endif
+AliasVisibleRowPixelsDone:
+.if ALIAS_ROW_SOURCE_IN_REGISTER
+        lm      R7, (ALIAS_ROW_SOURCE_Y)
+.endif
 AliasRowPixelsDone:
         lm      R0, (ALIAS_DEST_Y)
         lm      R1, (ALIAS_LAST_Y)
@@ -372,6 +527,10 @@ AliasClampSourceY:
 AliasSourceYReady:
         sm      (ALIAS_V_ACCUM), R0
         GSU_ABSOLUTE_GOTO AliasRowLoop
+.if ALIAS_ROW_SOURCE_IN_REGISTER
+        ; Keep the auxiliary overlay extent after shortening the pixel loop.
+        .res 7, $01
+.endif
 
 ; Prepare one screen-oriented axis. R0 is the first signed Q6 component, R1 is
 ; its positive Q6 sprite extent, and R10 selects ALIAS_X_AXIS or ALIAS_Y_AXIS.
@@ -385,17 +544,9 @@ AliasProjectAxis:
         add     R0
         sm      (ALIAS_AXIS_END), R1
         lm      R2, (CLIP_DEPTH)
-.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
-        ; WARP doubles only the unsigned rejection threshold. Positive depth
-        ; is at most 32767, so the doubled comparison still fits unsigned16.
-AliasClipDepthScale:
-        nop
-        nop
-.endif
 
         ; The normalized pair is monotone increasing. Reject it if both
         ; endpoints lie on the same side of the broad +/-depth frustum
-        ; (twice that depth for the wide WARP projection).
         moves   R0, R0
         bpl     AliasProjectAxisRightPlane
         nop
@@ -417,9 +568,6 @@ AliasProjectAxisRightPlane:
         nop
         GSU_ABSOLUTE_GOTO AliasRenderDone
 AliasProjectAxisIntersects:
-.if (BSP_RENDER_SCALE = 3) && (BSP_WARP_SOURCE_FOCAL < BSP_VIEW_CENTER_X)
-        lm      R2, (CLIP_DEPTH)        ; Projection always uses the real depth.
-.endif
         move    R1, R0
         move    R4, #1
         jal     ConvexProjectComponentUnsaturated
@@ -459,7 +607,7 @@ AliasProjectAxisIntersects:
         jal     AliasEndpointCoordinate
         nop
         move    R6, R0
-.if BSP_RENDER_SCALE = 2
+.if (BSP_RENDER_SCALE = 2) && !.defined(PLAYABLE_MAP_ID)
         move    R2, R1
         with    R2
         add     R2
@@ -516,7 +664,7 @@ AliasProjectAxisRejected:
 ; to cold ROM2 code and preserve the ordinary JAL return in phase scratch.
 AliasLoadSpriteDirectory:
         sm      (ALIAS_DIRECTORY_RETURN), R11
-        move    R9, #$02
+        move    R9, #BSP_GSU_ROM2_BANK
         iwt     R8, #.loword(AliasLoadSpriteDirectoryROM)
         from    R8
         ljmp    R9
@@ -527,10 +675,32 @@ AliasLoadSpriteDirectory:
 ; Decode the expanded v4 sprite directory outside the crowded auxiliary
 ; renderer. Frame/view/model bytes are offline diagnostics, not hot state.
 AliasLoadSpriteDirectoryROM:
+.if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2) && !BSP_ALIAS_LIVE_POSES
+  .ifndef PLAYABLE_RESIDENT_FIXED_ALIAS
+        ; R9 holds the ROM2 bank. A potential billboard write dirties output.
+        sm      (GSU_RESIDENT_WORLD_STATUS), R9
+  .endif
+.endif
+.if BSP_ALIAS_LIVE_POSES && .defined(QC_IMPACT_ROW)
+        ; MDLs keep eight directional sprites per row. Teleport fog and
+        ; combat impacts share one camera-facing orientation per row.
+        lm      R0, (ALIAS_SPRITE_ID)
+        iwt     R1, #(QC_TELEPORT_FOG_ROW*8)
+        sub     R1
+        bmi     :+
+        nop
+        lsr
+        lsr
+        lsr
+        bra     AliasLoadSpriteDirectoryReady
+        add     R1
+:
+.elseif !BSP_ALIAS_LIVE_POSES
         lm      R0, (ALIAS_SPRITE_ID)
         moves   R0, R0
         bpl     AliasLoadSpriteDirectoryReady
         nop
+.endif
         jal     AliasResolveDirectionalSpriteROM
         nop
         lm      R0, (ALIAS_SPRITE_ID)
@@ -584,6 +754,13 @@ AliasLoadSpriteDirectoryReady:
 ; vector. The rational boundary is exact for every signed 16-bit Q6 pair and
 ; avoids atan/trig tables in the fly-only path.
 AliasResolveDirectionalSpriteROM:
+.if BSP_ALIAS_LIVE_POSES
+        lm      R4, (ALIAS_DIRECTIONAL_SIN)
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_SIN_OFFSET, R4
+        sm      (ALIAS_DIRECTIONAL_SIN), R0
+        GSU_LOAD_SIGNED_TABLE R0, GSU_CAMERA_COS_OFFSET, R4
+        sm      (ALIAS_DIRECTIONAL_COS), R0
+.else
         ; Recover the dynamic-state index from the active flattened token and
         ; load its camera-independent exact Q6 entity facing.
         lm      R0, (BRUSH_CURRENT_TOKEN)
@@ -635,6 +812,7 @@ AliasResolveDirectionalSpriteROM:
         with    R0
         sex
         sm      (ALIAS_DIRECTIONAL_COS), R0
+.endif
 AliasDirectionalBasisReady:
 
         lm      R5, (ALIAS_DIRECTIONAL_COS)
@@ -840,7 +1018,13 @@ AliasStageVisibleRow:
         iwt     R4, #GSU_TEXTURE_COORD_MAP_OFFSET
         with    R4
         add     R0
+.if ALIAS_ROW_SOURCE_IN_REGISTER
+        ; Keep the source kind in R7 across opaque and transparent pixels.
+        sm      (ALIAS_ROW_SOURCE_Y), R7
+        lm      R7, (AliasSpriteStreamPixelRam)
+.else
         move    R13, #0
+.endif
         moveb   R13, (R4)
         sm      (ALIAS_MAPPED_Y), R13
         lm      R13, (ALIAS_SPAN_X_HALF_Q7)
@@ -990,3 +1174,24 @@ AliasClipInitialXReady:
 AliasClipInitialXDone:
         ret
         nop
+
+.ifdef PLAYABLE_SPRITE_STREAM
+.include "PlayableSpriteStream.sgs"
+.endif
+
+.if (BSP_RENDER_SCALE = 2) && .defined(PLAYABLE_MAP_ID)
+.segment "GSU_ALIAS_FLY_CODE"
+; Z is set when the endpoint belongs to the Y axis.
+AliasPlayableEndpointTail:
+        ibt     R1, #BSP_VIEW_CENTER_Y
+        ibt     R2, #BSP_VIEW_HEIGHT
+        beq     @Project
+        nop
+        ibt     R1, #BSP_VIEW_CENTER_X
+        iwt     R2, #BSP_VIEW_WIDTH
+@Project:
+        add     R1
+        ret
+        nop
+.assert * - AliasPlayableEndpointTail <= 16, error, "Alias viewport tail exceeds the playable link reserve"
+.endif

@@ -68,7 +68,7 @@ from snes_tooling.quake.quake_sound_replay import (  # noqa: E402
 )
 
 
-DEFAULT_OUTPUT = Workspace.discover().root / "src/snes_quake/Data"
+DEFAULT_OUTPUT = Workspace.discover().quake_example / "Data"
 REPLAY_NAME = Path("QuakeBSPReferenceSoundReplay.bin")
 CAMERA_NAME = Path("QuakeBSPDemoPrecise.bin")
 TIMING_NAME = Path("QuakeBSPDemoPreciseTiming.bin")
@@ -238,7 +238,7 @@ def _disabled_outputs(
         "reason": "disabled by ROM configuration",
         "source": {
             "config": _config_record(config_path),
-            "demo": demo.metadata(),
+            "demo": demo.metadata() if demo is not None else None,
             "soundReplay": _file_record(REPLAY_NAME, replay_payload),
             "cameraTrack": _file_record(CAMERA_NAME, camera_payload),
         },

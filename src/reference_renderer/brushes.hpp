@@ -19,6 +19,7 @@ struct BrushEntityState
     std::uint8_t frame{};
     Vec3 origin;
     std::array<std::int8_t, 3> angles{};
+    bool freeze_texture_animation{};
 };
 
 struct BrushReplaySnapshot
@@ -116,7 +117,8 @@ ExactTextureSample sample_brush_texture(
     std::uint16_t local_face,
     const Ray& ray,
     std::uint8_t entity_frame,
-    double server_time
+    double server_time,
+    bool freeze_texture_animation = false
 );
 
 ReferenceFrame render_packed_camera_source_reference_with_brushes(
@@ -128,6 +130,18 @@ ReferenceFrame render_packed_camera_source_reference_with_brushes(
     std::size_t sample_index,
     double server_time,
     bool flat
+);
+
+ReferenceFrame render_source_reference_with_brushes(
+    const SourceWorld& world,
+    const Bvh& world_bvh,
+    const BrushScene& scene,
+    const SourceCamera& camera,
+    std::span<const BrushEntityState> entities,
+    std::size_t sample_index,
+    double server_time,
+    bool flat,
+    bool enabled
 );
 
 ReferenceFrame render_source_reference_with_brushes(

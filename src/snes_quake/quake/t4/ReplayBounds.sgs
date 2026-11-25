@@ -1,0 +1,303 @@
+; Technique 4 shares one 74-byte cache role between world row loading and
+; brush depth batches. Exact bounds remain resident; neither role adds RAM.
+.export T4PrepareReplayBounds, T4TextureEndpointDepthBatch, T4TextureEndpointLoadRow, T4PrepareEndpointDepth
+
+.macro DEFINE_T4_ENDPOINT_DEPTH entry, product, next
+entry:
+        lm      R0, (TEXTURE_SPAN_X)
+        iwt     R11, #T4TextureEndpointDepthProduct
+        GSU_ABSOLUTE_GOTO TextureEndpointProjectiveFactor
+product:
+        BSP_SIGNED_MUL_UNIT_FACTOR_TRUNC12 R7, R3
+        to      R5
+        add     R5
+        lm      R10, (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET)
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET), R10
+        lm      R0, (TEXTURE_SPAN_X)
+        lm      R1, (TEXTURE_SPAN_END_X)
+        cmp     R1
+        bne     next
+        inc     R0
+        GSU_ABSOLUTE_GOTO BrushArbiterPreparedDepthReady
+next:
+        sm      (TEXTURE_SPAN_X), R0
+        ; R0 is the next X; R11 still selects the depth product.
+        GSU_ABSOLUTE_GOTO TextureEndpointProjectiveFactor
+.endmacro
+
+.macro DEFINE_T4_ENDPOINT_LOADER entry
+entry:
+        lm      R10, (GSU_TEXTURE_ENDPOINT_ROW_PTR_OFFSET)
+        movew   R1, (R10)
+        sm      (CONVEX_MIN_X), R1
+        inc     R10
+        inc     R10
+        movew   R3, (R10)
+        sm      (CONVEX_MAX_X), R3
+        inc     R10
+        inc     R10
+
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_S), R0
+        inc     R10
+        inc     R10
+        movew   R4, (R10)
+        with    R4
+        sub     R0
+        sm      (TEXTURE_DELTA_S), R4
+        inc     R10
+        inc     R10
+
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_T), R0
+        inc     R10
+        inc     R10
+        movew   R4, (R10)
+        with    R4
+        sub     R0
+        sm      (TEXTURE_DELTA_T), R4
+        inc     R10
+        inc     R10
+
+        movew   R0, (R10)
+        sm      (TEXTURE_BASE_DEPTH), R0
+        inc     R10
+        inc     R10
+        movew   R4, (R10)
+        with    R4
+        sub     R0
+        sm      (TEXTURE_DELTA_DEPTH), R4
+        inc     R10
+        inc     R10
+        sm      (GSU_TEXTURE_ENDPOINT_ROW_PTR_OFFSET), R10
+        iwt     R11, #TextureEndpointBatchLastReady
+        GSU_ABSOLUTE_GOTO T4StoreReplayBounds
+.endmacro
+
+.segment "GSU_T4_REPLAY_BOUNDS_LOAD_PATCH"
+T4ReplayBoundsLoadPatch:
+T4StoreReplayBounds:
+        iwt     R0, #59
+        with    R1
+        add     R0
+        BSP_ARITH_SHIFT7_R0 R1
+        bpl     T4ReplayBoundsFirstReady
+        nop
+        move    R1, #0
+T4ReplayBoundsFirstReady:
+        iwt     R0, #60
+        with    R3
+        sub     R0
+        BSP_ARITH_SHIFT7_R0 R3
+        move    R0, #BSP_VIEW_WIDTH-1
+        to      R4
+        sub     R3
+        bpl     T4ReplayBoundsLastReady
+        nop
+        move    R3, R0
+        .res 8, $01                    ; Clamp-only padding keeps the original return anchor.
+T4ReplayBoundsLastReady:
+        lm      R10, (TEXTURE_REPLAY_BOUNDS_CURSOR)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        movew   (R10), R3
+        inc     R10
+        inc     R10
+        sm      (TEXTURE_REPLAY_BOUNDS_CURSOR), R10
+        ret
+        nop
+T4StoreReplayBoundsEnd:
+.assert T4StoreReplayBoundsEnd - T4StoreReplayBounds = 67, error, "Cached bounds producer footprint changed"
+        nop                             ; Restore the original 68-byte loader extent.
+T4ReplayBoundsLoadPatchEnd:
+.assert T4StoreReplayBounds = TextureEndpointLoadRow, lderror, "Producer left retired loader slot"
+.assert T4ReplayBoundsLoadPatchEnd = TextureEndpointLoadRowEnd, lderror, "Producer changed original loader extent"
+.assert .loword(T4StoreReplayBounds) = $B3CD, lderror, "Cached producer anchor moved"
+.assert .loword(T4ReplayBoundsLoadPatchEnd) <= (.loword(TextureEndpointBatchMath) & $FFF0) + GSU_CACHE_BYTES, lderror, "Producer left endpoint cache"
+
+.segment "GSU_T4_REPLAY_BOUNDS_MATH_CODE"
+        DEFINE_T4_ENDPOINT_DEPTH T4TextureEndpointDepthBatch, T4TextureEndpointDepthProduct, T4TextureEndpointDepthNext
+T4ReplayBoundsMathEnd:
+.assert T4TextureEndpointDepthBatch = TextureEndpointDepthBatch, lderror, "Cached depth entry moved"
+.assert T4TextureEndpointDepthProduct = TextureEndpointDepthProduct, lderror, "Cached depth product moved"
+.assert T4ReplayBoundsMathEnd - T4TextureEndpointDepthBatch = 74, error, "Cached depth extent changed"
+.assert .loword(T4ReplayBoundsMathEnd) <= (.loword(TextureEndpointBatchMath) & $FFF0) + GSU_CACHE_BYTES, lderror, "Depth left endpoint cache"
+
+; World endpoint rows and brush depth batches are disjoint phases. Both enter
+; through an installer before CACHE; only complete 74-byte roles are visible.
+T4TextureEndpointLoadRow = T4TextureEndpointDepthBatch
+T4TextureEndpointLoadRowStore = T4TextureEndpointLoadRow + 62
+T4TextureEndpointLoadRowEnd = T4TextureEndpointLoadRow + 72
+
+.segment "GSU_T4_REPLAY_BOUNDS_CODE"
+T4PrepareReplayBounds:
+        iwt     R0, #TEXTURE_REPLAY_BOUNDS
+        sm      (TEXTURE_REPLAY_BOUNDS_CURSOR), R0
+        GSU_ABSOLUTE_GOTO T4PrepareEndpointLoader
+T4PrepareEndpointDepth:
+        iwt     R1, #$A03D
+        iwt     R8, #.loword(T4InstallEndpointDepthROM)
+        bra     T4EndpointRoleGuard
+        nop
+T4PrepareEndpointLoader:
+        iwt     R1, #$AA3D
+        iwt     R8, #.loword(T4InstallEndpointLoaderROM)
+T4EndpointRoleGuard:
+        ; Keep already resident roles in RAM. In particular this avoids a
+        ; ROM2 crossing and its cache displacement for each following face.
+        ; R2 is dead here: both callers saved their row/brush inputs in RAM.
+        move    R0, #0
+        ramb
+        iwt     R9, #T4TextureEndpointDepthBatch
+        movew   R2, (R9)
+        inc     R0
+        ramb
+        with    R2
+        cmp     R1
+        bne     T4EndpointRoleCopyRequired
+        nop
+        GSU_ABSOLUTE_GOTO TextureEndpointBatchMath
+T4EndpointRoleCopyRequired:
+        move    R9, #BSP_GSU_ROM2_BANK
+        from    R8
+        ljmp    R9
+        nop
+        .res 82 - (* - T4PrepareReplayBounds), $01
+T4ReplayBoundsCodeEnd:
+.assert .loword(T4PrepareReplayBounds) = GSU_T4_REPLAY_BOUNDS_CODE_OFFSET, lderror, "Replay reset moved"
+.assert T4ReplayBoundsCodeEnd - T4PrepareReplayBounds = 82, error, "Replay cold image extent changed"
+.assert T4ReplayBoundsCodeEnd - T4PrepareReplayBounds <= GSU_T4_REPLAY_BOUNDS_CODE_CAPACITY, error, "Replay cold helpers exceed retired T2 raster"
+
+.if BSP_RENDER_SCALE = 2
+.export WeaponCullCoveredFace
+.if BSP_X2_WEAPON_COMMON_CORE_PROVEN || .defined(PLAYABLE_WEAPON_OBJ)
+.ifdef PLAYABLE_WEAPON_OBJ
+WEP_X_FIRST = WEAPON_OBJ_CORE_X_MIN
+WEP_X_END = WEAPON_OBJ_CORE_X_END
+WEP_Y_FIRST = WEAPON_OBJ_CORE_Y_MIN
+WEP_Y_END = WEAPON_OBJ_CORE_Y_END
+.else
+WEP_X_FIRST = BSP_X2_WEAPON_OPAQUE_X_FIRST
+WEP_X_END = BSP_X2_WEAPON_OPAQUE_X_END
+WEP_Y_FIRST = BSP_X2_WEAPON_OPAQUE_Y_FIRST
+WEP_Y_END = BSP_X2_WEAPON_OPAQUE_Y_END
+.endif
+; Cull a fully covered projected polygon before its scanline loop.
+WeaponCullCoveredFace:
+.ifdef PLAYABLE_WEAPON_OBJ
+        lm      R0, (WEAPON_OBJ_CORE_FLAG)
+        moves   R0, R0
+        beq     WeaponDrawUncoveredFace
+        nop
+.endif
+        ; TextureProjectPolygonShaded leaves first Y in R1 and last-first
+        ; in R2. Keep ordinary faces out of the vertex walk and extra RAM reads.
+.if WEP_Y_FIRST > 0
+        ibt     R0, #(WEP_Y_FIRST - 1)
+        cmp     R1
+        bcs     WeaponDrawUncoveredFace
+        nop
+.endif
+.if WEP_Y_END < BSP_VIEW_HEIGHT
+        from    R1
+        add     R2
+        ibt     R1, #WEP_Y_END
+        cmp     R1
+        bcs     WeaponDrawUncoveredFace
+        nop
+.endif
+        iwt     R1, #(WEP_X_FIRST * 128)
+        iwt     R2, #(WEP_X_END * 128)
+        iwt     R10, #TEXTURE_SCREEN
+        lm      R12, (CONVEX_SCREEN_COUNT)
+        iwt     R13, #.loword(@Vertex)
+@Vertex:
+        ldw     (R10)
+        cmp     R1
+        bcc     WeaponDrawUncoveredFace
+        nop
+        cmp     R2
+        bcs     WeaponDrawUncoveredFace
+        nop
+        with    R10
+        add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
+        loop
+        nop
+WeaponCoveredFaceSkipped:
+        ret
+        nop
+WeaponDrawUncoveredFace:
+        GSU_ABSOLUTE_GOTO WorldLightmapRasterTarget
+.assert * - T4PrepareReplayBounds <= GSU_T4_REPLAY_BOUNDS_CODE_CAPACITY, error, "Weapon face cull exceeds replay overlay"
+.else
+WeaponCullCoveredFace = WorldLightmapRasterTarget
+.endif
+.endif
+
+; The ordinary AUX image is already readable by GSU ROMB. Its depth code
+; is byte-identical at both scales. Quoted linker names intentionally retain
+; the ordinary image when the F3 generator rewrites the surrounding symbols.
+.import .ident("__GSU_AUX_CODE_LOAD__"), .ident("__GSU_AUX_CODE_RUN__")
+T4EndpointDepthTemplate = .ident("__GSU_AUX_CODE_LOAD__") + .loword(TextureEndpointDepthBatch) - .loword(.ident("__GSU_AUX_CODE_RUN__"))
+.assert ^T4EndpointDepthTemplate = ($80+BSP_GSU_ROM2_BANK), lderror, "Depth template left readable ROM2"
+.assert TextureEndpointProjectiveFactor = .ident("TextureEndpointProjectiveFactor"), lderror, "Shared depth factor target differs at F3"
+.assert BrushArbiterPreparedDepthReady = .ident("BrushArbiterPreparedDepthReady"), lderror, "Shared depth return target differs at F3"
+
+; R11 survives both ROM crossings. One copier handles both roles. R2/R3 are
+; dead before the existing world/brush endpoint math entry reloads its inputs.
+.segment "GSU_MATERIAL_SAMPLER_ROM_CODE"
+T4InstallEndpointLoaderROM:
+        iwt     R2, #.loword(T4EndpointLoaderTemplate)
+        iwt     R3, #$AA3D
+        bra     T4EndpointRoleReady
+        nop
+T4InstallEndpointDepthROM:
+        iwt     R2, #.loword(T4EndpointDepthTemplate)
+        iwt     R3, #$A03D
+T4EndpointRoleReady:
+        move    R0, #0
+        ramb
+        iwt     R8, #T4TextureEndpointDepthBatch
+        movew   R0, (R8)
+        cmp     R3
+        beq     T4EndpointRoleResident
+        nop
+        ; Never execute alignment fill or program RAM while changing its role.
+        bra     T4CopyEndpointRoleROM
+        nop
+GSU_CACHE_KERNEL_BEGIN T4CopyEndpointRoleROM
+        move    R0, #BSP_GSU_ROM2_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R2
+        iwt     R9, #T4TextureEndpointDepthBatch
+        move    R1, #74
+T4CopyEndpointRoleLoop:
+        getb
+        moveb   (R9), R0
+        inc     R9
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        dec     R1
+        bne     T4CopyEndpointRoleLoop
+        nop
+T4EndpointRoleResident:
+        move    R0, #1
+        ramb
+        lm      R0, (TEXTURE_ROM_BANK)
+        romb
+        iwt     R8, #TextureEndpointBatchMath
+        move    R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+GSU_CACHE_KERNEL_END T4CopyEndpointRoleROM
+T4EndpointLoaderTemplate:
+        DEFINE_T4_ENDPOINT_LOADER T4EndpointLoaderTemplateEntry
+        nop
+        nop
+T4EndpointLoaderTemplateEnd:
+.assert T4EndpointLoaderTemplateEnd - T4EndpointLoaderTemplate = 74, error, "Endpoint loader payload changed"
+.assert ^(*-1) = ($80+BSP_GSU_ROM2_BANK), lderror, "Endpoint roles left GSU-readable ROM2"

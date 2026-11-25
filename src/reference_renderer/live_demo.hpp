@@ -1,8 +1,7 @@
 #pragma once
 
 #include "world.hpp"
-#include "presentation_warp.hpp"
-#include <future>
+#include "presentation.hpp"
 #include <tuple>
 #include "geometry.hpp"
 #include "instrumentation.hpp"
@@ -10,8 +9,12 @@
 #include "audio.hpp"
 #include "external_models.hpp"
 #include "aliases.hpp"
+#include "source_fly_aliases.hpp"
 #include "textured_live.hpp"
 #include "particles.hpp"
+#include "fly_camera.hpp"
+#include "x2_weapon.hpp"
+#include "full_precision_replay.hpp"
 
 namespace quake_bsp_reference {
 
@@ -38,9 +41,13 @@ struct LiveDemoConfiguration
     bool initial_entities{};
     bool initial_external_bsp_models{};
     bool initial_particles{};
-    std::function<ViewTransform(std::size_t)> camera_at_pose{};
     bool scene_pose_control{};
     std::function<void(std::optional<SourceCamera>)> capture_camera_setter{};
+    std::function<SourceCamera(std::size_t)> capture_camera_getter{};
+    std::function<void(bool)> fly_mode_setter{};
+    const X2WeaponAssets* x2_weapon{};
+    std::function<std::size_t(std::size_t)> x2_weapon_source_pose{};
+    std::function<ViewTransform(std::size_t)> full_precision_view{};
 };
 
 template <typename CameraType>
@@ -107,6 +114,8 @@ class LiveDemoSession
     playback_schedule_(configuration_.playback_schedule),
     presentation_rate_hz_(configuration_.initial_presentation_rate_hz)
     {
+        if (configuration_.x2_weapon != nullptr)
+            configuration_.x2_weapon->require_scene_palette(world_.texture_palette);
     }
 
     ~LiveDemoSession()
@@ -134,7 +143,6 @@ class LiveDemoSession
     {
         state_.mode = configuration_.initial_mode;
         state_.scale = active_render_scale;
-        warp_settings_ = active_warp_settings;
         state_.legacy_material = configuration_.initial_legacy_material;
         state_.playback_speed = configuration_.initial_playback_speed;
         state_.brushes_enabled = configuration_.initial_brushes;
@@ -147,7 +155,7 @@ class LiveDemoSession
         instrumentation_ =
             std::make_unique<ReferenceInstrumentationServer>(std::move(configuration_.instrumentation_config));
         render_current_pose();
-        update_live_pixels(state_, current_indices_, world_);
+        update_composed_pixels();
     }
 
     void initialize_presentation()
@@ -169,6 +177,7 @@ class LiveDemoSession
         {
             fail(std::string("cannot create SDL3 window: ") + SDL_GetError());
         }
+        fly_window_focused_ = (SDL_GetWindowFlags(window_) & SDL_WINDOW_INPUT_FOCUS) != 0;
         SDL_SetWindowMinimumSize(window_, kMinimumLiveClientWidth, kLogicalHeight + controls_height());
         renderer_ = SDL_CreateRenderer(window_, nullptr);
         if (renderer_ == nullptr)
@@ -216,6 +225,31 @@ class LiveDemoSession
             ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
         }
         apply_session_commands(commands);
+        for (auto event : commands.input_events)
+        {
+            const auto window_id = SDL_GetWindowID(window_);
+            switch (event.type)
+            {
+            case SDL_EVENT_KEY_DOWN:
+            case SDL_EVENT_KEY_UP:
+                event.key.windowID = window_id;
+                event.key.key = SDL_GetKeyFromScancode(event.key.scancode, event.key.mod, false);
+                break;
+            case SDL_EVENT_MOUSE_MOTION:
+                event.motion.windowID = window_id;
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                event.button.windowID = window_id;
+                break;
+            default:
+                event.window.windowID = window_id;
+                break;
+            }
+            if (!SDL_PushEvent(&event))
+                fail(std::string("cannot queue diagnostic SDL input: ") + SDL_GetError());
+            ++input_events_applied_;
+        }
         poll_events();
         if (!running_)
         {
@@ -227,6 +261,7 @@ class LiveDemoSession
         begin_controls();
         draw_controls();
         finish_controls();
+        update_fly_camera(tick.delta_seconds);
         commit_requested_pose();
         refresh_render_if_dirty();
         upload_pixels_if_dirty();
@@ -245,6 +280,9 @@ class LiveDemoSession
         pixels_dirty_ = false;
         instrumentation_control_layout_ = Json::object();
         control_layout_.reset();
+        fly_mouse_x_ = 0.0;
+        fly_mouse_y_ = 0.0;
+        fly_capture_requested_ = false;
     }
 
     void reset_ordered_timing()
@@ -293,31 +331,29 @@ class LiveDemoSession
         {
             state_.scale = *commands.render_scale;
             frame_dirty_ = true;
-            view_pose_override_.reset();
         }
-        if (commands.view_pose.has_value())
-            view_pose_override_ = commands.view_pose;
-        if (commands.warp_settings.has_value())
-            warp_settings_ = *commands.warp_settings;
+        if (commands.full_precision.has_value())
+            set_full_precision(*commands.full_precision);
+        if (commands.weapon_enabled.has_value() && weapon_enabled_ != *commands.weapon_enabled)
+        {
+            weapon_enabled_ = *commands.weapon_enabled;
+            frame_dirty_ = true;
+        }
         if (commands.scene_pose.has_value())
         {
             scene_pose_override_ =
                 *commands.scene_pose < 0
                     ? std::nullopt
                     : std::optional<std::size_t>(static_cast<std::size_t>(*commands.scene_pose));
-            ++render_epoch_;
             frame_dirty_ = true;
         }
         if (commands.capture_camera.has_value())
         {
-            // Drain a previous async render before changing its captured camera.
-            if (pending_render_.valid())
-                static_cast<void>(pending_render_.get());
-            configuration_.capture_camera_setter(*commands.capture_camera);
-            capture_camera_active_ = commands.capture_camera->has_value();
-            ++render_epoch_;
-            frame_dirty_ = true;
+            reset_fly_camera();
+            set_capture_camera(*commands.capture_camera);
         }
+        if (commands.fly_camera.has_value())
+            set_fly_camera(*commands.fly_camera);
         if (commands.shutdown)
         {
             running_ = false;
@@ -334,6 +370,31 @@ class LiveDemoSession
             {
                 running_ = false;
             }
+            if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST)
+            {
+                fly_window_focused_ = false;
+                fly_capture_requested_ = false;
+                capture_fly_mouse(false);
+            }
+            if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)
+                fly_window_focused_ = true;
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT && fly_camera_ &&
+                fly_window_focused_ && event.button.x >= 0 && event.button.x < client_width_ && event.button.y >= 0 &&
+                event.button.y < viewport_height_)
+                fly_capture_requested_ = true;
+            if (event.type == SDL_EVENT_MOUSE_MOTION && fly_mouse_captured_)
+            {
+                fly_mouse_x_ += event.motion.xrel;
+                fly_mouse_y_ += event.motion.yrel;
+            }
+            if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP)
+            {
+                const auto key = static_cast<std::size_t>(event.key.scancode);
+                if (key < fly_keys_.size())
+                    fly_keys_[key] =
+                        event.type == SDL_EVENT_KEY_DOWN && fly_mouse_captured_ &&
+                        !ImGui::GetIO().WantCaptureKeyboard && !ImGui::GetIO().WantTextInput;
+            }
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat)
             {
                 process_key(event.key.key);
@@ -343,16 +404,119 @@ class LiveDemoSession
 
     void process_key(SDL_Keycode key)
     {
+        if (ImGui::GetIO().WantCaptureKeyboard || ImGui::GetIO().WantTextInput)
+            return;
+        if (key == SDLK_ESCAPE && fly_camera_)
+        {
+            if (fly_mouse_captured_)
+                capture_fly_mouse(false);
+            else
+                set_fly_camera(false);
+            return;
+        }
         if (key == SDLK_ESCAPE)
         {
             running_ = false;
         }
-        else if (key == SDLK_SPACE)
+        else if (key == SDLK_SPACE && !fly_mouse_captured_)
         {
             state_.paused = !state_.paused;
             if (!state_.paused)
                 clear_capture_overrides();
         }
+    }
+
+    bool source_camera_control() const
+    {
+        return playback_schedule_ == PlaybackSchedule::NewestDue && configuration_.capture_camera_setter &&
+               configuration_.capture_camera_getter;
+    }
+
+    bool fly_camera_available() const
+    {
+        return source_camera_control() && configuration_.fly_mode_setter;
+    }
+
+    void capture_fly_mouse(bool capture)
+    {
+        if (capture && fly_mouse_captured_)
+            return;
+        fly_keys_.fill(false);
+        fly_mouse_x_ = fly_mouse_y_ = 0.0;
+        if (fly_mouse_captured_ == capture)
+            return;
+        if (!SDL_SetWindowRelativeMouseMode(window_, capture))
+            fail(std::string("cannot change Fly mouse capture: ") + SDL_GetError());
+        fly_mouse_captured_ = capture;
+    }
+
+    void reset_fly_camera()
+    {
+        capture_fly_mouse(false);
+        if (fly_camera_ && configuration_.fly_mode_setter)
+        {
+            configuration_.fly_mode_setter(false);
+        }
+        fly_camera_.reset();
+        fly_camera_restore_.reset();
+    }
+
+    void set_capture_camera(std::optional<SourceCamera> camera)
+    {
+        configuration_.capture_camera_setter(camera);
+        capture_camera_active_ = camera.has_value();
+        frame_dirty_ = true;
+    }
+
+    void set_fly_camera(bool enabled)
+    {
+        if (enabled == fly_camera_.has_value())
+            return;
+        if (enabled)
+        {
+            state_.paused = true;
+            const auto restore_camera = configuration_.capture_camera_getter(requested_pose_);
+            auto camera = restore_camera;
+            if (full_precision_)
+            {
+                const auto view = configuration_.full_precision_view(requested_pose_);
+                camera.origin = view.origin;
+                camera.capture_basis = std::array{view.forward, view.screen_right, view.up};
+            }
+            fly_camera_restore_ = capture_camera_active_ ? std::optional(restore_camera) : std::nullopt;
+            fly_camera_ = camera;
+            set_capture_camera(camera);
+            if (configuration_.fly_mode_setter)
+                configuration_.fly_mode_setter(true);
+        }
+        else
+        {
+            set_capture_camera(fly_camera_restore_);
+            reset_fly_camera();
+        }
+    }
+
+    void update_fly_camera(double seconds)
+    {
+        if (fly_capture_requested_ && fly_camera_ && fly_window_focused_ && !ImGui::GetIO().WantCaptureMouse &&
+            !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
+            capture_fly_mouse(true);
+        if (!fly_camera_ || !fly_mouse_captured_ || !state_.paused || !fly_window_focused_ ||
+            ImGui::GetIO().WantCaptureKeyboard || ImGui::GetIO().WantTextInput)
+        {
+            fly_keys_.fill(false);
+            return;
+        }
+        const FlyCameraInput input{
+            .forward = double(fly_keys_[SDL_SCANCODE_W]) - double(fly_keys_[SDL_SCANCODE_S]),
+            .right = double(fly_keys_[SDL_SCANCODE_D]) - double(fly_keys_[SDL_SCANCODE_A]),
+            .vertical = double(fly_keys_[SDL_SCANCODE_E]) - double(fly_keys_[SDL_SCANCODE_Q]),
+            .mouse_x = fly_mouse_x_,
+            .mouse_y = fly_mouse_y_,
+            .fast = fly_keys_[SDL_SCANCODE_LSHIFT] || fly_keys_[SDL_SCANCODE_RSHIFT]
+        };
+        if (advance_fly_camera(*fly_camera_, input, seconds))
+            set_capture_camera(fly_camera_);
     }
 
     LiveDemoTick update_clock()
@@ -369,9 +533,9 @@ class LiveDemoSession
         {
             return;
         }
-        ++render_epoch_;
         frame_dirty_ = true;
-        view_pose_override_.reset();
+        if (fly_camera_)
+            scene_pose_override_.reset();
         requested_pose_ = *commands.pose;
         playback_seconds_ = time_at_pose_(requested_pose_);
         reset_ordered_timing();
@@ -490,16 +654,17 @@ class LiveDemoSession
 
     [[nodiscard]] int controls_height() const
     {
-        return kPlaybackControlsHeight + (warp_settings_.hdma ? 23 : 0) +
-               (warp_settings_.hdma && !warp_settings_.inverse_depth_profile.empty() ? 23 : 0);
+        return kPlaybackControlsHeight + (source_camera_control() ? 23 : 0) +
+               (configuration_.full_precision_view ? 23 : 0);
     }
 
     void draw_controls()
     {
         draw_playback_controls();
+        draw_fly_controls();
         draw_rendering_controls();
-        draw_hdma_controls();
         draw_feature_controls();
+        draw_precision_control();
         draw_audio_controls();
         draw_contract_control();
         draw_seek_control();
@@ -520,6 +685,28 @@ class LiveDemoSession
         record_control("sample");
         draw_playback_speed_control();
         draw_ordered_pace_controls();
+    }
+
+    void draw_fly_controls()
+    {
+        if (!source_camera_control())
+            return;
+        begin_control_row("fly");
+        bool enabled = fly_camera_.has_value();
+        ImGui::BeginDisabled(!fly_camera_available());
+        if (ImGui::Checkbox("Fly camera", &enabled))
+            set_fly_camera(enabled);
+        ImGui::EndDisabled();
+        if (!fly_camera_available() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Fly requires complete scene snapshots from the matching generated assets.");
+        record_control("flyCamera");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("Click view: look | WASD: move | Q/E: down/up | Shift: fast | Esc: release");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Free camera; no collision. Scene time stays paused. Disable Fly to restore the starting view."
+            );
+        record_control("flyHelp");
     }
 
     void draw_playback_speed_control()
@@ -634,77 +821,8 @@ class LiveDemoSession
         {
             state_.scale = static_cast<RenderScale>(selected_scale);
             frame_dirty_ = true;
-            view_pose_override_.reset();
         }
         record_control("scale");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(100.0F);
-        int model = warp_settings_.hdma ? 2 : warp_settings_.projective ? 0 : 1;
-        if (ImGui::Combo("Warp", &model, "Projective\0Mode 7\0HDMA\0"))
-        {
-            warp_settings_.projective = model == 0;
-            warp_settings_.hdma = model == 2;
-        }
-        record_control("warpModel");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(85.0F);
-        float depth = static_cast<float>(warp_settings_.depth);
-        if (ImGui::DragFloat("Depth", &depth, 1.0F, 0.0F, 8192.0F, "%.0f") && std::isfinite(depth))
-            warp_settings_.depth = depth < 1.0F ? 0.0 : std::min(8192.0, static_cast<double>(depth));
-        record_control("warpDepth");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Quake units along the rendered forward axis. Zero uses rotation only.");
-    }
-
-    void draw_hdma_controls()
-    {
-        if (!warp_settings_.hdma)
-            return;
-        begin_control_row("hdma");
-        constexpr std::array counts{1, 8, 16, 32, 224};
-        int selected = static_cast<int>(std::find(counts.begin(), counts.end(), warp_settings_.bands) - counts.begin());
-        ImGui::SetNextItemWidth(115.0F);
-        if (ImGui::Combo("Bands", &selected, "1\0 8\0 16\0 32\0 Per scanline\0"))
-            warp_settings_.bands = counts[static_cast<std::size_t>(selected)];
-        record_control("warpBands");
-        ImGui::SameLine();
-        int shape =
-            warp_settings_.inverse_depth_profile.empty() ? 0
-            : warp_settings_.inverse_depth_profile.size() == 3
-                ? 1
-                : 2;
-        ImGui::SetNextItemWidth(115.0F);
-        if (ImGui::Combo("Depth profile", &shape, "Uniform\0Three values\0Five values\0"))
-        {
-            const int q =
-                std::clamp(static_cast<int>(std::nearbyint(65536.0 / std::max(16.0, warp_settings_.depth))), 8, 4096);
-            warp_settings_.inverse_depth_profile.assign(shape == 0 ? 0U : shape == 1 ? 3U : 5U, q);
-        }
-        record_control("warpProfile");
-        if (!warp_settings_.inverse_depth_profile.empty())
-        {
-            begin_control_row("depthProfile");
-            for (std::size_t i = 0; i < warp_settings_.inverse_depth_profile.size(); ++i)
-            {
-                if (i != 0)
-                    ImGui::SameLine();
-                auto& q = warp_settings_.inverse_depth_profile[i];
-                float value = q == 0 ? 8192.0F : 65536.0F / static_cast<float>(q);
-                ImGui::SetNextItemWidth(70.0F);
-                const auto label = "Depth " + std::to_string(i + 1);
-                if (ImGui::DragFloat(label.c_str(), &value, 1.0F, 16.0F, 8192.0F, "%.1f") && std::isfinite(value))
-                {
-                    for (auto& existing : warp_settings_.inverse_depth_profile)
-                        existing = std::max(8, existing);
-                    q = std::clamp(
-                        static_cast<int>(std::nearbyint(65536.0 / std::clamp(value, 16.0F, 8192.0F))),
-                        8,
-                        4096
-                    );
-                }
-                record_control("warpDepth" + std::to_string(i + 1));
-            }
-        }
     }
 
     void draw_surface_control()
@@ -720,11 +838,16 @@ class LiveDemoSession
         record_control("textures");
     }
 
+    [[nodiscard]] bool weapon_control() const
+    {
+        return configuration_.x2_weapon != nullptr && state_.scale == RenderScale::X2;
+    }
+
     [[nodiscard]] bool has_feature_controls() const
     {
         return configuration_.brush_control || configuration_.entity_control ||
                configuration_.external_bsp_model_control || configuration_.legacy_material_control ||
-               configuration_.particle_control;
+               configuration_.particle_control || weapon_control();
     }
 
     void draw_feature_controls()
@@ -743,6 +866,7 @@ class LiveDemoSession
             present
         );
         draw_feature_toggle(configuration_.entity_control, "Entities", state_.entities_enabled, "mdlEntities", present);
+        draw_feature_toggle(weapon_control(), "Weapon", weapon_enabled_, "weapon", present);
         draw_feature_toggle(
             configuration_.external_bsp_model_control,
             "Source BSP models",
@@ -785,6 +909,32 @@ class LiveDemoSession
         present = true;
     }
 
+    void set_full_precision(bool enabled)
+    {
+        if (configuration_.full_precision_view && full_precision_ != enabled)
+        {
+            full_precision_ = enabled;
+            frame_dirty_ = true;
+        }
+    }
+
+    void draw_precision_control()
+    {
+        if (!configuration_.full_precision_view)
+            return;
+        begin_control_row("precision");
+        bool enabled = full_precision_;
+        if (ImGui::Checkbox("Full precision", &enabled))
+            set_full_precision(enabled);
+        record_control("fullPrecision");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                playback_schedule_ == PlaybackSchedule::NewestDue
+                    ? "Use source camera and entity positions and rotations."
+                    : "Use the source rasterizer with full precision camera and entity transforms."
+            );
+    }
+
     void draw_audio_controls()
     {
         if (configuration_.sound_assets == nullptr)
@@ -814,9 +964,9 @@ class LiveDemoSession
         int requested_pose = static_cast<int>(requested_pose_);
         if (ImGui::SliderInt("##playback", &requested_pose, 0, static_cast<int>(cameras_.size()) - 1, ""))
         {
-            ++render_epoch_;
             frame_dirty_ = true;
-            view_pose_override_.reset();
+            if (fly_camera_)
+                scene_pose_override_.reset();
             requested_pose_ = static_cast<std::size_t>(requested_pose);
             playback_seconds_ = time_at_pose_(requested_pose_);
             reset_ordered_timing();
@@ -845,25 +995,22 @@ class LiveDemoSession
 
     void clear_capture_overrides()
     {
-        view_pose_override_.reset();
+        reset_fly_camera();
         if (capture_camera_active_)
         {
-            if (pending_render_.valid())
-                static_cast<void>(pending_render_.get());
             configuration_.capture_camera_setter(std::nullopt);
             capture_camera_active_ = false;
-            ++render_epoch_;
             frame_dirty_ = true;
         }
         if (scene_pose_override_.has_value())
         {
             scene_pose_override_.reset();
-            ++render_epoch_;
             frame_dirty_ = true;
         }
     }
 
-    using RenderKey = std::tuple<RenderMode, bool, bool, bool, bool, RenderScale, std::optional<std::size_t>, bool>;
+    using RenderKey =
+        std::tuple<RenderMode, bool, bool, bool, bool, RenderScale, std::optional<std::size_t>, bool, bool>;
 
     RenderKey render_key() const
     {
@@ -875,53 +1022,13 @@ class LiveDemoSession
             state_.external_bsp_models,
             state_.scale,
             scene_pose_override_,
-            state_.particles_enabled
+            state_.particles_enabled,
+            full_precision_
         };
     }
 
     void refresh_render_if_dirty()
     {
-        if (state_.scale == RenderScale::X3Warp && !state_.paused)
-        {
-            if (pending_render_.valid() &&
-                pending_render_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
-            {
-                auto render = pending_render_.get();
-                if (pending_key_ == render_key() && pending_loop_ == loop_ && pending_epoch_ == render_epoch_)
-                {
-                    accept_render(std::move(render), pending_pose_, pending_key_);
-                    ++frame_generation_;
-                    pixels_dirty_ = true;
-                }
-            }
-            if (!pending_render_.valid() &&
-                (frame_dirty_ || rendered_pose_ != current_pose_ || rendered_key_ != render_key()))
-            {
-                pending_pose_ = current_pose_;
-                pending_key_ = render_key();
-                pending_loop_ = loop_;
-                pending_epoch_ = render_epoch_;
-                pending_render_ = std::async(
-                    std::launch::async,
-                    [this,
-                     pose = current_pose_,
-                     scene = scene_pose_override_.value_or(current_pose_),
-                     mode = state_.mode,
-                     legacy = state_.legacy_material,
-                     brushes = state_.brushes_enabled,
-                     entities = state_.entities_enabled,
-                     external = state_.external_bsp_models,
-                     particles = state_.particles_enabled,
-                     scale = state_.scale] {
-                        const RenderViewportScope viewport(scale);
-                        return render_pose_(pose, scene, mode, legacy, brushes, entities, external, particles);
-                    }
-                );
-            }
-            return;
-        }
-        if (pending_render_.valid())
-            pending_render_.get();
         if (!frame_dirty_ && rendered_key_ == render_key())
             return;
         render_current_pose();
@@ -937,9 +1044,71 @@ class LiveDemoSession
         current_external_bsp_inspection_ = std::move(render.external_bsp_inspection);
         rendered_pose_ = pose;
         rendered_scene_pose_ = std::get<std::optional<std::size_t>>(key).value_or(pose);
-        rendered_loop_ = loop_;
+        compose_x2_weapon(std::get<RenderScale>(key));
         rendered_key_ = key;
-        rendered_view_ = listener_at_pose_(pose);
+        rendered_full_precision_ = full_precision_;
+        rendered_view_ = listener_view_at_pose(pose);
+    }
+
+    void compose_x2_weapon(RenderScale scale)
+    {
+        x2_weapon_frame_ = 0;
+        x2_weapon_bob_ = 0;
+        const auto* weapon = configuration_.x2_weapon;
+        if (weapon == nullptr || scale != RenderScale::X2 || !state_.mode.textures || state_.legacy_material)
+        {
+            return;
+        }
+        if (fly_camera_)
+        {
+            x2_weapon_frame_ =
+                x2_weapon_idle_ != 0 ? x2_weapon_idle_ : weapon->idle_for_frame(weapon->frame_for_pose(0));
+        }
+        else
+        {
+            const auto source_pose =
+                configuration_.x2_weapon_source_pose
+                    ? configuration_.x2_weapon_source_pose(rendered_scene_pose_)
+                    : rendered_scene_pose_;
+            x2_weapon_frame_ = weapon->frame_for_pose(source_pose);
+            x2_weapon_bob_ = weapon->bob_for_pose(source_pose);
+            if (x2_weapon_frame_ != 0)
+            {
+                x2_weapon_idle_ = weapon->idle_for_frame(x2_weapon_frame_);
+            }
+        }
+        if (weapon_enabled_)
+            weapon->composite(current_indices_, x2_weapon_frame_, x2_weapon_bob_);
+        else
+        {
+            x2_weapon_frame_ = 0;
+            x2_weapon_bob_ = 0;
+        }
+    }
+
+    void update_composed_pixels()
+    {
+        update_live_pixels(state_, current_indices_, world_);
+        if (configuration_.x2_weapon == nullptr || state_.scale != RenderScale::X2 ||
+            !state_.mode.textures || state_.legacy_material)
+        {
+            return;
+        }
+
+        const auto& weapon = *configuration_.x2_weapon;
+        const auto palette = weapon.palette(x2_weapon_frame_);
+        std::array<std::uint32_t, 256> rgb{};
+        const auto expand_channel = [](std::uint32_t channel) {
+            const auto value = channel & 31;
+            return (value << 3) | (value >> 2);
+        };
+        for (std::size_t index = 0; index < rgb.size(); ++index)
+        {
+            const auto word = static_cast<std::uint32_t>(read_u16(palette, index * 2));
+            rgb[index] = (expand_channel(word) << 16) | (expand_channel(word >> 5) << 8) | expand_channel(word >> 10);
+        }
+        for (std::size_t position = 0; position < current_indices_.size(); ++position)
+            state_.pixels[position] = rgb[current_indices_[position]];
     }
 
     void render_current_pose()
@@ -954,26 +1123,17 @@ class LiveDemoSession
                 state_.brushes_enabled,
                 state_.entities_enabled,
                 state_.external_bsp_models,
-                state_.particles_enabled
+                state_.particles_enabled,
+                full_precision_
             ),
             current_pose_,
             render_key()
         );
     }
 
-    std::size_t presentation_pose() const
+    ViewTransform listener_view_at_pose(std::size_t pose)
     {
-        if (view_pose_override_.has_value())
-            return *view_pose_override_;
-        if (state_.scale == RenderScale::X3Warp && playback_schedule_ == PlaybackSchedule::OrderedTimed)
-        {
-            // Read the newest recorded source sample due between ordered images.
-            // Pausing freezes this clock; the image schedule still visits every row.
-            const auto ahead =
-                static_cast<std::size_t>(std::max(0.0, ordered_wall_seconds_) * configuration_.ordered_source_rate_hz);
-            return current_pose_ + std::min(ahead, cameras_.size() - 1 - current_pose_);
-        }
-        return current_pose_;
+        return full_precision_ ? configuration_.full_precision_view(pose) : listener_at_pose_(pose);
     }
 
     void upload_pixels_if_dirty()
@@ -981,34 +1141,11 @@ class LiveDemoSession
         // A scale change keeps the old image until a matching render completes.
         const auto image_scale = std::get<RenderScale>(rendered_key_);
         if (pixels_dirty_)
-            update_live_pixels(state_, current_indices_, world_);
-        const auto view_pose = presentation_pose();
-        const auto view =
-            configuration_.camera_at_pose ? configuration_.camera_at_pose(view_pose) : listener_at_pose_(view_pose);
-        const bool enabled =
-            state_.scale == RenderScale::X3Warp && image_scale != RenderScale::X2 && rendered_loop_ == loop_;
-        const bool use_projective = enabled && warp_settings_.projective;
-        const bool use_hdma = enabled && warp_settings_.hdma;
-        const auto warp =
-            enabled && !use_projective && !use_hdma ? camera_warp(view, rendered_view_) : PresentationWarp{};
-        const auto hdma = use_hdma ? hdma_camera_warp(view, rendered_view_, warp_settings_) : HdmaWarp{};
-        const auto projective =
-            use_projective ? projective_camera_warp(view, rendered_view_, warp_settings_.depth) : ProjectiveWarp{};
-        const bool changed =
-            warp.x != applied_warp_.x || warp.y != applied_warp_.y || warp.zoom != applied_warp_.zoom ||
-            use_projective != applied_projective_enabled_ || projective != applied_projective_ || hdma != applied_hdma_;
-        applied_warp_ = warp;
-        applied_projective_ = projective;
-        applied_projective_enabled_ = use_projective;
-        applied_hdma_ = hdma;
-        if (pixels_dirty_ || changed)
+            update_composed_pixels();
+        if (pixels_dirty_)
         {
-            if (image_scale != RenderScale::X2)
-                state_.display_pixels =
-                    use_hdma ? present_hdma_x3(state_.pixels, hdma)
-                    : use_projective
-                        ? present_projective_x3(state_.pixels, projective)
-                        : present_x3(state_.pixels, warp);
+            if (image_scale == RenderScale::X3)
+                state_.display_pixels = present_x3(state_.pixels);
             upload_texture(image_scale);
             ++display_generation_;
         }
@@ -1018,29 +1155,26 @@ class LiveDemoSession
             {"referenceProjection", image_scale == RenderScale::X2 ? "snes-x2-center64-v1" : kX3ProjectionContract},
             {"imageCenter", image_scale == RenderScale::X2 ? Json::array({64, 56}) : Json::array({kX3CenterX, 37})},
             {"imageFocal", image_scale == RenderScale::X2 ? 96 : 64},
-            {"warpModel", warp_model_name(warp_settings_)},
-            {"warpDepth", warp_settings_.depth},
-            {"warpBands", warp_settings_.bands},
-            {"inverseDepthProfileQ16", warp_settings_.inverse_depth_profile},
-            {"hdma", hdma_warp_json(hdma)},
-            {"projectiveActive", use_projective},
-            {"inverseHomography", projective.inverse},
-            {"projectiveValid", projective.valid},
             {"renderedPose", rendered_pose_},
             {"renderedScenePose", rendered_scene_pose_},
             {"scenePoseControl", configuration_.scene_pose_control},
             {"captureCameraControl", static_cast<bool>(configuration_.capture_camera_setter)},
             {"captureCameraActive", capture_camera_active_},
-            {"scenePoseFrozen", scene_pose_override_.has_value()},
-            {"viewPose", view_pose},
+            {"flyCameraControl", fly_camera_available()},
+            {"flyCameraActive", fly_camera_.has_value()},
+            {"flyMouseCaptured", fly_mouse_captured_},
+            {"flyWindowFocused", fly_window_focused_},
+            {"uiKeyboardCaptured", imgui_context_initialized_ && ImGui::GetIO().WantCaptureKeyboard},
+            {"uiTextInput", imgui_context_initialized_ && ImGui::GetIO().WantTextInput},
+            {"inputEventsApplied", input_events_applied_},
+            {"scenePoseFrozen", scene_pose_override_.has_value() || (fly_camera_.has_value() && state_.paused)},
             {"displayGeneration", display_generation_},
-            {"renderPending", pending_render_.valid()},
-            {"interpolated", false},
-            {"renderedCamera", warp_camera_json(rendered_view_)},
-            {"viewCamera", warp_camera_json(view)},
-            {"shiftX", warp.x},
-            {"shiftY", warp.y},
-            {"zoom", warp.zoom}
+            {"fullPrecisionControl", static_cast<bool>(configuration_.full_precision_view)},
+            {"fullPrecision", full_precision_},
+            {"renderedFullPrecision", rendered_full_precision_},
+            {"weaponControl", weapon_control()},
+            {"weaponEnabled", configuration_.x2_weapon != nullptr && weapon_enabled_},
+            {"renderedCamera", view_camera_json(rendered_view_)}
         };
     }
 
@@ -1070,7 +1204,7 @@ class LiveDemoSession
         audio_->synchronize(
             playback_seconds_,
             loop_,
-            listener_at_pose_(current_pose_),
+            listener_view_at_pose(current_pose_),
             state_.sound_enabled,
             state_.sound_volume,
             audio_timing_compatible(),
@@ -1211,6 +1345,14 @@ class LiveDemoSession
 
     void publish_instrumentation()
     {
+        if (configuration_.x2_weapon != nullptr)
+        {
+            state_.presentation["x2WeaponFrame"] = x2_weapon_frame_;
+            state_.presentation["x2WeaponBob"] = x2_weapon_bob_;
+            const bool flash = configuration_.x2_weapon->flash_for_frame(x2_weapon_frame_);
+            state_.presentation["x2WeaponFlash"] = flash;
+            state_.presentation["scenePaletteMode"] = !state_.mode.textures ? 1 : (flash ? 2 : 0);
+        }
         instrumentation_->publish(
             rendered_pose_,
             cameras_.size(),
@@ -1240,8 +1382,6 @@ class LiveDemoSession
 
     void shutdown_presentation() noexcept
     {
-        if (pending_render_.valid())
-            pending_render_.wait();
         audio_.reset();
         if (imgui_renderer_initialized_)
         {
@@ -1293,20 +1433,26 @@ class LiveDemoSession
     std::unique_ptr<ReferenceInstrumentationServer> instrumentation_;
     std::unique_ptr<QuakeAudioSession> audio_;
     LiveWindowState state_;
-    std::future<LiveRenderResult> pending_render_;
-    RenderKey pending_key_, rendered_key_;
-    std::size_t pending_pose_{}, rendered_pose_{};
-    std::optional<std::size_t> view_pose_override_;
+    RenderKey rendered_key_;
+    std::size_t rendered_pose_{};
     std::optional<std::size_t> scene_pose_override_;
+    std::optional<SourceCamera> fly_camera_, fly_camera_restore_;
+    bool fly_mouse_captured_{};
+    bool fly_capture_requested_{};
+    bool fly_window_focused_{};
+    std::array<bool, SDL_SCANCODE_COUNT> fly_keys_{};
+    std::uint64_t input_events_applied_{};
+    double fly_mouse_x_{}, fly_mouse_y_{};
     bool capture_camera_active_{};
+    bool full_precision_{};
+    bool rendered_full_precision_{};
+    bool weapon_enabled_{true};
     std::size_t rendered_scene_pose_{};
-    std::uint64_t pending_loop_{}, rendered_loop_{}, pending_epoch_{}, render_epoch_{}, display_generation_{};
+    std::size_t x2_weapon_frame_{};
+    int x2_weapon_bob_{};
+    std::size_t x2_weapon_idle_{};
+    std::uint64_t display_generation_{};
     ViewTransform rendered_view_{};
-    PresentationWarp applied_warp_{};
-    WarpSettings warp_settings_;
-    ProjectiveWarp applied_projective_;
-    HdmaWarp applied_hdma_;
-    bool applied_projective_enabled_{};
     int texture_width_{}, texture_height_{};
     std::vector<std::uint8_t> current_indices_;
     Json current_alias_inspection_;
@@ -1363,6 +1509,27 @@ int run_live_demo(
         .run();
 }
 
+void bind_full_precision_aliases(FullPrecisionReplay& precision, const SourceWorld& world, const AliasAssets& aliases);
+
+LiveRenderResult render_full_precision_live_frame(
+    const SourceWorld& world,
+    const Bvh& bvh,
+    const BrushScene& brush_scene,
+    const BrushReplay& brush_replay,
+    const AliasAssets& aliases,
+    const FullPrecisionReplay& precision,
+    const SourceCamera& camera,
+    std::size_t scene_pose,
+    RenderMode mode,
+    bool flat,
+    bool brushes,
+    bool entities,
+    bool fly,
+    const ExternalBspScene* external_scene,
+    const ExternalBspReplay* external_replay,
+    const ParticleReplay* particles
+);
+
 int run_source_realtime_demo(
     const SourceWorld& world,
     const Bvh& bvh,
@@ -1384,7 +1551,11 @@ int run_source_realtime_demo(
     float sound_volume,
     ReferenceInstrumentationConfig instrumentation,
     const ParticleReplay* particles = nullptr,
-    bool particles_enabled = false
+    bool particles_enabled = false,
+    const BrushReplay* fly_brush_replay = nullptr,
+    const SourceFlyAliases* fly_aliases = nullptr,
+    const X2WeaponAssets* x2_weapon = nullptr,
+    const FullPrecisionReplay* full_precision = nullptr
 );
 
 int run_packed_realtime_demo(

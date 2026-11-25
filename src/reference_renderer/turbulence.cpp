@@ -48,6 +48,8 @@ std::uint8_t sample_source_turbulent_texture(const MipTexture& texture, double s
 
 std::uint8_t quake_turbulence_phase(double surface_time)
 {
+    if (active_turbulence_phase)
+        return *active_turbulence_phase;
     if (!std::isfinite(surface_time) || surface_time < 0.0)
     {
         fail("Quake turbulence time must be finite and nonnegative");

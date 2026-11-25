@@ -1,0 +1,38 @@
+; Decode the resident world BSP node that owns PACKET_FACE_ID into R3.
+.macro PACKET_LOAD_FACE_OWNER
+        lm      R0, (PACKET_FACE_ID)
+.ifdef PLAYABLE_FACE_OWNER_BIAS
+        from    R0
+        to      R1
+        lsr
+.if PLAYABLE_FACE_OWNER_HEADER = 4
+        from    R0
+        to      R3
+        hib
+        with    R1
+        sub     R3
+.endif
+        iwt     R4, #BSP_WORLD_FACE_OWNERS_ROM_ADDRESS + PLAYABLE_FACE_OWNER_HEADER
+.else
+        with    R0
+        add     R0
+        iwt     R4, #BSP_WORLD_FACE_OWNERS_ROM_ADDRESS
+.endif
+        with    R4
+        add     R0
+        move    R0, #BSP_WORLD_FACE_OWNERS_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+.ifdef PLAYABLE_FACE_OWNER_BIAS
+.if PLAYABLE_FACE_OWNER_BIAS
+        iwt     R3, #PLAYABLE_FACE_OWNER_BIAS
+        with    R1
+        add     R3
+.endif
+        getbs
+        to      R3
+        add     R1
+.else
+        BSP_ROM_LOAD_WORD R3
+.endif
+.endmacro

@@ -1,0 +1,450 @@
+; The ordinary shaded world path already has a view-cache record per packet
+; vertex and a sequential ROM stream of texture coordinates. Fuse their
+; copies so the input cursor, output cursor, count and outcode stay live.
+; R13 is the continuation in RAM bank $70.
+.if BSP_RENDER_SCALE = 2
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+GSU_CACHE_KERNEL_BEGIN TextureLoadShadedContourROM
+        lm      R10, (CONVEX_INDEX_PTR)
+        lm      R9, (CONVEX_FACE_VERTICES)
+        sm      (CONVEX_OUTPUT_COUNT), R9
+        iwt     R8, #TEXTURE_VIEW_A
+        move    R7, #0
+TextureLoadShadedContourVertex:
+        movew   R3, (R10)
+        inc     R10
+        inc     R10
+        move    R0, R3
+        add     R0
+        add     R0
+        add     R0
+        iwt     R4, #PACKET_VIEW_CACHE
+        with    R4
+        add     R0
+  .repeat 3
+        movew   R0, (R4)
+        movew   (R8), R0
+        inc     R4
+        inc     R4
+        inc     R8
+        inc     R8
+  .endrepeat
+        movew   R2, (R4)
+        with    R7
+        or      R2
+        BSP_ROM_LOAD_WORD R5
+        movew   (R8), R5
+        inc     R8
+        inc     R8
+        BSP_ROM_LOAD_WORD R6
+        movew   (R8), R6
+        inc     R8
+        inc     R8
+        dec     R9
+        bne     TextureLoadShadedContourVertex
+        nop
+
+        ; Publish the same continuation state as the per-vertex helper.
+TexturePublishShadedContourROM:
+        sm      (CONVEX_INDEX_PTR), R10
+        sm      (CONVEX_OUTPUT_CURSOR), R8
+        sm      (CONVEX_EDGE_COUNT), R9
+        sm      (TEXTURE_CLIP_OUTCODE), R7
+        sm      (CLIP_VERTEX_INDEX), R3
+        sm      (TEXTURE_CUR_S), R5
+        sm      (TEXTURE_CUR_T), R6
+        move    R12, #$70
+        from    R13
+        ljmp    R12
+        nop
+GSU_CACHE_KERNEL_END TextureLoadShadedContourROM
+.assert .bankbyte(TextureLoadShadedContourROM) = ($80+BSP_GSU_ROM3_BANK), lderror, "Shaded contour kernel left ROM3"
+
+.ifdef PLAYABLE_WORLD_AFFINE_UV_CODE
+.ifndef PLAYABLE_WORLD_AFFINE_UV
+; The sizing link reserves the same ROM3 bytes before table placement.
+WORLD_AFFINE_UV_S_X = 0
+WORLD_AFFINE_UV_S_Y = 0
+WORLD_AFFINE_UV_T_Y = 0
+WORLD_AFFINE_UV_T_Z = 0
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_DESCRIPTOR_CODE
+WORLD_AFFINE_DESCRIPTOR_ROM_BANK = 0
+WORLD_AFFINE_DESCRIPTOR_ROM_ADDRESS = $8000
+WORLD_RAW_CONTOUR_DIRECTORY_BANK = 0
+WORLD_RAW_CONTOUR_DIRECTORY_ADDRESS = $8000
+WORLD_RAW_CONTOUR_MARKER = 127
+  .endif
+.endif
+
+; The high two source-face bits select checked stream, XY, XZ or YZ.
+; On E1M1 bit 5 selects four additional exact bias pairs.
+; Preserve R11 from the RAM gate. R6 survives a checked stream STOP.
+TextureLookupAffineWorldCoordinatesROM:
+        lm      R0, (PACKET_SOURCE_INDEX)
+        add     R0
+        move    R1, R0
+        add     R0
+        add     R1
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS+5
+        with    R4
+        add     R0
+        ibt     R0, #WORLD_FACES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        getb
+        swap
+        rol
+        rol
+        rol
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_VARIANTS_CODE
+        rol
+  .endif
+        ibt     R12, #$70
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_VARIANTS_CODE
+        and     #7
+        lsr
+        bcc     :+
+        nop
+        add     #4
+:
+  .else
+        and     #3
+  .endif
+        move    R6, R0
+        beq     TextureAffineUseCoordinateStream
+        nop
+        from    R11
+        ljmp    R12
+        nop
+TextureAffineUseCoordinateStream:
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_DESCRIPTOR_CODE
+        .assert BSP_WORLD_MAX_FACE_VERTICES <= $1F, error, "Affine descriptor overlaps world face count"
+        ; Low descriptor bits live above the count, high bits above flat color.
+        ; R4 still holds the address of this face's flags.
+        with    R4
+        sub     #3
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R1
+        from    R1
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        move    R1, R0
+        getb
+        ibt     R2, #$F0
+        and     R2
+        lsr
+        or      R1
+        beq     TextureAffineUseCheckedStream
+        nop
+        ibt     R1, #WORLD_RAW_CONTOUR_MARKER
+        cmp     R1
+        bne     TextureAffineDescriptorBiases
+        nop
+        GSU_ABSOLUTE_GOTO TextureLookupRawContourROM
+TextureAffineDescriptorBiases:
+
+        ; One mode byte and two bias words. Leave R11/R12 on the return route.
+        move    R1, R0
+        add     R0
+        add     R0
+        add     R1
+        iwt     R4, #.loword(WORLD_AFFINE_DESCRIPTOR_ROM_ADDRESS-5)
+        with    R4
+        add     R0
+        ibt     R0, #WORLD_AFFINE_DESCRIPTOR_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R6
+        BSP_ROM_LOAD_WORD R1
+        BSP_ROM_LOAD_WORD R2
+        sm      (TEXTURE_CUR_S), R1
+        sm      (TEXTURE_CUR_T), R2
+        from    R11
+        ljmp    R12
+        nop
+TextureAffineUseCheckedStream:
+  .endif
+        iwt     R0, #.loword(TextureBeginCoordinateStream)
+        from    R0
+        ljmp    R12
+        nop
+
+; A packed Q2 vertex stores signed x/y/z bases and two residual bits per
+; axis. Multiplication by 64 produces base<<8 | residual<<6 modulo 65536.
+; R5 is the packed X/Y word and R6 the Z/residual word.
+.macro TEX_READ_AFFINE_UV first_shift, second_shift, s_bias, t_bias, table_mode, swapped
+        from    R6
+  .repeat first_shift
+        lsr
+  .endrepeat
+        to      R1
+        and     R11
+  .repeat second_shift-first_shift
+        lsr
+  .endrepeat
+        to      R2
+        and     R11
+        from    R5
+  .if first_shift = 2
+        lob
+  .else
+        hib
+  .endif
+        swap
+        add     R1
+  .ifblank table_mode
+        iwt     R1, #s_bias
+  .else
+        lm      R1, (TEXTURE_CUR_S)
+  .endif
+        to      R1
+        add     R1
+  .if second_shift = 4
+        from    R5
+        hib
+  .else
+        from    R6
+        lob
+  .endif
+        swap
+        to      R2
+        add     R2
+  .ifblank table_mode
+        iwt     R0, #t_bias
+        to      R6
+        sub     R2
+        move    R5, R1
+        GSU_ABSOLUTE_GOTO TextureAffineContourWriteCoordinates
+  .else
+        lm      R0, (TEXTURE_CUR_T)
+    .if swapped
+        to      R5
+        sub     R2
+        move    R6, R1
+    .else
+        to      R6
+        sub     R2
+        move    R5, R1
+    .endif
+        GSU_ABSOLUTE_GOTO TextureDescriptorContourWriteCoordinates
+  .endif
+.endmacro
+
+.macro TEXTURE_AFFINE_CONTOUR_LOOP vertex_loop, write_coordinates
+        lm      R10, (CONVEX_INDEX_PTR)
+        lm      R9, (CONVEX_FACE_VERTICES)
+        sm      (CONVEX_OUTPUT_COUNT), R9
+        iwt     R8, #TEXTURE_VIEW_A
+        move    R7, #0
+        iwt     R11, #$00C0
+vertex_loop:
+        movew   R3, (R10)
+        inc     R10
+        inc     R10
+        move    R0, R3
+        add     R0
+        add     R0
+        add     R0
+        iwt     R4, #PACKET_VIEW_CACHE
+        with    R4
+        add     R0
+  .repeat 3
+        movew   R0, (R4)
+        movew   (R8), R0
+        inc     R4
+        inc     R4
+        inc     R8
+        inc     R8
+  .endrepeat
+        movew   R2, (R4)
+        with    R7
+        or      R2
+        move    R0, R3
+        add     R0
+        add     R0
+        iwt     R4, #VERTICES
+        with    R4
+        add     R0
+        movew   R5, (R4)
+        inc     R4
+        inc     R4
+        movew   R6, (R4)
+        jmp     R12
+        nop
+write_coordinates:
+        movew   (R8), R5
+        inc     R8
+        inc     R8
+        movew   (R8), R6
+        inc     R8
+        inc     R8
+        dec     R9
+        bne     vertex_loop
+        nop
+        GSU_ABSOLUTE_GOTO TexturePublishShadedContourROM
+.endmacro
+
+GSU_CACHE_KERNEL_BEGIN TextureLoadShadedAffineContourROM
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_DESCRIPTOR_CODE
+        ibt     R0, #7
+        cmp     R6
+        bcs     :+
+        nop
+        GSU_ABSOLUTE_GOTO TextureLoadShadedDescriptorContourROM
+:
+  .endif
+        iwt     R12, #.loword(TextureAffineReadXY)
+        dec     R6
+        beq     TextureAffineContourSetup
+        nop
+        iwt     R12, #.loword(TextureAffineReadXZ)
+        dec     R6
+        beq     TextureAffineContourSetup
+        nop
+        iwt     R12, #.loword(TextureAffineReadYZ)
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_VARIANTS_CODE
+        dec     R6
+        beq     TextureAffineContourSetup
+        nop
+        iwt     R12, #.loword(TextureAffineReadVariant1)
+        dec     R6
+        beq     TextureAffineContourSetup
+        nop
+        iwt     R12, #.loword(TextureAffineReadVariant2)
+        dec     R6
+        beq     TextureAffineContourSetup
+        nop
+        iwt     R12, #.loword(TextureAffineReadVariant3)
+        dec     R6
+        beq     TextureAffineContourSetup
+        nop
+        iwt     R12, #.loword(TextureAffineReadVariant4)
+  .endif
+TextureAffineContourSetup:
+        TEXTURE_AFFINE_CONTOUR_LOOP TextureLoadShadedAffineVertex, TextureAffineContourWriteCoordinates
+
+TextureAffineReadXY:
+        TEX_READ_AFFINE_UV 2, 4, WORLD_AFFINE_UV_S_X, WORLD_AFFINE_UV_T_Y
+TextureAffineReadXZ:
+        TEX_READ_AFFINE_UV 2, 6, WORLD_AFFINE_UV_S_X, WORLD_AFFINE_UV_T_Z
+TextureAffineReadYZ:
+        TEX_READ_AFFINE_UV 4, 6, WORLD_AFFINE_UV_S_Y, WORLD_AFFINE_UV_T_Z
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_VARIANTS_CODE
+.macro TEX_AFFINE_VARIANT entry, variant
+entry:
+    .ifdef PLAYABLE_WORLD_AFFINE_UV
+        TEX_READ_AFFINE_UV .ident(.sprintf("WORLD_AFFINE_UV_VARIANT_%d_S_SHIFT", variant)), .ident(.sprintf("WORLD_AFFINE_UV_VARIANT_%d_T_SHIFT", variant)), .ident(.sprintf("WORLD_AFFINE_UV_VARIANT_%d_S_BIAS", variant)), .ident(.sprintf("WORLD_AFFINE_UV_VARIANT_%d_T_BIAS", variant))
+    .else
+        TEX_READ_AFFINE_UV 2, 6, 0, 0
+    .endif
+        .res $24 - (* - entry), $01
+.endmacro
+        TEX_AFFINE_VARIANT TextureAffineReadVariant1, 1
+        TEX_AFFINE_VARIANT TextureAffineReadVariant2, 2
+        TEX_AFFINE_VARIANT TextureAffineReadVariant3, 3
+        TEX_AFFINE_VARIANT TextureAffineReadVariant4, 4
+  .endif
+GSU_CACHE_KERNEL_END TextureLoadShadedAffineContourROM
+
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_DESCRIPTOR_CODE
+GSU_CACHE_KERNEL_BEGIN TextureLoadShadedDescriptorContourROM
+        with    R6
+        sub     #7
+        iwt     R12, #.loword(TextureDescriptorReadXY)
+        dec     R6
+        beq     TextureDescriptorContourSetup
+        nop
+        iwt     R12, #.loword(TextureDescriptorReadXZ)
+        dec     R6
+        beq     TextureDescriptorContourSetup
+        nop
+        iwt     R12, #.loword(TextureDescriptorReadYZ)
+        dec     R6
+        beq     TextureDescriptorContourSetup
+        nop
+        iwt     R12, #.loword(TextureDescriptorReadSwappedXY)
+        dec     R6
+        beq     TextureDescriptorContourSetup
+        nop
+        iwt     R12, #.loword(TextureDescriptorReadSwappedXZ)
+        dec     R6
+        beq     TextureDescriptorContourSetup
+        nop
+        iwt     R12, #.loword(TextureDescriptorReadSwappedYZ)
+TextureDescriptorContourSetup:
+        TEXTURE_AFFINE_CONTOUR_LOOP TextureLoadShadedDescriptorVertex, TextureDescriptorContourWriteCoordinates
+TextureDescriptorReadXY:
+        TEX_READ_AFFINE_UV 2, 4, 0, 0, 1, 0
+TextureDescriptorReadXZ:
+        TEX_READ_AFFINE_UV 2, 6, 0, 0, 1, 0
+TextureDescriptorReadYZ:
+        TEX_READ_AFFINE_UV 4, 6, 0, 0, 1, 0
+TextureDescriptorReadSwappedXY:
+        TEX_READ_AFFINE_UV 2, 4, 0, 0, 1, 1
+TextureDescriptorReadSwappedXZ:
+        TEX_READ_AFFINE_UV 2, 6, 0, 0, 1, 1
+TextureDescriptorReadSwappedYZ:
+        TEX_READ_AFFINE_UV 4, 6, 0, 0, 1, 1
+GSU_CACHE_KERNEL_END TextureLoadShadedDescriptorContourROM
+
+; Bucket (face XOR (face >> 6)) & 63. Within that bucket, the upper
+; face bits uniquely identify its offset. R6 is still zero, so the
+; normal sequential contour kernel consumes the selected ROM bytes.
+TextureLookupRawContourROM:
+        lm      R0, (PACKET_SOURCE_INDEX)
+        move    R5, R0
+  .repeat 6
+        lsr
+  .endrepeat
+        move    R7, R0
+        xor     R5
+        ibt     R1, #$3F
+        and     R1
+        move    R1, R0
+        add     R0
+        add     R1
+        iwt     R4, #WORLD_RAW_CONTOUR_DIRECTORY_ADDRESS
+        with    R4
+        add     R0
+        ibt     R0, #WORLD_RAW_CONTOUR_DIRECTORY_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_WORD R4
+        getb
+        to      R5
+        or      R4
+        beq     TextureRawContourMissing
+        nop
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        BSP_ROM_LOAD_BYTE R9
+        moves   R9, R9
+        beq     TextureRawContourMissing
+        nop
+TextureRawContourScan:
+        BSP_ROM_LOAD_BYTE R0
+        cmp     R7
+        beq     TextureRawContourFound
+        nop
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        dec     R9
+        bne     TextureRawContourScan
+        nop
+TextureRawContourMissing:
+        GSU_ABSOLUTE_GOTO TextureAffineUseCheckedStream
+TextureRawContourFound:
+        getb
+        with    R4
+        add     R0
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        from    R11
+        ljmp    R12
+        nop
+  .endif
+.assert .bankbyte(TextureLookupAffineWorldCoordinatesROM) = ($80+BSP_GSU_ROM3_BANK), lderror, "Affine coordinates left ROM3"
+.assert .bankbyte(*-1) = ($80+BSP_GSU_ROM3_BANK), lderror, "Affine coordinates cross ROM3"
+.endif
+.endif

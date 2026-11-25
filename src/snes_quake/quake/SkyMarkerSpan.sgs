@@ -1,0 +1,144 @@
+; Sky boundary tokens use the established exact shaded-edge coverage rows.
+; UV interpolation and lightmaps cannot affect their marker color. Keep the
+; normal sampler/row/owner publication, but replay no unused projective math.
+.segment "GSUCODE"
+
+TexturePrepareFaceEndpointBatchOrSky:
+        ; Called only by the fixed technique-4 row replay. The actual selected
+        ; sampler already excludes disabled Sky, mode 4 and technique 7.
+        lm      R0, (TEXTURE_SAMPLE_ROUTINE)
+        iwt     R1, #SkyMarkerSampler
+        with    R0
+        cmp     R1
+        beq     SkyMarkerReplayRows
+        nop
+        ; R11 is still the original five-byte JAL link. No extra return or
+        ; register contract is introduced on the ordinary batch route.
+SkyMarkerOrdinaryEndpoint:
+        GSU_ABSOLUTE_GOTO TexturePrepareFaceEndpointBatch
+
+SkyMarkerReplayRows:
+        ; A composed-cache hit publishes negative WRAP_FLAGS without replacing
+        ; the previous face's sampler. A stale Sky pointer must not reinterpret
+        ; cached texels as constant markers. Only sampler hits pay this guard.
+        lm      R0, (TEXTURE_WRAP_FLAGS)
+        moves   R0, R0
+        bmi     SkyMarkerOrdinaryEndpoint
+        nop
+SkyMarkerReplayAdmitted:
+        move    R0, #0
+        sm      (GSU_TEXTURE_ENDPOINT_READ_PTR_OFFSET), R0
+        sm      (GSU_TEXTURE_ENDPOINT_WORLD_PROOF_OFFSET), R0
+SkyMarkerReplayRow:
+        lm      R10, (CONVEX_FORWARD_PTR)
+        movew   R1, (R10)
+        inc     R10
+        inc     R10
+        movew   R3, (R10)
+        ; Every raw row, including an empty one, consumes its full 16 bytes.
+        with    R10
+        add     #14
+        sm      (CONVEX_FORWARD_PTR), R10
+
+        ; Byte-for-byte equations from the original raw replay conversion.
+        iwt     R0, #59
+        with    R1
+        add     R0
+        BSP_ARITH_SHIFT7 R1, R2
+        moves   R1, R1
+        bpl     SkyMarkerReplayFirstReady
+        nop
+        move    R1, #0
+SkyMarkerReplayFirstReady:
+        iwt     R0, #60
+        with    R3
+        sub     R0
+        BSP_ARITH_SHIFT7 R3, R4
+        move    R0, #BSP_VIEW_WIDTH-1
+        to      R4
+        sub     R3
+        bpl     SkyMarkerReplayLastReady
+        nop
+        move    R3, R0
+SkyMarkerReplayLastReady:
+        move    R0, R3
+        with    R0
+        sub     R1
+        bmi     SkyMarkerReplayNextRow
+        nop
+        lm      R2, (CONVEX_RASTER_Y)
+        jal     SkyDrawMarkerSpan
+        nop
+SkyMarkerReplayNextRow:
+        lm      R0, (CONVEX_RASTER_Y)
+        inc     R0
+        sm      (CONVEX_RASTER_Y), R0
+        lm      R0, (TEXTURE_LIGHTMAP_FAST_ROUTINE)
+        dec     R0
+        sm      (TEXTURE_LIGHTMAP_FAST_ROUTINE), R0
+        beq     SkyMarkerReplayComplete
+        nop
+        GSU_ABSOLUTE_GOTO SkyMarkerReplayRow
+SkyMarkerReplayComplete:
+        ; Preserve endpoint clearing and the existing tall-face chunk resume.
+        GSU_ABSOLUTE_GOTO T4TextureSkyRowsCompleted
+
+; R1/R3 are the exact nonempty covered logical interval; R2 is logical Y.
+; All working registers are volatile, matching the ordinary prepared span.
+SkyDrawMarkerSpan:
+        ; The existing bank-$02 trip also prepares the row; only the hot PLOT
+        ; loop occupies the fixed bank-$70 code partition.
+        iwt     R4, #.loword(SkyFastSpanPrepareROM)
+        move    R12, #BSP_GSU_ROM2_BANK
+        from    R4
+        ljmp    R12
+        nop
+
+SkyMarkerSpanPlotBegin:
+        cache
+        lm      R8, (TEXTURE_SPAN_X)
+        lm      R9, (TEXTURE_SPAN_END_X)
+        to      R12
+        from    R9
+        sub     R8
+        iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
+        with    R10
+        add     R8
+        lm      R2, (TEXTURE_PLOT_Y)
+        moves   R12, R12
+        beq     SkyMarkerSpanSingle
+        nop
+        iwt     R0, #BSP_SKY_TOKEN_START
+        color
+        moveb   R1, (R10)
+        plot
+        inc     R10
+        dec     R12
+        beq     SkyMarkerSpanLast
+        nop
+        iwt     R0, #BSP_SKY_TOKEN_BODY
+        color
+        iwt     R13, #SkyMarkerSpanPixel
+SkyMarkerSpanPixel:
+        ; Only the full row owns delimiters; neither vertical chunks nor
+        ; perspective8/32-pixel boundaries introduce a token transition.
+        moveb   R1, (R10)
+        plot
+        loop
+        inc     R10
+SkyMarkerSpanLast:
+        iwt     R0, #BSP_SKY_TOKEN_END
+        bra     SkyMarkerSpanFinal
+        nop
+SkyMarkerSpanSingle:
+        iwt     R0, #BSP_SKY_TOKEN_SINGLE
+SkyMarkerSpanFinal:
+        color
+        moveb   R1, (R10)
+        plot
+        sm      (TEXTURE_SPAN_X), R9
+        lm      R11, (TEXTURE_SPAN_RETURN)
+        ret
+        nop
+.assert * - SkyMarkerSpanPlotBegin < $1F0, error, "Sky marker span exceeds its one cache window"
+.assert * - TexturePrepareFaceEndpointBatchOrSky <= $140, error, "Sky marker replay exceeds its reserved RAM budget"

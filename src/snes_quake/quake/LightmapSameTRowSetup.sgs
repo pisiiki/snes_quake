@@ -1,0 +1,54 @@
+; Only the closed-grid world route enters here. The square, single-bank P2
+; route owns its wrap mask and the exact ordinary plot continuation.
+TextureLightmapSameTSelect:
+        iwt     R1, #TextureLightmapInteriorSpanLoop
+        from    R13
+        cmp     R1
+        bne     TextureLightmapSameTUseExisting
+        nop
+        lm      R0, (TEXTURE_SPAN_DEN)
+        ibt     R1, #3
+        cmp     R1
+        bcc     TextureLightmapSameTUseExisting
+        nop
+        lm      R1, (TEXTURE_BLOCK_END_T)
+        from    R6
+        xor     R1
+        ibt     R1, #16
+        cmp     R1
+        bcs     TextureLightmapSameTUseExisting
+        nop
+
+        ; All exact Q4 T values are between these endpoints. Equality of
+        ; their upper 12 bits preserves the texture row and light fraction.
+        ; Clipping's CUR_S/T and the coordinate builder's return word are
+        ; idle until the next face or block setup.
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+        from    R6
+        and     R1
+  .repeat 4
+        lsr
+  .endrepeat
+        lm      R1, (TEXTURE_WIDTH)
+        umult   R1
+        lm      R1, (TEXTURE_ROM_ADDRESS)
+        add     R1
+        sm      (TEXTURE_CUR_S), R0
+        from    R6
+        hib
+        lm      R1, (LIGHTMAP_WIDTH)
+        mult    R1
+        lm      R1, (LIGHTMAP_ADJUSTED_ADDRESS)
+        add     R1
+        sm      (TEXTURE_CUR_T), R0
+        iwt     R1, #$00F0
+        from    R6
+        and     R1
+        sm      (TEXTURE_COORD_RETURN), R0
+        iwt     R13, #TextureLightmapSameTPixel
+        jmp     R13
+        nop
+TextureLightmapSameTUseExisting:
+        iwt     R0, #$8000
+        jmp     R13
+        nop

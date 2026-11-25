@@ -1,0 +1,59 @@
+; The alias suffix comes after opaque brushes. Links are rebuilt for each
+; frozen E1M1 render. Within the far-to-near alias suffix, tag 01 means
+; the link cannot cover this alias or a nearer one. Opaque facing treats
+; it as unknown.
+.assert BSP_ALIAS_LIVE_POSES && !.defined(PLAYABLE_RESIDENT_WORLD), error, "Empty projection tags require fresh brush links"
+FlyBrushMaskProject:
+        jal     BrushClipPreparedPolygon
+        nop
+        moves   R12, R0
+        beq     @Reject
+        nop
+        ; Projection copies clipped depth unchanged. Test the clipped
+        ; vertices before computing screen coordinates. Ties need rasterization.
+        lm      R1, (FLY_MASK_DEPTH)
+        inc     R1
+        bmi     @Project
+        nop
+        beq     @Project
+        nop
+        lm      R10, (CONVEX_INPUT_PTR)
+        with    R10
+        add     #4                      ; Depth follows right and up.
+        iwt     R13, #.loword(@Depth)
+@Depth:
+        ldw     (R10)
+        moves   R0, R0
+        bmi     @Project
+        nop
+        cmp     R1
+        bcc     @Project
+        nop
+        with    R10
+        add     #TEXTURE_VIEW_RECORD_BYTES
+        loop
+        nop
+@Reject:
+        lm      R0, (BRUSH_CURRENT_LINK)
+        add     R0
+        add     R0
+        iwt     R10, #BRUSH_LINKS
+        with    R10
+        add     R0
+        ldw     (R10)
+        iwt     R1, #BRUSH_LINK_BACKFACING_TAG
+        ; Facing already proved this link had tag 10. Preserve its payload.
+        sub     R1
+        stw     (R10)
+        GSU_ABSOLUTE_GOTO FlyBrushMaskPrepareReturn, 1
+        sub     R0
+@Project:
+        ; Keep the arbiter's return identity for the projected-Y classifier.
+        iwt     R0, #.loword(@Projected)
+        sm      (BRUSH_ARB_PROJECT_RETURN), R0
+        GSU_ABSOLUTE_GOTO BrushArbiterProjectAfterClip
+@Projected:
+        moves   R0, R0
+        beq     @Reject
+        nop
+        GSU_ABSOLUTE_GOTO FlyBrushMaskProjectionAccepted

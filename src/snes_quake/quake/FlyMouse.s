@@ -98,19 +98,33 @@ ReadFlyMouseControls:
         and     #$0040
         beq     :+
         lda     camera_input_buttons
+.if BSP_QUAKEC_GAMEPLAY
+        ora     #JOY_L                 ; No-demo E1M1: fire without walking.
+.else
         ora     #JOY_X
+.endif
         sta     camera_input_buttons
 :
         lda     fly_mouse_buttons
         and     #$0080
-        beq     :+
+        beq     @Motion
         lda     camera_input_buttons
+.ifdef QC_QUEUED_INPUT
+        ldx     qc_input_replay
+        bne     @MouseBack
+        ora     #JOY_R                 ; Live mouse secondary jumps.
+        bra     @StoreSecondary
+@MouseBack:
+.endif
         ora     #JOY_B
+@StoreSecondary:
         sta     camera_input_buttons
-:
+@Motion:
+.ifndef QC_QUEUED_INPUT
         lda     fly_playback_mode
         cmp     #RUNTIME_MENU_PLAYBACK_FLY3X
         beq     @Consume
+.endif
         lda     control_divider
         and     #$0001
         bne     @Done

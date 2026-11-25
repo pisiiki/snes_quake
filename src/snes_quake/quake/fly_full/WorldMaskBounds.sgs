@@ -5,19 +5,19 @@
         iwt     R1, #$7FFF
         with    R0
         and     R1
-        move    R1, R0
+  .repeat 2
         with    R0
         add     R0
-        with    R0
-        add     R1
-        with    R0
-        add     R0
+  .endrepeat
         iwt     R10, #FLY_MASK_BOUNDS
         with    R10
         add     R0
 .endmacro
 
 FlyWorldMaskCheckBounds:
+        ; Cached bounds reject most world links without calling projection.
+        ; Keep this complete leaf path resident across those repeated checks.
+        cache
         FLY_WORLD_BOUNDS_ADDRESS
         movew   R0, (R10)
         iwt     R1, #$FFFF
@@ -27,17 +27,7 @@ FlyWorldMaskCheckBounds:
         nop
         GSU_ABSOLUTE_GOTO FlyWorldMaskCoarseBounds
 FlyWorldBoundsCached:
-        move    R3, R10
-        with    R3
-        add     #4
-        movew   R0, (R3)
-        lm      R1, (FLY_MASK_DEPTH)
-        with    R1
-        cmp     R0
-        FLY_SIGNED_BRANCH $07, FlyWorldBoundsMiss
-        nop
         moveb   R0, (R10)
-        lob
         lm      R1, (FLY_MASK_RECT_LAST_X)
         with    R1
         cmp     R0
@@ -45,7 +35,6 @@ FlyWorldBoundsCached:
         nop
         inc     R10
         moveb   R0, (R10)
-        lob
         lm      R1, (FLY_MASK_RECT_FIRST_X)
         with    R0
         cmp     R1
@@ -53,7 +42,6 @@ FlyWorldBoundsCached:
         nop
         inc     R10
         moveb   R0, (R10)
-        lob
         lm      R1, (FLY_MASK_RECT_LAST_Y)
         with    R1
         cmp     R0
@@ -61,7 +49,6 @@ FlyWorldBoundsCached:
         nop
         inc     R10
         moveb   R0, (R10)
-        lob
         lm      R1, (FLY_MASK_FIRST_Y)
         with    R0
         cmp     R1
@@ -75,72 +62,70 @@ FlyWorldBoundsMiss:
         move    R0, #0
         ret
         nop
-
-FlyWorldMaskStoreBounds:
-        move    R8, R0
-        FLY_WORLD_BOUNDS_ADDRESS
+        ; LDB zero-extends the full register. Its four former LOBs are dead
+        ; before CMP; absorb their size only after the leaf's final return.
+.ifdef PLAYABLE_BRUSH_PROJECTED_X_BOUNDS
+        ; An empty horizontal polygon cannot mask the alias at any depth.
+        ; Both destinations are ordinary continuations of the mask driver.
+BrushStoreAliasProjectedBounds:
+        jal     BrushArbiterStoreCurrent
+        nop
         moves   R8, R8
-        bne     FlyWorldBoundsPolygon
+        beq     BrushMaskPolygonEmpty
         nop
-        ; An empty polygon's inverted X interval rejects every visible alias.
-        iwt     R0, #$00FF
-        movew   (R10), R0
-        bra     FlyWorldBoundsStored
+        GSU_ABSOLUTE_GOTO FlyBrushMaskRow
+BrushMaskPolygonEmpty:
+        GSU_ABSOLUTE_GOTO FlyBrushMaskNextPolygon
+.endif
+.assert * - FlyWorldMaskCheckBounds <= $75, error, "World bounds leaf exceeds its pinned slot"
+        .res $75 - (* - FlyWorldMaskCheckBounds), $01
+.assert .loword(*) <= (.loword(FlyWorldMaskCheckBounds + 1) & $FFF0) + GSU_CACHE_BYTES, lderror, "World bounds leaf leaves its entry cache"
+.assert .bankbyte(*-1) = .bankbyte(FlyWorldMaskCheckBounds), lderror, "World bounds leaf crosses its code bank"
+
+; Keep the descending scan and rejection backedge in the bounds cache.
+; Scan the world's descending links without a ROM round trip per bounds test
+; or preparation step. Nested projection/raster calls own their scratch links;
+; the persistent ROM callback is restored by the existing bank trampoline.
+FlyWorldMaskScan:
+        ; Reverse painter ownership is complete; proceed to the brush pass.
+        lm      R0, (FLY_MASK_WORLD_REMAINING)
+        moves   R0, R0
+        beq     FlyWorldMaskScanExhausted
         nop
-FlyWorldBoundsPolygon:
-        iwt     R3, #32767
-        iwt     R4, #-32768
-        iwt     R9, #TEXTURE_SCREEN
-        lm      R12, (CONVEX_SCREEN_COUNT)
-        iwt     R13, #FlyWorldBoundsVertex
-FlyWorldBoundsVertex:
-        movew   R0, (R9)
+        lm      R0, (FLY_MASK_LINK)
+        iwt     R1, #$7FFF
         with    R0
-        cmp     R3
-        FLY_SIGNED_BRANCH $06, FlyWorldBoundsMinReady
-        nop
-        move    R3, R0
-FlyWorldBoundsMinReady:
-        with    R0
-        cmp     R4
-        FLY_SIGNED_BRANCH $07, FlyWorldBoundsMaxReady
-        nop
-        move    R4, R0
-FlyWorldBoundsMaxReady:
-        with    R9
-        add     #TEXTURE_SHADE_SCREEN_RECORD_BYTES
-        loop
-        nop
-  .repeat 7
-        with    R3
-        asr
-        with    R4
-        asr
-  .endrepeat
-        ; Conservative bounds only; no pixel is written by this rounding.
-        inc     R4
-        moves   R3, R3
-        bpl     FlyWorldBoundsLeftReady
-        nop
-        move    R3, #0
-FlyWorldBoundsLeftReady:
-        iwt     R1, #BSP_VIEW_WIDTH-1
-        with    R4
         cmp     R1
-        FLY_SIGNED_BRANCH $07, FlyWorldBoundsRightReady
+        beq     FlyWorldMaskScanExhausted
         nop
-        move    R4, R1
-FlyWorldBoundsRightReady:
-        moveb   (R10), R3
-        inc     R10
-        moveb   (R10), R4
-        inc     R10
-        lm      R0, (CONVEX_RASTER_Y)
-        moveb   (R10), R0
-        inc     R10
-        lm      R0, (CONVEX_TOP_PTR)
-        moveb   (R10), R0
-FlyWorldBoundsStored:
-        move    R0, R8
-        ret
+        jal     FlyWorldMaskCheckBounds
         nop
+        moves   R0, R0
+        beq     FlyWorldMaskScanAdvance
+        nop
+        jal     FlyWorldBuildDepthView
+        nop
+        jal     BrushArbiterProjectCurrent
+FlyWorldMaskCurrentProjected:
+        nop
+        ; Store even empty projections: their inverted bounds reject later
+        ; aliases without repeating the same projection work.
+        jal     FlyWorldMaskRasterize
+        nop
+        moves   R0, R0
+        bne     FlyWorldMaskScanReturn
+        nop
+FlyWorldMaskScanAdvance:
+        lm      R0, (FLY_MASK_LINK)
+        dec     R0
+        sm      (FLY_MASK_LINK), R0
+        GSU_ABSOLUTE_GOTO FlyWorldMaskScan
+FlyWorldMaskScanExhausted:
+        move    R0, #0
+FlyWorldMaskScanReturn:
+        GSU_ABSOLUTE_GOTO FlyBrushMaskCallROMReturn
+
+FlyWorldMaskScanEnd:
+.assert FlyWorldMaskScanEnd - FlyWorldMaskScan = $4B, error, "World scan footprint changed"
+.assert .bankbyte(FlyWorldMaskScan) = .bankbyte(FlyWorldMaskCheckBounds), lderror, "World scan left bounds bank"
+.assert .loword(FlyWorldMaskScanEnd) <= (.loword(FlyWorldMaskCheckBounds + 1) & $FFF0) + GSU_CACHE_BYTES, lderror, "World scan left bounds cache"

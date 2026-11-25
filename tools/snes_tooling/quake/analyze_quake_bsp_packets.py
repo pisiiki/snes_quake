@@ -9,6 +9,7 @@ No locally installed Quake data is required.
 
 from __future__ import annotations
 
+from snes_tooling.quake import quake_view_transform
 from snes_tooling import Workspace
 
 import argparse
@@ -41,14 +42,14 @@ WORLD_FACE_FLAG_PLANE_CULL_GUARD = 0x02
 WORLD_FACE_KNOWN_FLAGS = WORLD_FACE_FLAG_NON_DRAWABLE | WORLD_FACE_FLAG_PLANE_CULL_GUARD
 
 # These are the effective limits of MemoryMap.i.  The packet arrays are sized
-# together for 768 shared vertices.
-PACKET_FACE_CAPACITY = 405
-PACKET_VERTEX_CAPACITY = 768
+# together for 880 shared vertices.
+PACKET_FACE_CAPACITY = 409
+PACKET_VERTEX_CAPACITY = 880
 PACKET_INDEX_CAPACITY = 0x1000 // 2
 
 LOGICAL_WIDTH = 128
 LOGICAL_HEIGHT = 112
-SCREEN_ADMISSION_GUARD = 1
+SCREEN_ADMISSION_GUARD = 7
 NEAR_DEPTH = 1
 PROJECTION_SHIFT = 8
 RECIPROCAL_NUMERATOR = 96 << PROJECTION_SHIFT
@@ -401,9 +402,9 @@ def _signed_mul_shift6(source: int, multiplier: int) -> int:
 
 
 def _signed_shift6(value: int) -> int:
-    """Mirror the GSU arithmetic shift of a signed Q12 product to Q6."""
+    """Mirror nearest Q6 pitch products; exact halfway cases round upward."""
 
-    return _signed16(value >> 6)
+    return _signed16((value + 32) >> 6)
 
 
 ViewTransform = Callable[
@@ -431,6 +432,7 @@ def project_vertex(
         (view_depth + (VIEW_ONE // DEPTH_TABLE_ONE // 2))
         >> (VIEW_FRACTION_BITS - DEPTH_TABLE_FRACTION_BITS),
     )
+    table_depth = min(table_depth, len(assets.reciprocal_table) - 1)
     reciprocal = assets.reciprocal_table[table_depth]
     return (
         _signed16(viewport[2] + ((right * reciprocal) >> SUBPIXEL_RECIPROCAL_SHIFT)),
@@ -439,33 +441,13 @@ def project_vertex(
 
 
 def transform_vertex(
-    assets: Assets,
-    vertex: tuple[int, int, int],
-    camera: tuple[int, int, int],
-    yaw: int,
-    pitch: int = 0,
+    assets: Assets, vertex: tuple[int, int, int], camera: tuple[int, int, int],
+    yaw: int, pitch: int = 0,
 ) -> tuple[int, int, int]:
-    """Mirror the selector's Q6 view transform without integer-unit collapse."""
-    coordinate_scale = 1 << assets.vertex_fraction_bits
-    dx, dy, dz = (vertex[axis] - camera[axis] * coordinate_scale for axis in range(3))
-
-    def to_q6(value: int) -> int:
-        return (
-            value
-            if assets.vertex_fraction_bits == 0
-            else value >> assets.vertex_fraction_bits
-        )
-
-    forward = to_q6(dx * assets.cos_table[yaw]) + to_q6(dy * assets.sin_table[yaw])
-    right = to_q6(dy * assets.cos_table[yaw]) - to_q6(dx * assets.sin_table[yaw])
-
-    view_up = to_q6(dz * assets.cos_table[pitch]) - _signed_shift6(
-        forward * assets.sin_table[pitch]
-    )
-    view_depth = _signed_shift6(forward * assets.cos_table[pitch]) + to_q6(
-        dz * assets.sin_table[pitch]
-    )
-    return right, view_up, view_depth
+    """Mirror the full linear native view, with a single final Q6 rounding."""
+    return quake_view_transform.packed_view_transform(vertex, camera,
+        (assets.cos_table[yaw], assets.sin_table[yaw], assets.cos_table[pitch], assets.sin_table[pitch]),
+        vertex_fraction_bits=assets.vertex_fraction_bits)
 
 
 def face_is_front_facing(
@@ -492,8 +474,12 @@ def projection_stages(
     *,
     view_transform: ViewTransform | None = None,
     viewport: tuple[int, int, int, int] = (128, 112, 64, 56),
+    screen_admission_guard: int = SCREEN_ADMISSION_GUARD,
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
     """Return front-facing, near-valid, and screen-bbox candidate face IDs."""
+
+    if type(screen_admission_guard) is not int or screen_admission_guard < 0:
+        raise ValueError("screen admission guard must be a nonnegative integer")
 
     front: list[int] = []
     near: list[int] = []
@@ -545,10 +531,10 @@ def projection_stages(
             # overlap is the cheap conservative pre-copy rejection available
             # to the planned runtime builder.
             if (
-                max(xs) >= -SCREEN_ADMISSION_GUARD
-                and min(xs) < viewport[0] + SCREEN_ADMISSION_GUARD
-                and max(ys) >= -SCREEN_ADMISSION_GUARD
-                and min(ys) < viewport[1] + SCREEN_ADMISSION_GUARD
+                max(xs) >= -screen_admission_guard
+                and min(xs) < viewport[0] + screen_admission_guard
+                and max(ys) >= -screen_admission_guard
+                and min(ys) < viewport[1] + screen_admission_guard
             ):
                 screen_candidate = True
                 break
@@ -830,7 +816,7 @@ def build_report(data_dir: Path = DEFAULT_DATA_DIR) -> dict[str, object]:
         "decision": {
             "retain": "shared vertex remapping with capacity-aware fallback",
             "reject": "duplicated vertices",
-            "reason": "shared remapping preserves materially more screen candidates within the 768-vertex limit",
+            "reason": f"shared remapping preserves materially more screen candidates within the {PACKET_VERTEX_CAPACITY}-vertex limit",
         },
     }
 

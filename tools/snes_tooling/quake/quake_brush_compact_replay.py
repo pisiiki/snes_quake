@@ -76,6 +76,9 @@ def decode_runtime_replay(
     if sections["REPLAY"] != runtime_entity_directory(offline_payload):
         raise ValueError("runtime entity directory differs from offline replay")
     decoded = decode_compact_replay(offline_payload)
+    independent = sections.get("PLATPOSE", b"")
+    if independent and (len(independent) != 2 + len(decoded.rows) * 2 or independent[0] == independent[1]):
+        raise ValueError("runtime platform directory differs from its row/slot bounds")
     header = COMPACT_REPLAY_HEADER.unpack_from(offline_payload)
     entities = tuple(
         COMPACT_ENTITY.unpack_from(offline_payload, 32 + i * COMPACT_ENTITY.size)
@@ -102,6 +105,10 @@ def decode_runtime_replay(
             if slot >= len(entities):
                 raise ValueError("runtime visual transform names a missing entity")
             entity, model, variant_count, start = entities[slot]
+            if independent and slot in independent[:2]:
+                if local != independent[2 + independent[:2].index(slot)]:
+                    raise ValueError("runtime platform base differs from its low stop")
+                local = independent[2 + index * 2 + independent[:2].index(slot)]
             if local >= variant_count:
                 raise ValueError("runtime visual transform names a missing variant")
             x, y, z, frame = variants[start + local]

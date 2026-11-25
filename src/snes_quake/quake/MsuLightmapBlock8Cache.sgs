@@ -1,0 +1,45 @@
+; Keep the ordinary eight-pixel setup inside the sampling cache. The MSU
+; world path consumes buffered endpoints and rarely needs the generic divider.
+TextureLightmapBlock8SetupOrdinary:
+        ; The cached nonfinal caller has already excluded composed surfaces.
+        ; Return straight to preparation instead of checking that route twice.
+  .ifdef BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+    .if BSP_WORLD_LIGHTMAP_CLOSED_GRID_PROVEN
+        iwt     R11, #LightmapPrepareWorldClosedGrid
+    .else
+        iwt     R11, #LightmapPrepareBlock
+    .endif
+  .else
+        iwt     R11, #LightmapPrepareBlock
+  .endif
+TextureLightmapBlock8SetupShared:
+        iwt     R6, #$2000
+        lm      R1, (TEXTURE_SPAN_S)
+        from    R5
+        sub     R1
+        move    R5, R1
+        to      R7
+        lmult
+        move    R9, R4
+        ; Fractional carries are multiples of $2000. The signed step lies
+        ; in [0,$0FFF] or [$F000,$FFFF], the same carry bucket as 0/$E000.
+        move    R1, R7
+        lm      R2, (TEXTURE_SPAN_T)
+        from    R10
+        sub     R2
+        to      R8
+        lmult
+        move    R6, R2
+        move    R3, R4
+        move    R2, R8
+        move    R12, #8
+TextureBuildCoordinateOrdinaryStart:
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+4
+        iwt     R13, #TextureBuildCoordinateLoop
+        jmp     R13
+        with    R1
+TextureBuildCoordinateOrdinaryFinish:
+        lm      R11, (TEXTURE_COORD_RETURN)
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        GSU_ABSOLUTE_GOTO TextureBuildCoordinateOrdinaryStart

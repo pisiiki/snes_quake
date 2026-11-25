@@ -1,0 +1,21 @@
+; Inputs R0/R1 are logical u/v. Normalize the same exact packed-x2 ray,
+; preserving full phase during every binary32 operation. Removing an integral
+;128-texel epoch only AFTER final Q16 truncation preserves texture/DDA results.
+SkyProjectExactEndpoint:
+        sm      (SF_EXACT_PROJECT_RETURN), R11
+        jal     SkyBuildRayNumerators
+        nop
+        jal     SkyFloatEndpointX2
+        nop
+        lm      R2, (SF_PHASE_EPOCH_HI)
+        .repeat 2, axis
+          lm    R0, (SF_OUTS0+axis*4)
+          sm    (SKY_ENDPOINT_S_LO+axis*4), R0
+          lm    R0, (SF_OUTS0+axis*4+2)
+          with  R0
+          sub   R2
+          sm    (SKY_ENDPOINT_S_HI+axis*4), R0
+        .endrepeat
+        lm      R11, (SF_EXACT_PROJECT_RETURN)
+        ret
+        nop

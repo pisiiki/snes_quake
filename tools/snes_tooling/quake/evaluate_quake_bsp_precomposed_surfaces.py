@@ -234,7 +234,7 @@ def load_assets(data_dir: Path = DEFAULT_DATA_DIR) -> Assets:
     face_texture_ids = _read(data_dir / "QuakeBSPWorldFaceTextureIds.bin", digest)
     coordinate_bytes = b"".join(
         _read(data_dir / f"QuakeBSPWorldTextureCoordinates{index}.bin", digest)
-        for index in range(3)
+        for index in range(len(packing["coordinate_chunks"]))
     )
     texture_directory_path = data_dir / "QuakeBSPWorldTextureDirectory.bin"
     texture_directory = _read(texture_directory_path)

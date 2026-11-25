@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from snes_tooling import Workspace
-
 import hashlib
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 
 from typing import Any
 
+import snes_tooling.quake.build_quake_bsp_reference as reference_build
 import snes_tooling.quake.generate_quake_bsp as bsp_tools
 from snes_tooling.quake.quake_brush_replay import (
     BrushEntityState,
@@ -21,24 +21,11 @@ from snes_tooling.quake.quake_external_bsp_replay import CanonicalExternalBspRep
 
 
 EXTERNAL_MODEL_CLASS = "external_bsp"
-REFERENCE_VISIBILITY_SOURCES = (
-    "external_models.cpp",
-    "external_models_packed.cpp",
-    "packed_brushes.cpp",
-    "ordered_replay.cpp",
-)
 DIRECT_SAFETY_SCHEMA = "quake-brush-direct-safety-v1"
 
 
 def _reference_visibility_source_sha256() -> str:
-    root = Workspace.discover().root / "src/reference_renderer"
-    digest = hashlib.sha256()
-    for name in REFERENCE_VISIBILITY_SOURCES:
-        payload = (root / name).read_bytes()
-        digest.update(name.encode("ascii"))
-        digest.update(len(payload).to_bytes(8, "little"))
-        digest.update(payload)
-    return digest.hexdigest()
+    return str(reference_build.reference_source_identity()["aggregateSha256"])
 
 
 def load_external_visibility_profile(
@@ -179,6 +166,9 @@ def load_brush_direct_safety_profile(
     if safe_rows and (contract.get('qualifiedTechniques') != [2, 4]
                       or set(source.get('techniqueProofs', {})) != {'2', '4'}):
         raise ValueError('brush direct safety must qualify both techniques 2 and 4')
+    aliases = source.get('qualifiedAliasAssetsSha256')
+    if safe_rows and (not isinstance(aliases,str) or re.fullmatch('[0-9a-f]{64}',aliases) is None):
+        raise ValueError('brush direct safety lacks its qualified sprite assets; rerun exact/direct qualification')
     coverage = document.get("coverage", {})
     if safe_rows != int(
         coverage.get("safeRowCount", -1)
@@ -193,6 +183,7 @@ def load_brush_direct_safety_profile(
         "safeRowCount": safe_rows,
         "exactFallbackRowCount": row_count - safe_rows,
         "contract": contract["runtime"],
+        'qualifiedAliasAssetsSha256': aliases,
     }
 
 

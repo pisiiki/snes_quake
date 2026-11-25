@@ -1,7 +1,6 @@
 #pragma once
 
 #include "geometry.hpp"
-#include "presentation_warp.hpp"
 
 namespace quake_bsp_reference {
 
@@ -22,18 +21,21 @@ struct ReferenceInstrumentationCommands
 {
     std::optional<bool> paused;
     std::optional<RenderScale> render_scale;
-    std::optional<WarpSettings> warp_settings;
-    std::optional<std::size_t> view_pose;
     std::optional<std::int64_t> scene_pose;
     std::optional<std::optional<SourceCamera>> capture_camera;
+    std::optional<bool> fly_camera;
     std::optional<PlaybackSchedule> pace;
     std::optional<int> presentation_rate_hz;
     std::optional<std::size_t> pose;
     std::optional<bool> external_bsp_models;
     std::optional<bool> particles_enabled;
+    std::optional<bool> full_precision;
+    std::optional<bool> weapon_enabled;
     std::optional<bool> sound_enabled;
     std::optional<float> sound_volume;
     std::optional<std::string> window_capture_path;
+    std::vector<SDL_Event> input_events;
+    std::vector<Json> gameplay_requests;
     bool shutdown{};
 };
 

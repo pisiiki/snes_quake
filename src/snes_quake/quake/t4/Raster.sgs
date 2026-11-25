@@ -6,6 +6,10 @@
 
 DEFINE_TEXTURE_SHADED_RASTER T4TextureRasterPolygonShaded, 1, TextureCacheActiveEdgeShaded, TextureIntersectActiveEdgeShaded, T4TextureStageLightmapEdge, 1
 
+; Walkers now share resident padding. Retain the old dead fallback envelope
+; so the CPU copy extent and every following packed ROM load stay unchanged.
+        .res $02C9 - (* - T4TextureRasterPolygonShaded)
+
 ; The face-level route points here only when its 16-byte rows cannot fit the
 ; bounded staging arena. Publish the register-return edge exactly as the old
 ; shared scratch path did, then return to the unchanged direct-span loop.
@@ -33,7 +37,7 @@ T4TextureStageLightmapFallbackRight:
 .segment "GSU_T4_EDGE_PATCH"
 
 T4TextureShadeIntersectModeDispatch:
-        iwt     R13, #TextureEdgePerspectiveLookup
+        iwt     R13, #TextureEdgePerspectiveLookupPrepared
         jal     TexturePerspectiveFactorQ12Products
         move    R6, R3
         bra     TextureShadeIntersectScaleFactor
@@ -51,10 +55,18 @@ T4TextureShadeIntersectScaledDepth:
         add     R5
         bra     TextureShadeIntersectScaledAttributes
         nop
+        ; The shared edge-factor wrapper occupies existing depth-overlay
+        ; padding. Restore it with the same overlay before other modes run.
+        .res $16 - (* - T4TextureShadeIntersectScaledDepth), $01
+T4TextureEdgePerspectiveLookupPrepared:
+        iwt     R10, #TextureDivideQ12EdgeLoadedCached
+        bra     TextureEdgePerspectiveLookup
+        nop
 
 .assert T4TextureShadeIntersectScaledDepth = TextureShadeIntersectScaledDepth, error, "Technique-4 edge depth output moved away from the general depth path"
+.assert T4TextureEdgePerspectiveLookupPrepared = TextureEdgePerspectiveLookupPrepared, error, "Technique-4 edge lookup wrapper moved away from the shared cache slot"
 .assert * - T4TextureShadeIntersectScaledDepth <= GSU_T4_EDGE_DEPTH_CAPACITY, error, "Technique-4 edge depth output exceeds the general depth window"
-.assert * <= TextureShadeIntersectDepthEnd, error, "Technique-4 edge depth output overlaps the general continuation"
+.assert * <= TextureEdgePerspectiveMirrorMiss, error, "Technique-4 edge depth output overlaps the mirror-miss continuation"
 
 ; The common T4 row path writes each edge straight into its compact stage
 ; record and returns left edges while the shaded-edge cache is resident.
@@ -113,6 +125,10 @@ T4TextureShadeIntersectOutputs:
         bra     TextureShadeIntersectScreenX
         nop
 
+  .repeat $35 - (* - T4TextureShadeIntersectOutputs)
+        nop
+  .endrepeat
+DEFINE_TEXTURE_EDGE_WALK_REVERSE T4TextureEdgeWalkReverse
   .repeat $47 - (* - T4TextureShadeIntersectOutputs)
         nop
   .endrepeat

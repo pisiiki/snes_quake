@@ -2,6 +2,69 @@
 ; former reciprocal-tail support only after both general/F3 tails have ended.
 .segment "GSU_TEXTURE_TAIL_CODE"
 .assert .loword(AliasBuildVisibilityRow) = GSU_TEXTURE_TAIL_CODE_OFFSET, lderror, "Texture-tail start moved"
+; These two cold T4 controllers replace unused padding, before the fixed $5E0
+; entry. The complete tail is installed before any textured renderer starts;
+; its extent, copy lengths and every established helper address stay fixed.
+T4TextureTailColdControllers:
+T4TextureLightmapRouteIndexReadyCold:
+        with    R0
+        add     R0
+        iwt     R10, #TEXTURE_STEP_S
+        with    R10
+        add     R0
+        movew   R13, (R10)
+        GSU_ABSOLUTE_GOTO T4TextureLightmapBlockRoutineReady
+
+; Only rows whose polygon walkers cross enter this cold direct-fetch path.
+; Swap the four adjacent {left,right} words in place, then rejoin the still-
+; resident stage helper to publish the next record address.
+T4TextureStageLightmapReverseCold:
+        dec     R10
+        dec     R10
+        move    R12, #4
+T4TextureStageLightmapSwapLoop:
+        movew   R0, (R10)
+        inc     R10
+        inc     R10
+        movew   R1, (R10)
+        movew   (R10), R0
+        dec     R10
+        dec     R10
+        movew   (R10), R1
+        with    R10
+        add     #4
+        dec     R12
+        bne     T4TextureStageLightmapSwapLoop
+        nop
+        GSU_ABSOLUTE_GOTO T4TextureStageLightmapAdvance
+T4TextureTailColdControllersEnd:
+.assert T4TextureTailColdControllersEnd - T4TextureTailColdControllers = 38, error, "T4 cold controllers changed their encoded footprint"
+; Admitted brush pixels retain their private cache across coordinate blocks.
+; Initialize the unchanged register-fed DDA in the existing cold padding, then
+; enter its private signed-step/loop copy without replacing the brush CBR.
+BrushCachedBuildCoordinateBlockRegisters:
+        sm      (TEXTURE_COORD_RETURN), R0
+        iwt     R10, #GSU_TEXTURE_BLOCK_COORDS_OFFSET+2
+        lm      R5, (TEXTURE_SPAN_S)
+        lm      R6, (TEXTURE_SPAN_T)
+        move    R1, #0
+        lm      R3, (TEXTURE_SPAN_DEN)
+        move    R12, R3
+        with    R1
+        sub     R3
+        move    R2, R1
+        GSU_ABSOLUTE_GOTO BrushCachedBuildCoordinateStateReady
+.if BSP_RENDER_SCALE = 2
+; Prime only the first coordinate block. Later blocks already retain this
+; window and must not discard their cached loop. Reuse the installed R12
+; dispatch in its first line, without growing or moving the hot image.
+BrushCachedPrimeCoordinateBlock:
+        iwt     R12, #BrushCachedBuildCoordinateBlockRegisters
+        GSU_ABSOLUTE_GOTO BrushCachedJumpR12, shared_delay
+        cache
+.assert * - BrushCachedPrimeCoordinateBlock = 7, error, "Brush coordinate primer changed its bounded footprint"
+.endif
+.assert * - AliasBuildVisibilityRow <= $5E0, error, "T4 cold controllers exceed existing texture-tail padding"
 .res $5E0 - (* - AliasBuildVisibilityRow)
 
 .segment "GSU_TEXTURE_TAIL_CODE"
@@ -67,7 +130,7 @@ BrushBuildStaticLinksDone:
 
 BrushLoadDirectSafety:
         sm      (BRUSH_DIRECT_RETURN), R11
-        move    R9, #$02
+        move    R9, #BSP_GSU_ROM2_BANK
         iwt     R8, #.loword(BrushLoadDirectSafetyROM)
         from    R8
         ljmp    R9
@@ -224,7 +287,7 @@ GSU_CACHE_KERNEL_END TurbulenceCachedSpan
 .assert .loword(TurbulenceCachedSpan) = $3E80, lderror, "Relocated turbulence cache entry moved"
 .assert .loword(*) = $3F20, lderror, "Relocated turbulence cache footprint changed"
 
-; Admit only the exact ordinary T4 interior route, once per coordinate block.
+; Admit ordinary T4 interiors or exact missing maps on first or variable blocks.
 ; R4/R7/R8/R9/R11/R13 carry the pending signed DDA and remain untouched.
 ; Original depth and row-shift dispatch words stay intact for every fallback.
 BrushCachedSpanAdmit:
@@ -244,7 +307,9 @@ BrushCachedSpanOrdinary:
         moves   R0, R0
         bmi     BrushCachedSpanInterior
         nop
-        GSU_ABSOLUTE_GOTO BrushCachedSpanFallback
+BrushCachedSpanMissingDispatch:
+        GSU_ABSOLUTE_GOTO BrushCachedSpanMissingAdmission
+.assert * - BrushCachedSpanMissingDispatch = 4, error, "Brush missing-map admission displaced existing routes"
 BrushCachedSpanInterior:
         lm      R0, (TEXTURE_SAMPLE_ROUTINE)
         iwt     R1, #TextureSampleAbsolutePowerOfTwoSingleBankRegisters
@@ -265,7 +330,7 @@ BrushCachedSpanSamplerReady:
         cmp     R1
         beq     BrushCachedSpanBufferedSelected
         nop
-        GSU_ABSOLUTE_GOTO BrushCachedSpanFallback
+        GSU_ABSOLUTE_GOTO BrushCachedSpanUnitRiseAdmission
 BrushCachedSpanConstantSelected:
         iwt     R2, #BrushCachedDepthConstant
         bra     BrushCachedSpanDepthSelected
@@ -289,34 +354,112 @@ BrushCachedSpanDepthSelected:
         cmp     R3
         bcs     BrushCachedSpanFallback
         nop
-        iwt     R3, #BrushCachedRowShift3
-        with    R1
-        add     R3
+BrushCachedSpanRowDispatch:
+        GSU_ABSOLUTE_GOTO BrushCachedSpanSelectRow
+        nop
+.assert * - BrushCachedSpanRowDispatch = 5, error, "Brush row dispatch displaced private-state publication"
+BrushCachedSpanPublish:
         ; Private state is published only after every admission guard passed.
         sm      (BRUSH_ARBITER_CACHED_ROW_SHIFT), R1
         sm      (BRUSH_ARBITER_CACHED_DEPTH), R2
         iwt     R0, #BrushCachedSpan
-        GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
+.if BSP_RENDER_SCALE = 2
+        GSU_ABSOLUTE_GOTO BrushCachedPrimeCoordinateBlock
+.else
+        GSU_ABSOLUTE_GOTO BrushCachedBuildCoordinateBlockRegisters
+.endif
 BrushCachedSpanFallback:
-        iwt     R0, #BrushArbiterSpanPixel
+        iwt     R0, #BrushArbiterSpanCoordinateCursor
         GSU_ABSOLUTE_GOTO TextureBuildCoordinateBlockRegisters
 
+; Disjoint brush spans bypass the world row replay's cache restore. Their edge
+; and material preparation can leave another window resident. Restore once
+; before projective sampling; the shared block loop then keeps that window.
+; Both outer callbacks already live in their span-return words, so the primer
+; may return directly through R11 to the unchanged disjoint anchor.
+BrushArbiterPrimeDisjointLightmap:
+        iwt     R11, #BrushArbiterSpanNoDepthAnchor
+        GSU_ABSOLUTE_GOTO TexturePrimeLightmapCache
+.assert * - BrushArbiterPrimeDisjointLightmap = 7, error, "Disjoint lightmap cache restore changed its bounded footprint"
+
+; Only FAST zero selects the ordinary checked sampler's missing-map route.
+; Positive prepared-cell modes retain their original fallback even if their
+; bank word is negative. The dispatch above preserves FAST's zero flag.
+BrushCachedSpanMissingAdmission:
+        bne     BrushCachedSpanFallback
+        nop
+        lm      R0, (LIGHTMAP_ROM_BANK)
+        moves   R0, R0
+        bmi     BrushCachedSpanInterior
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedSpanFallback
+
+; Select the shader once per admitted block. Both row-shift families use the
+; same validated two-byte offsets; ordinary pixels keep their original body.
+; R2 retains the depth route and the pending DDA registers stay untouched.
+BrushCachedSpanSelectRow:
+        lm      R0, (LIGHTMAP_BLOCK_FAST)
+        moves   R0, R0
+        bmi     BrushCachedSpanInteriorRow
+        nop
+        iwt     R3, #BrushCachedMissingRowShift3
+        bra     BrushCachedSpanRowReady
+        nop
+BrushCachedSpanInteriorRow:
+        iwt     R3, #BrushCachedRowShift3
+BrushCachedSpanRowReady:
+        with    R1
+        add     R3
+        GSU_ABSOLUTE_GOTO BrushCachedSpanPublish
+
+; Keep all established admission/publish/fallback anchors fixed. Only a
+; failed constant/buffered selection visits this final exact depth route.
+BrushCachedSpanUnitRiseAdmission:
+        iwt     R1, #BrushArbiterDepthUnitRise
+        with    R0
+        cmp     R1
+        bne     BrushCachedSpanFallback
+        nop
+        iwt     R2, #BrushCachedDepthUnitRise
+        GSU_ABSOLUTE_GOTO BrushCachedSpanDepthSelected
+.assert * - BrushCachedSpanUnitRiseAdmission = 16, error, "Unit-rise admission exceeds the cold tail contract"
+
+; Reuse only private state published by a preceding cached block in this
+; same invariant span. First blocks and per-block proofs retain every guard.
+; R4/R7/R8/R9/R11/R13 remain the exact unconsumed signed-DDA ABI.
+BrushCachedSpanContinueOrAdmit:
+        lm      R0, (BRUSH_ARBITER_BLOCK_PROOF)
+        moves   R0, R0
+        bmi     BrushCachedSpanContinueReady
+        nop
+        GSU_ABSOLUTE_GOTO BrushCachedSpanAdmit
+BrushCachedSpanContinueReady:
+        iwt     R0, #BrushCachedSpan
+        GSU_ABSOLUTE_GOTO BrushCachedBuildCoordinateBlockRegisters
+
 .assert * - __GSU_TEXTURE_TAIL_CODE_RUN__ <= GSU_TEXTURE_TAIL_CODE_CAPACITY, error, "Shared tail admission exceeds hidden scanlines"
+
 .assert TextureSamplePowerOfTwoRowShift2 - TextureSamplePowerOfTwoRowShift3 = 2, error, "Original row-shift stride changed"
 .assert TextureSamplePowerOfTwoRowShift1 - TextureSamplePowerOfTwoRowShift3 = 4, error, "Original row-shift stride changed"
 .assert TextureSamplePowerOfTwoRowReady - TextureSamplePowerOfTwoRowShift3 = 6, error, "Original row-shift stride changed"
 
 ; The complete admitted pixel controller owns one cache window. No per-pixel
-; call changes CBR, and every next coordinate block returns to admission.
+; call changes CBR; invariant spans reuse admission for later coordinate blocks.
 .segment "GSU_TURBULENCE_HOT_CODE"
 GSU_CACHE_KERNEL_BEGIN BrushCachedSpan
 .assert .loword(BrushCachedSpan) = GSU_TURBULENCE_HOT_CODE_OFFSET, lderror, "Brush cache entry moved"
+        ; The DDA is complete before this entry; R7/R13 are now free until
+        ; the next coordinate block. Keep logical counters across pixels.
+        lm      R13, (TEXTURE_SPAN_X)
+        lm      R7, (TEXTURE_SPAN_END_X)
 BrushCachedPixel:
         lm      R12, (BRUSH_ARBITER_CACHED_DEPTH)
+BrushCachedJumpR12:
+.assert (BrushCachedJumpR12 & $FFFFF0) = BrushCachedSpan, lderror, "Brush cache primer left the entry cache line"
         jmp     R12
         nop
 BrushCachedDepthReady:
-        lm      R0, (TEXTURE_SPAN_X)
+        move    R0, R13
         with    R0
         add     R0
         iwt     R2, #GSU_BRUSH_ARBITER_WINNER_ROW_OFFSET
@@ -351,20 +494,36 @@ BrushCachedWinner:
         move    R5, R8
         move    R6, R9
 
-        ; Exact equal-axis, single-bank sampler. The private row continuation
+        ; Exact power-of-two, single-bank sampler. The private row continuation
         ; changes neither the per-face router nor its caller-visible state.
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_WRAP_MASK_S)
+.else
         lm      R1, (TEXTURE_SPAN_SHADE_Q8)
-        with    R5
+.endif
+        from    R5
         and     R1
-  .repeat 4
-        with    R5
+        ; Both private row routes consume R5; raw lightmap S stays in R8.
+  .repeat 3
         lsr
   .endrepeat
+        to      R5
+        lsr
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        lm      R1, (TEXTURE_SPAN_SHADE_Q8)
+.endif
         with    R6
         and     R1
         lm      R12, (BRUSH_ARBITER_CACHED_ROW_SHIFT)
         jmp     R12
         with    R6
+.if .defined(PLAYABLE_RECTANGULAR_POT_SAMPLER) && (BSP_RENDER_SCALE = 2)
+        ; The second mask load occupies the old three-byte padding.
+.else
+  .repeat 3
+        nop
+  .endrepeat
+.endif
 BrushCachedRowShift3:
         add     R6
         with    R6
@@ -411,12 +570,10 @@ BrushCachedRowReady:
         lm      R4, (LIGHTMAP_ADJUSTED_ADDRESS)
         with    R4
         add     R6
-        move    R8, #0
         moveb   R8, (R4)
         moves   R3, R3
         beq     BrushCachedUpperRightSame
         inc     R4
-        move    R9, #0
         moveb   R9, (R4)
         bra     BrushCachedUpperReady
         dec     R4
@@ -496,14 +653,18 @@ BrushCachedHorizontalInterpolated:
         add     R2
         with    R4
         hib
+.ifdef PLAYABLE_TEXTURELESS_WHITE
+.export BrushCachedMap:far
+.endif
 BrushCachedMap:
         with    R4
         swap
         with    R4
         add     R12
         moveb   R0, (R4)
+.assert * - BrushCachedMap = 6, error, "Cached brush lightmap mapper extent changed"
         color
-        lm      R0, (TEXTURE_SPAN_X)
+        move    R0, R13
         iwt     R10, #GSU_TEXTURE_COORD_MAP_OFFSET
         with    R10
         add     R0
@@ -511,12 +672,13 @@ BrushCachedMap:
         lm      R2, (TEXTURE_PLOT_Y)
         plot
 BrushCachedAdvance:
-        lm      R0, (TEXTURE_SPAN_X)
-        lm      R1, (TEXTURE_SPAN_END_X)
+        move    R0, R13
+        move    R1, R7
         with    R0
         cmp     R1
         beq     BrushCachedDone
         inc     R0
+        move    R13, R0
         sm      (TEXTURE_SPAN_X), R0
         lm      R10, (TEXTURE_COORD_PTR)
         movew   R5, (R10)
@@ -535,18 +697,19 @@ BrushCachedAdvance:
         nop
         GSU_ABSOLUTE_GOTO BrushCachedPixel
 BrushCachedAtBlockEnd:
-        lm      R1, (TEXTURE_SPAN_END_X)
+        move    R1, R7
         with    R0
         cmp     R1
         bne     BrushCachedBuildNextBlock
         nop
         GSU_ABSOLUTE_GOTO BrushCachedPixel
 BrushCachedBuildNextBlock:
-        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockSetup
+        GSU_ABSOLUTE_GOTO BrushCachedContinueInvariantSpan
 BrushCachedDone:
         lm      R11, (BRUSH_ARBITER_SPAN_RETURN)
         ret
         nop
+        nop                             ; Unreachable: retain all following private entries.
 BrushCachedDepthConstant:
         lm      R5, (TEXTURE_BASE_DEPTH)
         GSU_ABSOLUTE_GOTO BrushCachedDepthReady
@@ -558,12 +721,122 @@ BrushCachedDepthBuffered:
         sm      (GSU_TEXTURE_ENDPOINT_WRITE_PTR_OFFSET), R10
         GSU_ABSOLUTE_GOTO BrushCachedDepthReady
 BrushCachedBodyEnd:
+; Missing maps reuse the same private row dispatch and exact texture fetch.
+; Keep this small sibling in existing padding so ordinary pixels and their
+; cache-line placement are unchanged. No per-pixel mode test or new state.
+BrushCachedMissingRowShift3:
+        add     R6
+        with    R6
+BrushCachedMissingRowShift2:
+        add     R6
+        with    R6
+BrushCachedMissingRowShift1:
+        add     R6
+        with    R6
+BrushCachedMissingRowReady:
+        add     R5
+        lm      R4, (TEXTURE_ROM_ADDRESS)
+        with    R4
+        add     R6
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+        to      R0
+        getb
+        move    R12, R0
+        lm      R4, (LIGHTMAP_ROM_ADDRESS)
+        GSU_ABSOLUTE_GOTO BrushCachedMap
+; Only admitted ordinary brush blocks enter this clone. Its complete loop
+; remains inside the pixel controller's existing 512-byte cache window.
+BrushCachedBuildCoordinateStateReady:
+        moves   R4, R4
+        bpl     BrushCachedBuildCoordinateSStepReady
+        nop
+        with    R7
+        not
+        inc     R7
+BrushCachedBuildCoordinateSStepReady:
+        moves   R11, R11
+        bpl     BrushCachedBuildCoordinateTStepReady
+        nop
+        with    R8
+        not
+        inc     R8
+BrushCachedBuildCoordinateTStepReady:
+        with    R5
+BrushCachedBuildCoordinateLoop:
+        add     R7
+        with    R1
+        add     R9
+        bmi     BrushCachedBuildCoordinateSReady
+        inc     R10
+        with    R1
+        sub     R3
+        with    R5
+        add     R4
+BrushCachedBuildCoordinateSReady:
+        with    R6
+        add     R8
+        with    R2
+        add     R13
+        bmi     BrushCachedBuildCoordinateTReady
+        inc     R10
+        with    R2
+        sub     R3
+        with    R6
+        add     R11
+BrushCachedBuildCoordinateTReady:
+        movew   (R10), R5
+        inc     R10
+        inc     R10
+        movew   (R10), R6
+        dec     R12
+        bne     BrushCachedBuildCoordinateLoop
+        with    R5
+        inc     R10
+        inc     R10
+        GSU_ABSOLUTE_GOTO BrushCachedBuildCoordinateDone
+; The unchanged unsigned screen comparison and16-bit INC match the generic
+; +1-depth controller, including negative raw bounds and FFFF depth wrap.
+BrushCachedDepthUnitRise:
+        lm      R5, (TEXTURE_BASE_DEPTH)
+        move    R0, R13
+        BSP_SCALE_LOGICAL_TO_Q7 R0
+        iwt     R1, #64
+        add     R1
+        lm      R2, (CONVEX_MAX_X)
+        cmp     R2
+        bcc     BrushCachedDepthUnitRiseReady
+        nop
+        inc     R5
+        nop                             ; Retain the unit-rise ready anchor.
+BrushCachedDepthUnitRiseReady:
+        GSU_ABSOLUTE_GOTO BrushCachedDepthReady
+
+BrushCachedDepthUnitRiseEnd:
+.assert .loword(BrushCachedDepthUnitRise) = $8BCE, lderror, "Unit-rise controller moved existing brush instructions"
+.assert BrushCachedDepthUnitRiseEnd - BrushCachedDepthUnitRise = 27, error, "Unit-rise controller changed its exact footprint"
+; Only an admitted cached block can mark its next block reusable. A zero
+; proof word means the missing-map/interior classification is span invariant;
+; 1 still needs exact per-block classification and keeps full admission.
+; The span anchor already resets this word before every new contested span.
+BrushCachedContinueInvariantSpan:
+        lm      R0, (BRUSH_ARBITER_BLOCK_PROOF)
+        moves   R0, R0
+        bne     BrushCachedContinueInvariantReady
+        nop
+        iwt     R0, #-1
+        sm      (BRUSH_ARBITER_BLOCK_PROOF), R0
+BrushCachedContinueInvariantReady:
+        GSU_ABSOLUTE_GOTO BrushArbiterSpanBlockSetup
+
 .assert * - BrushCachedSpan <= GSU_CACHE_BYTES, error, "Brush closure exceeds its cache window"
-; This final padding is unreachable after each depth helper's absolute jump.
+; This final padding is unreachable after the lightmap helper's absolute jump.
 .res GSU_CACHE_BYTES - (* - BrushCachedSpan)
 GSU_CACHE_KERNEL_END BrushCachedSpan
 
 .assert BrushCachedRowShift2 - BrushCachedRowShift3 = 2, error, "Cached row-shift stride changed"
 .assert BrushCachedRowShift1 - BrushCachedRowShift3 = 4, error, "Cached row-shift stride changed"
 .assert BrushCachedRowReady - BrushCachedRowShift3 = 6, error, "Cached row-shift stride changed"
+.assert BrushCachedMissingRowShift2 - BrushCachedMissingRowShift3 = 2, error, "Missing-map row-shift stride changed"
+.assert BrushCachedMissingRowShift1 - BrushCachedMissingRowShift3 = 4, error, "Missing-map row-shift stride changed"
+.assert BrushCachedMissingRowReady - BrushCachedMissingRowShift3 = 6, error, "Missing-map row-shift stride changed"
 .assert * - __GSU_TURBULENCE_HOT_CODE_RUN__ = GSU_TURBULENCE_HOT_CODE_CAPACITY, error, "Brush cache reservation must fill the reciprocal tail"

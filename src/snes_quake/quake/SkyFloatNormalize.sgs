@@ -1,0 +1,95 @@
+; Exact binary32 primitive. Input magnitude is unsigned48, exponent
+; signed16; value=SF_W2:W1:W0 * 2^SF_EXP. Sign is external and unchanged.
+; Output is a normalized24-bit mantissa W1:W0 and adjusted exponent. Zero
+; returns zero mantissa/exponent. All discarded bits participate in RN-even.
+SkyFloatNormalize48:
+        lm      R4, (SF_W0)
+        lm      R5, (SF_W1)
+        lm      R6, (SF_W2)
+        lm      R9, (SF_EXP)
+        move    R7, #0
+        move    R8, #0
+        move    R0, R4
+        with    R0
+        or      R5
+        with    R0
+        or      R6
+        bne     @RightCheck
+        nop
+        move    R9, #0
+        GSU_ABSOLUTE_GOTO @Publish
+@RightCheck:
+        moves   R6, R6
+        bne     @ShiftRight
+        nop
+        iwt     R0, #$0100
+        with    R5
+        cmp     R0
+        bcc     @LeftCheck
+        nop
+@ShiftRight:
+        ; Prior guard becomes sticky before the next source bit is removed.
+        with    R8
+        or      R7
+        move    R7, R4
+        with    R7
+        and     #1
+        with    R6
+        lsr
+        with    R5
+        ror
+        with    R4
+        ror
+        inc     R9
+        GSU_ABSOLUTE_GOTO @RightCheck, shared_delay
+        cache
+@LeftCheck:
+        iwt     R0, #$0080
+        with    R5
+        cmp     R0
+        bcs     @Round
+        nop
+        with    R4
+        add     R4
+        with    R5
+        adc     R5
+        dec     R9
+        GSU_ABSOLUTE_GOTO @LeftCheck, shared_delay
+        cache
+@Round:
+        moves   R7, R7
+        beq     @Publish
+        nop
+        move    R0, R4
+        with    R0
+        and     #1
+        with    R0
+        or      R8
+        beq     @Publish
+        nop
+        move    R0, #1
+        with    R4
+        add     R0
+        move    R0, #0
+        with    R5
+        adc     R0
+        iwt     R0, #$0100
+        with    R5
+        cmp     R0
+        bcc     @Publish
+        nop
+        with    R5
+        lsr
+        with    R4
+        ror
+        inc     R9
+@Publish:
+        sm      (SF_W0), R4
+        sm      (SF_W1), R5
+        move    R0, #0
+        sm      (SF_W2), R0
+        sm      (SF_EXP), R9
+        ret
+        nop
+SkyFloatNormalize48End:
+.assert SkyFloatNormalize48End-(SkyFloatNormalize48 & $FFFFF0) <=512, lderror, "Float normalizer escaped one cache window"

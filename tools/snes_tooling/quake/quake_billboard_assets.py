@@ -790,9 +790,16 @@ def rasterize_billboard(
     view: int = 0,
     mdl_world_units_per_texel: float = 1,
     model_id: int = 0,
+    mdl_bake_context=None,
 ) -> BillboardSprite:
     """Rasterize one MDL pose once, then derive its configured storage raster."""
 
+    if mdl_bake_context is not None:
+        from snes_tooling.quake.quake_mdl_bakes import converted_billboard
+        return converted_billboard(
+            model, resolved_frame(model, frame_index), view & 7,
+            mdl_world_units_per_texel, model_id, mdl_bake_context,
+        )
     if mdl_world_units_per_texel <= 0:
         raise ValueError("MDL world units per texel must be positive")
     frame_index = resolved_frame(model, frame_index)
@@ -915,11 +922,12 @@ def rasterize_front_billboard(model: quake_assets.MdlModel) -> BillboardSprite:
 
 
 def rasterize_model_variants(
-    task: tuple[quake_assets.MdlModel, int, float, tuple[tuple[int, int], ...]],
+    task: tuple,
 ) -> tuple[BillboardSprite, ...]:
     """Rasterize one MDL's retained frame/view set in a worker process."""
 
-    model, model_id, world_units_per_texel, variants = task
+    model, model_id, world_units_per_texel, variants, *contexts = task
+    context = contexts[0].for_model(model) if contexts and contexts[0] is not None else None
     return tuple(
         rasterize_billboard(
             model,
@@ -927,6 +935,7 @@ def rasterize_model_variants(
             view=view,
             mdl_world_units_per_texel=world_units_per_texel,
             model_id=model_id,
+            mdl_bake_context=context,
         )
         for frame, view in variants
     )

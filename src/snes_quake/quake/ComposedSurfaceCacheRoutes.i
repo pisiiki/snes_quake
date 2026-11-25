@@ -2,11 +2,17 @@
 ; entries. Ordinary faces fall through without changing any live register.
 .macro GSU_COMPOSED_GOTO_IF_SELECTED target
         .local Ordinary
+.ifdef PLAYABLE_LAZY_WORLD_LIGHTMAP
+        ; Preserve the following instruction slots for the playable overlays.
+        GSU_ABSOLUTE_GOTO Ordinary
+        .res 8, $01
+.else
         lm      R0, (TEXTURE_WRAP_FLAGS)
         moves   R0, R0
         bpl     Ordinary
         nop
         GSU_ABSOLUTE_GOTO target
+.endif
 Ordinary:
 .endmacro
 
@@ -25,6 +31,10 @@ Done:
 .endmacro
 
 .macro GSU_COMPOSED_GOTO_LIGHTMAP_BLOCK8 alternate, ordinary
+.ifdef PLAYABLE_LAZY_WORLD_LIGHTMAP
+        GSU_ABSOLUTE_GOTO ordinary
+        .res 12, $01
+.else
         .local Ordinary
         lm      R0, (TEXTURE_WRAP_FLAGS)
         moves   R0, R0
@@ -33,4 +43,5 @@ Done:
         GSU_ABSOLUTE_GOTO alternate
 Ordinary:
         GSU_ABSOLUTE_GOTO ordinary
+.endif
 .endmacro

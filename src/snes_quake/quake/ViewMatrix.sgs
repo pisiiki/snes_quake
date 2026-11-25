@@ -1,0 +1,225 @@
+; Signed Q12 camera coefficients; every view component rounds only once.
+; The bank-$71 basis and backups have exclusive MemoryMap.i ownership.
+.include "quake/ViewDotArithmetic.i"
+.macro BSP_VIEW_MATRIX_SAVE_CALLER
+        sm (GSU_VIEW_MATRIX_SAVED_R0), R0
+        sm (GSU_VIEW_MATRIX_SAVED_R1), R1
+        sm (GSU_VIEW_MATRIX_SAVED_R2), R2
+        sm (GSU_VIEW_MATRIX_SAVED_R3), R3
+        sm (GSU_VIEW_MATRIX_SAVED_R4), R4
+        sm (GSU_VIEW_MATRIX_SAVED_R5), R5
+        sm (GSU_VIEW_MATRIX_SAVED_R6), R6
+        sm (GSU_VIEW_MATRIX_SAVED_R7), R7
+        sm (GSU_VIEW_MATRIX_SAVED_R12), R12
+.endmacro
+
+; Tail-called by LoadProjectedPacketState: preserve its post-load registers.
+ViewMatrixRendererInit:
+        BSP_VIEW_MATRIX_SAVE_CALLER
+        lm R1, (YAW_COS)
+        lm R2, (YAW_SIN)
+        lm R3, (PITCH_COS)
+        lm R5, (PITCH_SIN)
+        GSU_ABSOLUTE_GOTO ViewMatrixInitCommon
+
+; PacketBegin has loaded its own camera tables; no renderer-state alias is read.
+ViewMatrixSelectorInit:
+        BSP_VIEW_MATRIX_SAVE_CALLER
+        lm R1, (PACKET_YAW_COS)
+        lm R2, (PACKET_YAW_SIN)
+        lm R3, (PACKET_PITCH_COS)
+        lm R5, (PACKET_PITCH_SIN)
+        GSU_ABSOLUTE_GOTO ViewMatrixInitCommon
+
+; R1=cy,R2=sy,R3=cp,R5=sp. No calls or R11 scratch; coefficients stay exact Q12.
+ViewMatrixInitCommon:
+        sm (GSU_VIEW_MATRIX_CY), R1
+        sm (GSU_VIEW_MATRIX_SY), R2
+        move R6, R5
+        from R1
+        lmult
+        move R0, #0
+        sub R4
+        sm (GSU_VIEW_MATRIX_UX), R0
+        from R2
+        lmult
+        move R0, #0
+        sub R4
+        sm (GSU_VIEW_MATRIX_UY), R0
+        move R6, R3
+        from R1
+        lmult
+        sm (GSU_VIEW_MATRIX_DX), R4
+        from R2
+        lmult
+        sm (GSU_VIEW_MATRIX_DY), R4
+        move R6, #64
+        from R3
+        lmult
+        sm (GSU_VIEW_MATRIX_UZ), R4
+        from R5
+        lmult
+        sm (GSU_VIEW_MATRIX_DZ), R4
+        lm R1, (GSU_VIEW_MATRIX_SAVED_R1)
+        lm R2, (GSU_VIEW_MATRIX_SAVED_R2)
+        lm R3, (GSU_VIEW_MATRIX_SAVED_R3)
+        lm R4, (GSU_VIEW_MATRIX_SAVED_R4)
+        lm R5, (GSU_VIEW_MATRIX_SAVED_R5)
+        lm R6, (GSU_VIEW_MATRIX_SAVED_R6)
+        lm R7, (GSU_VIEW_MATRIX_SAVED_R7)
+        lm R12, (GSU_VIEW_MATRIX_SAVED_R12)
+        lm R0, (GSU_VIEW_MATRIX_SAVED_R0)
+        jmp R11
+        nop
+
+.if BSP_QUAKEC_GAMEPLAY
+; Return the sign of the packed BSP distance at the staged Q2 camera.
+; R7..R9 are signed Q6 normals and R10 is distance at the old scale.
+; The asset proof bounds the signed coarse distance and the sum of normals
+; of either sign by 111. Three fine steps can correct at most 333, so a
+; coarse magnitude of 84 or more has the same sign after scaling by four.
+; R1/R2 are scratch; preserve the caller's child registers.
+PlayableCameraPlaneSide:
+        from    R8
+        or      R9
+        beq     PlayableCameraPlaneX
+        from    R7
+        or      R9
+        beq     PlayableCameraPlaneY
+        from    R7
+        or      R8
+        beq     PlayableCameraPlaneZ
+        nop
+PlayableCameraPlaneGeneral:
+        lm      R0, (WORLD_CAMERA_X)
+        mult    R7
+        move    R2, R0
+        lm      R0, (WORLD_CAMERA_Y)
+        mult    R8
+        with    R2
+        add     R0
+        lm      R0, (WORLD_CAMERA_Z)
+        mult    R9
+        with    R2
+        add     R0
+        with    R2
+        sub     R10
+        ibt     R0, #83
+        add     R2
+        iwt     R1, #167
+        cmp     R1
+        bcs     PlayableCameraPlaneSideReady
+        nop
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_X)
+        and     #3
+        mult    R7
+        move    R1, R0
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_Y)
+        and     #3
+        mult    R8
+        with    R1
+        add     R0
+        lm      R0, (GSU_PLAYABLE_CAMERA_Q2_Z)
+        and     #3
+        mult    R9
+        with    R1
+        add     R0
+        with    R2
+        add     R2
+        with    R2
+        add     R2
+        with    R2
+        add     R1
+PlayableCameraPlaneSideReady:
+        moves   R0, R2
+        ret
+        nop
+
+; A positive unit axial plane needs just one coordinate. The exact
+; Q2 distance is four times (16 * camera_axis - packed_distance).
+.macro PLAYABLE_CAMERA_AXIAL normal, axis
+        ibt     R1, #64
+        from    normal
+        cmp     R1
+        bne     PlayableCameraPlaneGeneral
+        nop
+        lm      R0, (axis)
+.endmacro
+PlayableCameraPlaneX:
+        PLAYABLE_CAMERA_AXIAL R7, GSU_PLAYABLE_CAMERA_Q2_X
+        bra     PlayableCameraPlaneAxialDistance
+        add     R0
+PlayableCameraPlaneY:
+        PLAYABLE_CAMERA_AXIAL R8, GSU_PLAYABLE_CAMERA_Q2_Y
+        bra     PlayableCameraPlaneAxialDistance
+        add     R0
+PlayableCameraPlaneZ:
+        PLAYABLE_CAMERA_AXIAL R9, GSU_PLAYABLE_CAMERA_Q2_Z
+        add     R0
+PlayableCameraPlaneAxialDistance:
+        add     R0
+        add     R0
+        add     R0
+        sub     R10
+        ret
+        nop
+
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+; R0 is a native node plane word. High two bits are zero for an ordinary
+; table index, or 1/2/3 for a positive X/Y/Z plane with signed low14 distance.
+; R5/R6 are live selector children. The brush caller also saves R11 in R5.
+PlayableCameraNodePlaneSide:
+        move    R4, R0
+        iwt     R1, #$C000
+        and     R1
+        bne     PlayableCameraTaggedNode
+        nop
+        move    R1, R4
+        with    R1
+        add     R1
+        with    R1
+        add     R1
+        with    R1
+        add     R4
+        iwt     R2, #WORLD_PLANES_ROM_ADDRESS
+        with    R2
+        add     R1
+        move    R0, #WORLD_PLANES_ROM_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R2
+        BSP_ROM_LOAD_SIGNED_BYTE R7
+        BSP_ROM_LOAD_SIGNED_BYTE R8
+        BSP_ROM_LOAD_SIGNED_BYTE R9
+        BSP_ROM_LOAD_WORD R10
+        GSU_ABSOLUTE_GOTO PlayableCameraPlaneSide
+
+PlayableCameraTaggedNode:
+        bpl     PlayableCameraTaggedNodeX
+        add     R0                       ; Y becomes zero. Z remains negative.
+        beq     PlayableCameraTaggedNodeY
+        nop
+        lm      R10, (GSU_PLAYABLE_CAMERA_Q2_Z)
+        bra     PlayableCameraTaggedNodeDistance
+        nop
+PlayableCameraTaggedNodeY:
+        lm      R10, (GSU_PLAYABLE_CAMERA_Q2_Y)
+        bra     PlayableCameraTaggedNodeDistance
+        nop
+PlayableCameraTaggedNodeX:
+        lm      R10, (GSU_PLAYABLE_CAMERA_Q2_X)
+PlayableCameraTaggedNodeDistance:
+        from    R4
+        add     R4
+        add     R0
+        asr
+        to      R1
+        asr                              ; Strip tag and restore signed distance.
+        move    R0, R10
+  .repeat 4
+        add     R0
+  .endrepeat
+        sub     R1                       ; Same signed result as the old axial path.
+        ret
+        nop
+.endif
+.endif

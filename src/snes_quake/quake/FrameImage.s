@@ -17,6 +17,21 @@ LoadFramePipelineImage:
         RW_forced a16i16
         jsr     EnsureFlyAliasCode
         RW_forced a16i16
+.ifdef PLAYABLE_FLAT_BRUSH_CODE
+        lda     texture_renderer_code_variant
+        cmp     #FLAT_BRUSH_CODE_VARIANT
+        bne     :+
+        ; The scale image overwrote code that can still be cached at A6A7.
+.if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2)
+        jsr     InvalidateFlatBrushCodeCache
+.else
+        RW      a8
+        lda     #$70
+        sta     FX3_PBR
+        RW      a16
+.endif
+:
+.endif
         stz     texture_renderer_code_variant
         stz     texture_phase_overlay_valid
         jsr     SyncTextureDivideQ12Mirror
@@ -25,17 +40,15 @@ LoadFramePipelineImage:
         BSP_STATIC_COPY GSU_TEXTURE_COORD_MAP, QuakeBSPTextureCoordinateMap, GSU_TEXTURE_COORD_MAP_BYTES
 .else
         BSP_STATIC_COPY GSU_RECIPROCAL, Fly3Reciprocal, GSU_RECIPROCAL_RAM_BYTES
-        stz     warp_projection_installed
         BSP_STATIC_COPY GSU_TEXTURE_COORD_MAP, Fly3CoordinateMap, GSU_TEXTURE_COORD_MAP_BYTES
 .endif
-        ; Only the visible 14 KiB are pixels. The $3800..$3fff tail is code.
+        ; Clear the tile rows that back the active viewport.
+.ifdef QC_HEALTH_COUNT
+        jsr     QuakeCClearVisibleOutput
+.else
         lda     #0
         sta     f:GSU_OUTPUT
-        BSP_STATIC_COPY GSU_OUTPUT+1, GSU_OUTPUT, GSU_TEXTURE_VISIBLE_BYTES-1
-.if BSP_RENDER_SCALE = 3
-        ; Rows 96+ are outside this fixed 74-row renderer. Install only after
-        ; the transition clear; 2x reclaims this range as framebuffer pixels.
-        BSP_STATIC_COPY __MODE7_PACK_CODE_RUN__, __MODE7_PACK_CODE_LOAD__, __MODE7_PACK_CODE_SIZE__
+        BSP_STATIC_COPY GSU_OUTPUT+1, GSU_OUTPUT, BSP_VIEW_STAGE_BYTES-1
 .endif
         RW_forced a16i16
         lda     #1
@@ -46,6 +59,16 @@ LoadFramePipelineImage:
         stz     overlap_selector_active
         lda     #0
         sta     f:GSU_TELEMETRY+28
+.if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2)
+        sta     f:GSU_DATA_BASE+GSU_RESIDENT_WORLD_STATUS
+.endif
+.ifdef PLAYABLE_PACKET_VIEW_REUSE
+        sta     f:GSU_DATA_BASE+GSU_PACKET_VIEW_CACHE_VALID_OFFSET
+        sta     f:GSU_DATA_BASE+GSU_BRUSH_MERGE_CACHE_COUNT
+.endif
+.ifdef PLAYABLE_PACKET_SCREEN_REUSE
+        sta     f:GSU_DATA_BASE+GSU_PACKET_SCREEN_READY
+.endif
         lda     #$FFFF
         sta     f:GSU_DATA_BASE+GSU_BRUSH_PVS_LEAF_OFFSET
         lda     #BSP_RENDER_SCALE

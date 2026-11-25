@@ -1,7 +1,13 @@
 
 GSU_CACHE_KERNEL_BEGIN PacketAdmissionCopyLoop
 PacketAdmissionCopyLoopCached:
+  .if BSP_RENDER_SCALE = 2
+        iwt     R11, #PacketAdmissionIndexReady
+        BSP_PACKET_DECODE_WORLD_INDEX
+  .else
         jal     PacketLoadWorldIndex
+  .endif
+PacketAdmissionIndexReady:
         nop
         lm      R0, (PACKET_SOURCE_INDEX)
         with    R0
@@ -15,19 +21,14 @@ PacketAdmissionCopyLoopCached:
         cmp     R2
         bne     PacketAdmissionProjectionReady
         nop
-        ; Screen admission may short-circuit a polygon fan before visiting its
-        ; tail. Project such an accepted tail vertex here exactly once, then
-        ; reload the tagged remap published by the cache-store kernel.
+        ; A fan can admit a face before projecting its last vertices. The
+        ; fresh projector returns the tagged cached or transient entry in R1.
 PacketAdmissionProjectTail:
         jal     PacketProjectWorldVertex
         nop
-        lm      R0, (PACKET_SOURCE_INDEX)
-        with    R0
-        add     R0
-        iwt     R4, #WORLD_VERTEX_REMAP
-        with    R4
-        add     R0
-        movew   R1, (R4)
+        bra     PacketAdmissionCopyNew
+        nop
+        .res $12 - (* - PacketAdmissionProjectTail), $01
 PacketAdmissionProjectionReady:
         move    R3, R1
         iwt     R2, #PACKET_REMAP_STATE_MASK
@@ -45,6 +46,35 @@ PacketAdmissionCopyNew:
 ; Convert one tagged projection-cache entry into an accepted packet vertex.
 ; The compact Q2 world record is retained for the cold sub-world near clipper;
 ; ordinary rendering consumes the already-computed projected/state arrays.
+; The public index reader owns CBR=$C910. Put the per-index tail
+; before the less frequent new-vertex body so both the reader and
+; common tail fit its unchanged512-byte window. Every block keeps
+; the same operations, branches and unconditional exit.
+PacketAdmissionEmitIndex:
+        lm      R1, (PACKET_LOCAL_VERTEX)
+        lm      R10, (PACKET_INDEX_POINTER)
+        movew   (R10), R1
+        inc     R10
+        inc     R10
+        sm      (PACKET_INDEX_POINTER), R10
+        lm      R0, (PACKET_INDEX_COUNT)
+        inc     R0
+        sm      (PACKET_INDEX_COUNT), R0
+
+        lm      R0, (PACKET_INDEX_CURSOR)
+        inc     R0
+        sm      (PACKET_INDEX_CURSOR), R0
+        lm      R0, (PACKET_FAN_ORDINAL)
+        inc     R0
+        sm      (PACKET_FAN_ORDINAL), R0
+        lm      R1, (PACKET_FACE_VERTICES)
+        with    R0
+        cmp     R1
+        beq     PacketAdmissionCopyDone
+        nop
+        GSU_ABSOLUTE_GOTO PacketAdmissionCopyLoopCached
+PacketAdmissionCopyDone:
+        GSU_ABSOLUTE_GOTO PacketAdmissionFinish
 PacketAdmissionCopyNewVertex:
         lm      R1, (PACKET_VERTEX_COUNT)
         sm      (PACKET_LOCAL_VERTEX), R1
@@ -125,7 +155,7 @@ PacketAdmissionStateReady:
         add     R2                       ; 2v
         with    R2
         add     R2                       ; 4v
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_VERTICES_ROM_ADDRESS
         with    R4
         add     R2
         move    R0, #WORLD_VERTICES_ROM_BANK
@@ -150,32 +180,16 @@ PacketAdmissionStateReady:
         sm      (PACKET_VERTEX_COUNT), R1
         GSU_ABSOLUTE_GOTO PacketAdmissionEmitIndex
 
-PacketAdmissionEmitIndex:
-        lm      R1, (PACKET_LOCAL_VERTEX)
-        lm      R10, (PACKET_INDEX_POINTER)
-        movew   (R10), R1
-        inc     R10
-        inc     R10
-        sm      (PACKET_INDEX_POINTER), R10
-        lm      R0, (PACKET_INDEX_COUNT)
-        inc     R0
-        sm      (PACKET_INDEX_COUNT), R0
-
-        lm      R0, (PACKET_INDEX_CURSOR)
-        inc     R0
-        sm      (PACKET_INDEX_CURSOR), R0
-        lm      R0, (PACKET_FAN_ORDINAL)
-        inc     R0
-        sm      (PACKET_FAN_ORDINAL), R0
-        lm      R1, (PACKET_FACE_VERTICES)
-        with    R0
-        cmp     R1
-        beq     PacketAdmissionCopyDone
-        nop
-        GSU_ABSOLUTE_GOTO PacketAdmissionCopyLoopCached
-PacketAdmissionCopyDone:
-        GSU_ABSOLUTE_GOTO PacketAdmissionFinish
 GSU_CACHE_KERNEL_END PacketAdmissionCopyLoop
+
+; R1 is the bit index. Return an unsigned byte mask in R2.
+.macro PACKET_LOAD_BIT_MASK
+        iwt     R2, #GSU_PACKET_BIT_MASK_OFFSET
+        with    R1
+        add     R2
+        move    R2, #0
+        moveb   R2, (R1)
+.endmacro
 
 GSU_CACHE_KERNEL_BEGIN PacketAdmissionFinish
         ; Set the accepted world-face bit without modifying the retained PVS.
@@ -192,6 +206,10 @@ GSU_CACHE_KERNEL_BEGIN PacketAdmissionFinish
         iwt     R10, #SELECTED_FACE_BITS
         with    R10
         add     R0
+.if BSP_QUAKEC_GAMEPLAY
+PacketAdmissionMaskRead:
+        PACKET_LOAD_BIT_MASK
+.else
         move    R2, #1
 PacketAdmissionMaskLoop:
         moves   R1, R1
@@ -202,6 +220,7 @@ PacketAdmissionMaskLoop:
         dec     R1
         bra     PacketAdmissionMaskLoop
         nop
+.endif
 PacketAdmissionMaskReady:
         move    R0, #0
         moveb   R0, (R10)
@@ -209,6 +228,10 @@ PacketAdmissionMaskReady:
         or      R2
         moveb   (R10), R0
         GSU_ABSOLUTE_GOTO PacketMarkPainterAncestorsBody
+.if BSP_QUAKEC_GAMEPLAY
+        ; Keep the original cache kernel extent for standalone manifests.
+        .res $0D - (PacketAdmissionMaskReady - PacketAdmissionMaskRead), $01
+.endif
 GSU_CACHE_KERNEL_END PacketAdmissionFinish
 
 ; Mark the accepted face's owning node and its ancestors. The generated parent
@@ -216,16 +239,7 @@ GSU_CACHE_KERNEL_END PacketAdmissionFinish
 ; an already-marked ancestor makes total work proportional to the induced tree.
 GSU_CACHE_KERNEL_BEGIN PacketMarkPainterAncestors
 PacketMarkPainterAncestorsBody:
-        lm      R0, (PACKET_FACE_ID)
-        with    R0
-        add     R0
-        iwt     R4, #$8000
-        with    R4
-        add     R0
-        move    R0, #WORLD_FACE_OWNERS_ROM_BANK
-        romb
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        BSP_ROM_LOAD_WORD R3
+        PACKET_LOAD_FACE_OWNER
 
 PacketMarkPainterNode:
         move    R0, R3
@@ -244,6 +258,10 @@ PacketMarkPainterNode:
         move    R0, #0
         moveb   R0, (R10)
         move    R4, R0
+.if BSP_QUAKEC_GAMEPLAY
+PacketMarkPainterMaskRead:
+        PACKET_LOAD_BIT_MASK
+.else
         move    R2, #1
 PacketMarkPainterMaskLoop:
         moves   R1, R1
@@ -254,6 +272,7 @@ PacketMarkPainterMaskLoop:
         dec     R1
         bra     PacketMarkPainterMaskLoop
         nop
+.endif
 PacketMarkPainterMaskReady:
         with    R0
         and     R2
@@ -269,7 +288,7 @@ PacketMarkPainterMaskReady:
         move    R0, R3
         with    R0
         add     R0
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_NODE_PARENTS_ROM_ADDRESS
         with    R4
         add     R0
         move    R0, #WORLD_NODE_PARENTS_ROM_BANK
@@ -292,6 +311,10 @@ PacketMarkPainterDone:
         inc     R0
         sm      (PACKET_FACE_COUNT), R0
         GSU_ABSOLUTE_GOTO PacketScanNextBit
+.if BSP_QUAKEC_GAMEPLAY
+        ; Keep the original cache kernel extent for standalone manifests.
+        .res $0D - (PacketMarkPainterMaskReady - PacketMarkPainterMaskRead), $01
+.endif
 GSU_CACHE_KERNEL_END PacketMarkPainterAncestors
 
 ; Admission no longer needs the world-vertex remap.  Reuse its first 10 KiB
@@ -337,14 +360,19 @@ PacketLoadPainterNodeBody:
         add     R1                       ; 8n
         with    R1
         add     R2                       ; 10n
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_NODES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_NODES_ROM_BANK
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        BSP_ROM_LOAD_WORD R2
+        sm      (PACKET_NODE_PLANE), R2
+.else
         BSP_ROM_LOAD_WORD R0
         sm      (PACKET_NODE_PLANE), R0
+.endif
         BSP_ROM_LOAD_WORD R0
         sm      (PACKET_NODE_FRONT), R0
         BSP_ROM_LOAD_WORD R0
@@ -352,6 +380,17 @@ PacketLoadPainterNodeBody:
         BSP_ROM_LOAD_WORD R0
         sm      (PACKET_PAINTER_FACE), R0
         BSP_ROM_LOAD_WORD R1
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        iwt     R3, #$C000
+        with    R2
+        and     R3
+        beq     PacketPainterNodeCountReady
+        nop
+        ibt     R3, #31
+        with    R1
+        and     R3
+PacketPainterNodeCountReady:
+.endif
         with    R1
         add     R0
         sm      (PACKET_PAINTER_FACE_END), R1
@@ -418,6 +457,10 @@ PacketPainterNextFrameBody:
         add     R0
         move    R0, #0
         moveb   R0, (R10)
+.if BSP_QUAKEC_GAMEPLAY
+PacketPainterNodeMaskRead:
+        PACKET_LOAD_BIT_MASK
+.else
         move    R2, #1
 PacketPainterNodeMaskLoop:
         moves   R1, R1
@@ -428,6 +471,7 @@ PacketPainterNodeMaskLoop:
         dec     R1
         bra     PacketPainterNodeMaskLoop
         nop
+.endif
 PacketPainterNodeMaskReady:
         with    R0
         and     R2
@@ -455,6 +499,10 @@ PacketPainterEmitPhase:
         GSU_ABSOLUTE_GOTO PacketPainterEmitNodeBody
 PacketPainterDone:
         GSU_ABSOLUTE_GOTO PacketFinalizeBody
+.if BSP_QUAKEC_GAMEPLAY
+        ; Keep the original cache kernel extent for standalone manifests.
+        .res $0D - (PacketPainterNodeMaskReady - PacketPainterNodeMaskRead), $01
+.endif
 GSU_CACHE_KERNEL_END PacketPainterNextFrame
 
 ; Push near, face start/end, emit-phase, far. LIFO processing therefore matches
@@ -465,6 +513,10 @@ PacketPainterVisitNodeBody:
         jal     PacketLoadPainterNodeBody
         nop
         lm      R0, (PACKET_NODE_PLANE)
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        jal     PlayableCameraNodePlaneSide
+        nop
+.else
         move    R1, R0
         with    R1
         add     R1                       ; 2p
@@ -472,7 +524,7 @@ PacketPainterVisitNodeBody:
         add     R1                       ; 4p
         with    R1
         add     R0                       ; 5p
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_PLANES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_PLANES_ROM_BANK
@@ -482,6 +534,10 @@ PacketPainterVisitNodeBody:
         BSP_ROM_LOAD_SIGNED_BYTE R8
         BSP_ROM_LOAD_SIGNED_BYTE R9
         BSP_ROM_LOAD_WORD R10
+.if BSP_QUAKEC_GAMEPLAY
+        jal     PlayableCameraPlaneSide
+        nop
+.else
         lm      R0, (PACKET_CAMERA_X)
         move    R6, R0
         with    R6
@@ -500,12 +556,17 @@ PacketPainterVisitNodeBody:
         add     R1
         with    R6
         sub     R10
+.endif
+.endif
         bmi     PacketPainterCameraBack
         nop
         lm      R7, (PACKET_NODE_FRONT)  ; near
         lm      R8, (PACKET_NODE_BACK)   ; far
         bra     PacketPainterChildrenReady
         nop
+.ifdef PLAYABLE_AXIAL_NODE_RECORDS
+        .res $41 - (* - PacketPainterVisitNodeBody), $01
+.endif
 PacketPainterCameraBack:
         lm      R7, (PACKET_NODE_BACK)   ; near
         lm      R8, (PACKET_NODE_FRONT)  ; far
@@ -572,6 +633,10 @@ PacketPainterFaceLoop:
         add     R0
         move    R0, #0
         moveb   R0, (R10)
+.if BSP_QUAKEC_GAMEPLAY
+PacketPainterTestRead:
+        PACKET_LOAD_BIT_MASK
+.else
         move    R2, #1
 PacketPainterTestMask:
         moves   R1, R1
@@ -582,6 +647,7 @@ PacketPainterTestMask:
         dec     R1
         bra     PacketPainterTestMask
         nop
+.endif
 PacketPainterTestReady:
         with    R0
         and     R2
@@ -608,6 +674,9 @@ PacketPainterNextFace:
         nop
 PacketPainterNodeDone:
         GSU_ABSOLUTE_GOTO PacketPainterNextFrameBody
+.if BSP_QUAKEC_GAMEPLAY
+        .res $0D - (PacketPainterTestReady - PacketPainterTestRead), $01
+.endif
 GSU_CACHE_KERNEL_END PacketPainterEmitNode
 
 ; Five-byte packet records alternate first-index alignment. Store the canonical
@@ -640,13 +709,17 @@ PacketPainterCopyFaceAfterFirstIndex:
         add     R2
         with    R1
         add     #2
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_FACES_ROM_BANK
         romb
         GSU_SET_ROM_BUFFER_ADDRESS R4
         BSP_ROM_LOAD_BYTE R0
+  .ifdef PLAYABLE_WORLD_AFFINE_UV_DESCRIPTOR_CODE
+        ibt     R1, #$1F
+        and     R1
+  .endif
         moveb   (R10), R0
         inc     R10
         sm      (PACKET_FACE_OUTPUT), R10
@@ -659,7 +732,7 @@ PacketShadeFaceBody:
         add     R1
         with    R1
         add     R1
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_SHADING_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_SHADING_ROM_BANK
@@ -733,7 +806,7 @@ PacketShadeMinReady:
         nop
         move    R8, R0
 PacketShadeDistanceReady:
-        iwt     R4, #$8000+BSP_WORLD_SHADING_DISTANCE_LUT_OFFSET
+        iwt     R4, #WORLD_SHADING_ROM_ADDRESS+BSP_WORLD_SHADING_DISTANCE_LUT_OFFSET
         with    R4
         add     R8
         GSU_SET_ROM_BUFFER_ADDRESS R4
@@ -755,7 +828,7 @@ PacketShadeDistanceReady:
         add     R2
         with    R1
         add     R2
-        iwt     R4, #$8000+BSP_WORLD_SHADING_TABLE_OFFSET
+        iwt     R4, #WORLD_SHADING_ROM_ADDRESS+BSP_WORLD_SHADING_TABLE_OFFSET
         with    R4
         add     R1
         GSU_SET_ROM_BUFFER_ADDRESS R4
@@ -778,7 +851,7 @@ PacketPainterCopyPlaneBody:
         add     R1
         with    R1
         add     R3
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_FACE_PLANES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_FACE_PLANES_ROM_BANK
@@ -1042,7 +1115,7 @@ TextureFaceLoop:
         add     R1
         with    R1
         add     R2
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_FACES_ROM_BANK
@@ -1052,7 +1125,11 @@ TextureFaceLoop:
         sm      (TEXTURE_WORLD_INDEX), R0
 
         ; The cold helper performs technique gating, lookup, and rendering.
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+        jal     MsuStandaloneWorldGateThunk
+.else
         jal     TextureTryRenderComposedFace
+.endif
         nop
         moves   R0, R0
         beq     TextureFaceComposedMiss
@@ -1122,7 +1199,7 @@ TextureFaceTextureReady:
         sm      (TEXTURE_WRAP_MASK_T), R0
         BSP_ROM_LOAD_BYTE R0
         sm      (TEXTURE_WRAP_FLAGS), R0
-        jal     TextureSelectSampleRoutine
+        jal     TextureSelectStandaloneSampleRoutine
 
         ; Mode 1 is the independently optimized lightmapped renderer. Mode 2
         ; uses the same projective geometry contract but a separate albedo
@@ -1131,10 +1208,11 @@ TextureFaceTextureReady:
         dec     R0
         bne     TextureFaceProjectiveAlbedo
         nop
-        jal     TextureLoadFaceLightmap
+        TexturePrepareWorldLightmap
         jal     TextureRenderConvexFaceShaded
         bra     TextureFaceAdvance
         nop
+        TextureWorldLightmapDispatchPadding
 TextureFaceProjectiveAlbedo:
         jal     TextureRenderConvexFaceAlbedo
         nop
@@ -1204,7 +1282,7 @@ FaceLoop:
         add     R1
         with    R1
         add     R2
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_FACES_ROM_BANK
@@ -1303,8 +1381,51 @@ FacesDone:
 ; encoded row. Textured modes retain row-zero sky/turbulent special rendering;
 ; technique 7 deliberately visualizes the encoded missing-lightmap row instead.
 ; Preserve the technique-4 overlay ABI across a retired face-walker window.
-.res $F9
+PacketCapacityHookSlot:
+.include "quake/PacketCapacityRetryHooks.sgs"
+.include "quake/TextureWorldFrustumHook.i"
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+MsuMixedWorldGateThunk:
+        move    R6, #0
+        bra     MsuWorldGateThunk
+        nop
+MsuStandaloneWorldGateThunk:
+        move    R6, #1
+MsuWorldGateThunk:
+        iwt     R8, #.loword(MsuWorldGateROM)
+        move    R9, #BSP_GSU_ROM3_BANK
+        from    R8
+        ljmp    R9
+        nop
+.endif
+.if .defined(PLAYABLE_SAME_T_LIGHTMAP_BLOCK) && (BSP_RENDER_SCALE = 2)
+; Keep the buffered endpoint API and divide entries in the bank-$70 hook
+; padding while their old cache slot handles the qualified pixel loop.
+.include "quake/TextureCachedDivideEntries.sgs"
+.include "quake/LightmapSameTRowSetup.sgs"
+.endif
+.if .defined(PLAYABLE_PACKET_VIEW_REUSE) && (BSP_RENDER_SCALE = 2)
+; PacketBegin rebuilt the remap storage. Invalidate only on that path,
+; preserving the selector's early STOP for a matching packet revision.
+PacketInvalidateViewCache:
+        move    R0, #0
+        sm      (GSU_PACKET_VIEW_CACHE_VALID_OFFSET), R0
+        sm      (GSU_BRUSH_MERGE_CACHE_COUNT), R0
+.ifdef PLAYABLE_PACKET_SCREEN_REUSE
+        sm      (GSU_PACKET_SCREEN_READY), R0
+.endif
+        GSU_ABSOLUTE_GOTO PacketScanLoadByte
+.endif
+.res $F9 - (* - PacketCapacityHookSlot)
 
+.ifdef PLAYABLE_WORLD_LIGHTMAP_STREAM
+.export WorldLightmapStreamBank, WorldLightmapStreamAddress
+.export WorldLightmapStreamWidth, WorldLightmapStreamHeight, WorldLightmapStreamResume
+WorldLightmapStreamBank = $710000 + LIGHTMAP_ROM_BANK
+WorldLightmapStreamAddress = $710000 + LIGHTMAP_ROM_ADDRESS
+WorldLightmapStreamWidth = $710000 + LIGHTMAP_WIDTH
+WorldLightmapStreamHeight = $710000 + LIGHTMAP_HEIGHT
+.endif
 TextureLoadFaceLightmap:
         sm      (LIGHTMAP_LOAD_RETURN), R11
         lm      R3, (PACKET_SOURCE_INDEX)
@@ -1340,23 +1461,28 @@ TextureLoadFaceLightmap:
         sm      (LIGHTMAP_MIN_BLOCK_S), R0
         BSP_ROM_LOAD_SIGNED_BYTE R0
         sm      (LIGHTMAP_MIN_BLOCK_T), R0
+        QuakeRouteWorldLightmap TextureLoadFaceLightmapDone, TextureLoadResidentWorldLightmap
+.ifdef PLAYABLE_WORLD_LIGHTMAP_STREAM
         move    R0, R7
-        inc     R0
-        bne     :+
-        nop
-        GSU_ABSOLUTE_GOTO TextureLoadFaceLightmapDone
-:
-        lm      R4, (LIGHTMAP_ROM_ADDRESS)
-        GSU_SET_ROM_BUFFER_ADDRESS R4
-        lm      R0, (LIGHTMAP_WIDTH)
-        lm      R6, (LIGHTMAP_HEIGHT)
+        iwt     R4, #WORLD_LIGHTMAP_REQUEST_TAG
         with    R0
-        umult   R6
-        move    R12, R0
+        or      R4
+        sm      (LIGHTMAP_ROM_BANK), R0
+        stop
+        nop
+WorldLightmapStreamResume:
+        move    R0, #0
+.if .defined(PLAYABLE_PAIRED_WORLD_CODE) && (BSP_RENDER_SCALE = 2)
+        ; The CPU filled a new raw grid, bypassing the GSU unpacker.
+        sm      (TEXTURE_SIGN_SHADE), R0
+.endif
+        sm      (LIGHTMAP_ROM_BANK), R0
         iwt     R10, #GSU_LIGHTMAP_CACHE_OFFSET
         sm      (LIGHTMAP_ROM_ADDRESS), R10
-        jal     TextureLoadFaceLightmapCache
-        nop
+.else
+        QuakeDecodeWorldLightmap TextureLoadFaceLightmapCache
+.endif
+TextureLoadFaceLightmapAddressReady:
         ; Recover the world loader link before its state word becomes the
         ; adjusted address used by every positive-bank interior sample.
         lm      R7, (LIGHTMAP_LOAD_RETURN)
@@ -1366,6 +1492,9 @@ TextureLoadFaceLightmap:
         to      R11
         ret
         nop
+.ifdef PLAYABLE_WORLD_LIGHTMAP_STREAM
+        .res $7C - (* - TextureLoadFaceLightmap), $01
+.endif
 TextureLoadFaceLightmapDone:
         lm      R11, (LIGHTMAP_LOAD_RETURN)
         ret
@@ -1377,7 +1506,7 @@ TextureLoadFaceLightmapDone:
 ; to R13 after restoring bank $70, leaving caller-owned R8 and R9 untouched.
 GSU_CACHE_KERNEL_BEGIN TextureLoadFaceLightmapCache
         move    R13, R11
-        move    R11, #$24
+        move    R11, #BSP_LIGHTMAP_UNPACK_ROM_BANK
         iwt     R0, #.loword(TextureUnpackLightmapSamplesROM)
         from    R0
         ljmp    R11
@@ -1387,13 +1516,34 @@ GSU_CACHE_KERNEL_END TextureLoadFaceLightmapCache
 ; E1M3 face-coordinate runs never cross an 8K-record ROM bank. Establish the
 ; sequential stream once per face, then consume its signed Q4 s,t words.
 TextureBeginCoordinateStream:
+.ifdef PLAYABLE_WORLD_COORDINATE_STREAM
+.export WorldCoordinateStreamIndex, WorldCoordinateStreamCount
+.export WorldCoordinateStreamBuffer, WorldCoordinateStreamResume, WorldCoordinateStreamRequest
+WorldCoordinateStreamIndex = $710000 + TEXTURE_WORLD_INDEX
+WorldCoordinateStreamCount = $710000 + CONVEX_FACE_VERTICES
+WorldCoordinateStreamBuffer = $710000 + TEXTURE_VIEW_B
+; Reuse the alias request word before the opaque pass hands scratch to aliases.
+WorldCoordinateStreamRequest = $710000 + ALIAS_STATE + $90
+.assert BSP_WORLD_MAX_FACE_VERTICES*4 <= CONVEX_VERTEX_CAPACITY*TEXTURE_VIEW_RECORD_BYTES, error, "Coordinate rows exceed inactive clip scratch"
+        move    R0, #WORLD_COORDINATE_REQUEST_TAG
+        sm      (.loword(WorldCoordinateStreamRequest)), R0
+        stop
+        nop
+WorldCoordinateStreamResume:
+        move    R0, #0
+        sm      (.loword(WorldCoordinateStreamRequest)), R0
+        move    R0, #$71
+        romb
+        iwt     R4, #TEXTURE_VIEW_B
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+.else
         lm      R0, (TEXTURE_WORLD_INDEX)
         move    R1, R0
   .repeat 13
         with    R1
         lsr
   .endrepeat
-        move    R3, #WORLD_TEXCOORD_FIRST_ROM_BANK
+        move    R3, #BSP_WORLD_TEXTURE_COORD_FIRST_GSU_ROM_BANK
         with    R1
         add     R3
         move    R0, R1
@@ -1406,12 +1556,17 @@ TextureBeginCoordinateStream:
         add     R1
         with    R1
         add     R1
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_TEXCOORD_ROM_ADDRESS
         with    R4
         add     R1
         GSU_SET_ROM_BUFFER_ADDRESS R4
+.endif
         ret
         nop
+.ifdef PLAYABLE_WORLD_COORDINATE_STREAM
+        .include "BakedFaceClip.sgs"
+        .res $3D - (* - TextureBeginCoordinateStream), $01
+.endif
 
 TextureLoadCoordinate:
         BSP_ROM_LOAD_WORD R5
@@ -1421,31 +1576,43 @@ TextureLoadCoordinate:
         ret
         nop
 
-TextureRenderConvexFace:
+.macro TextureTransformWorldFace stream_coordinates
+        .local TransformLoop
         sm      (TEXTURE_FACE_RETURN), R11
+  .if stream_coordinates
         jal     TextureBeginCoordinateStream
         nop
+  .endif
         iwt     R0, #TEXTURE_VIEW_A
         sm      (CONVEX_OUTPUT_CURSOR), R0
         move    R0, #0
         sm      (CONVEX_OUTPUT_COUNT), R0
+  .if !stream_coordinates
+        sm      (TEXTURE_CUR_S), R0
+        sm      (TEXTURE_CUR_T), R0
+  .endif
         lm      R0, (CONVEX_FACE_VERTICES)
         sm      (CONVEX_EDGE_COUNT), R0
-TextureTransformLoop:
+TransformLoop:
         lm      R10, (CONVEX_INDEX_PTR)
         movew   R0, (R10)
         inc     R10
         inc     R10
         sm      (CONVEX_INDEX_PTR), R10
         sm      (CLIP_VERTEX_INDEX), R0
+  .if stream_coordinates
         jal     TextureLoadCoordinate
+  .endif
         jal     LoadPacketViewVertex
         lm      R0, (CONVEX_EDGE_COUNT)
         dec     R0
         sm      (CONVEX_EDGE_COUNT), R0
-        bne     TextureTransformLoop
+        bne     TransformLoop
         nop
-
+.endmacro
+TextureRenderConvexFace:
+        TextureTransformWorldFace 1
+TextureClipFaceReady:
         iwt     R0, #TEXTURE_VIEW_A
         sm      (CONVEX_INPUT_PTR), R0
         iwt     R0, #TEXTURE_VIEW_B
@@ -1479,6 +1646,7 @@ TexturePlaneHasPolygon:
         cmp     R1
         bne     TexturePlaneLoop
         nop
+TextureClipFaceProject:
         jal     TextureProjectPolygonShaded
         nop
         moves   R0, R0
@@ -1495,13 +1663,60 @@ TextureFaceDone:
 ; sibling shares only cold coordinate/transform/clip helpers, then enters the
 ; depth-carrying projector and rasterizer.
 .macro DEFINE_TEXTURE_SHADED_FACE entry, raster, alternate_raster
+        .local ContourEntry
         .local TransformLoop, TransformDone
         .local PlaneLoop, PlaneHasPolygon, PlaneNext, Project, AlternateRaster
+        .local ProjectUnclipped, ProjectResult
         .local FaceDone
 entry:
         sm      (TEXTURE_FACE_RETURN), R11
+  .if (BSP_RENDER_SCALE = 2) && .xmatch({entry}, {TextureRenderConvexFaceShaded})
+        jal     TextureBeginWorldCoordinates
+  .else
         jal     TextureBeginCoordinateStream
+  .endif
         nop
+  .if (BSP_RENDER_SCALE = 2) && .xmatch({entry}, {TextureRenderConvexFaceShaded})
+ContourEntry:
+        iwt     R13, #TransformDone
+        iwt     R0, #.loword(TextureLoadShadedContourROM)
+    .ifdef PLAYABLE_WORLD_AFFINE_UV
+        moves   R6, R6
+        beq     :+
+        nop
+        iwt     R0, #.loword(TextureLoadShadedAffineContourROM)
+:
+    .endif
+        move    R12, #BSP_GSU_ROM3_BANK
+        from    R0
+        ljmp    R12
+        nop
+    .ifdef PLAYABLE_PACKET_SCREEN_REUSE_CODE
+ProjectUnclipped:
+        iwt     R0, #.loword(ProjectResult)
+        sm      (GSU_PACKET_SCREEN_RETURN), R0
+        iwt     R8, #.loword(TextureTryPacketScreenPolygon)
+        ibt     R9, #BSP_GSU_ROM3_BANK
+        from    R8
+        ljmp    R9
+        nop
+PacketScreenColdProject:
+        jal     TextureProjectPolygonShaded
+        nop
+        iwt     R8, #.loword(PacketScreenCaptureAfterProjectionROM)
+        ibt     R9, #BSP_GSU_ROM3_BANK
+        from    R8
+        ljmp    R9
+        nop
+PacketScreenTail:
+        ; Every exact screen record is present. The common tail owns the Y
+        ; classifier, bounds, return registers, and projected raster ABI.
+        GSU_ABSOLUTE_GOTO TextureShadeProjectVerticesDone, shared_delay
+        cache
+    .endif
+        ; Keep the projector, clipper and following overlays at their pins.
+        .res $40 - (* - ContourEntry), $01
+  .else
         iwt     R0, #TEXTURE_VIEW_A
         sm      (CONVEX_OUTPUT_CURSOR), R0
         move    R0, #0
@@ -1528,6 +1743,7 @@ TransformLoop:
         beq     TransformDone
         nop
         GSU_ABSOLUTE_GOTO TransformLoop
+  .endif
 TransformDone:
 
         iwt     R0, #TEXTURE_VIEW_A
@@ -1536,8 +1752,13 @@ TransformDone:
         sm      (CONVEX_COUNT), R0
         lm      R0, (TEXTURE_CLIP_OUTCODE)
         moves   R0, R0
+  .if .defined(PLAYABLE_PACKET_SCREEN_REUSE) && (BSP_RENDER_SCALE = 2) && .xmatch({entry}, {TextureRenderConvexFaceShaded})
+        beq     ProjectUnclipped
+        nop
+  .else
         beq     Project
         nop
+  .endif
         iwt     R0, #TEXTURE_VIEW_B
         sm      (CONVEX_OUTPUT_PTR), R0
         move    R0, #0
@@ -1575,6 +1796,7 @@ PlaneNext:
         nop
 Project:
         jal     TextureProjectPolygonShaded
+ProjectResult:
         moves   R0, R0
         beq     FaceDone
         nop
@@ -1585,6 +1807,9 @@ Project:
         cmp     R1
         beq     AlternateRaster
         nop
+  .endif
+  .if .xmatch({entry}, {TextureRenderConvexFaceShaded})
+WorldLightmapRasterCall:
   .endif
         jal     raster
   .ifnblank alternate_raster
@@ -1597,9 +1822,13 @@ FaceDone:
         lm      R11, (TEXTURE_FACE_RETURN)
         ret
         nop
+  .if .xmatch({entry}, {TextureRenderConvexFaceShaded})
+WorldLightmapRasterReturn = FaceDone
+  .endif
 .endmacro
 
-DEFINE_TEXTURE_SHADED_FACE TextureRenderConvexFaceShaded, TextureRasterPolygonShaded
+.export WorldLightmapRasterCall, WorldLightmapRasterTarget, TextureRasterPolygonShaded
+DEFINE_TEXTURE_SHADED_FACE TextureRenderConvexFaceShaded, WorldLightmapRasterTarget
 
 TextureClipPlane:
         sm      (TEXTURE_CLIP_RETURN), R11
@@ -1776,161 +2005,4 @@ TextureInterpolateT:
         ret
         nop
 
-TextureProjectPolygonShaded:
-        ; Keep this vertex loop resident while its exact divider runs outside
-        ; the window. No projection arithmetic or clipping policy changes.
-        cache
-        sm      (TEXTURE_PROJECT_RETURN), R11
-        iwt     R0, #24576
-        sm      (CONVEX_MIN_Y), R0
-        iwt     R0, #-8192
-        sm      (CONVEX_MAX_Y), R0
-        lm      R0, (CONVEX_INPUT_PTR)
-        sm      (CONVEX_CURRENT_PTR), R0
-        iwt     R0, #TEXTURE_SCREEN
-        sm      (CONVEX_SCREEN_PTR), R0
-        lm      R0, (CONVEX_COUNT)
-        sm      (CONVEX_SCREEN_COUNT), R0
-        sm      (CONVEX_EDGE_COUNT), R0
-TextureShadeProjectLoop:
-        lm      R10, (CONVEX_CURRENT_PTR)
-        TEXTURE_LOAD_VIEW R10, CONVEX_CUR_RIGHT, CONVEX_CUR_UP, CONVEX_CUR_DEPTH, TEXTURE_CUR_S, TEXTURE_CUR_T
-        inc     R10
-        inc     R10
-        sm      (CONVEX_CURRENT_PTR), R10
-
-        ; Both screen components share this vertex's exact depth reciprocal.
-        lm      R2, (CONVEX_CUR_DEPTH)
-        jal     TexturePrepareDivideQ12
-        nop
-        lm      R1, (CONVEX_CUR_RIGHT)
-        lm      R2, (CONVEX_CUR_DEPTH)
-        jal     ConvexProjectComponent
-        iwt     R1, #BSP_VIEW_CENTER_X_Q7
-        with    R0
-        add     R1
-        lm      R10, (CONVEX_SCREEN_PTR)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-
-        lm      R1, (CONVEX_CUR_UP)
-        lm      R2, (CONVEX_CUR_DEPTH)
-        jal     ConvexProjectComponent
-        iwt     R1, #BSP_VIEW_CENTER_Y_Q7
-        with    R1
-        sub     R0
-        movew   (R10), R1
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_CUR_S)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (TEXTURE_CUR_T)
-        movew   (R10), R0
-        inc     R10
-        inc     R10
-        lm      R0, (CONVEX_CUR_DEPTH)
-        movew   (R10), R0
-
-        lm      R2, (CONVEX_MIN_Y)
-        move    R3, R1
-        with    R3
-        sub     R2
-        bpl     TextureShadeProjectMinReady
-        nop
-        sm      (CONVEX_MIN_Y), R1
-        move    R0, R10
-        with    R0
-        sub     #8
-        sm      (CONVEX_TOP_PTR), R0
-TextureShadeProjectMinReady:
-        lm      R2, (CONVEX_MAX_Y)
-        move    R3, R2
-        with    R3
-        sub     R1
-        bpl     TextureShadeProjectMaxReady
-        nop
-        sm      (CONVEX_MAX_Y), R1
-TextureShadeProjectMaxReady:
-        inc     R10
-        inc     R10
-        sm      (CONVEX_SCREEN_PTR), R10
-        lm      R0, (CONVEX_EDGE_COUNT)
-        dec     R0
-        sm      (CONVEX_EDGE_COUNT), R0
-        beq     TextureShadeProjectVerticesDone
-        nop
-        GSU_ABSOLUTE_GOTO TextureShadeProjectLoop
-TextureShadeProjectVerticesDone:
-        lm      R0, (CONVEX_SCREEN_PTR)
-        sm      (CONVEX_SCREEN_END_PTR), R0
-        lm      R0, (CONVEX_TOP_PTR)
-        sm      (CONVEX_FORWARD_PTR), R0
-        sm      (CONVEX_REVERSE_PTR), R0
-
-        lm      R0, (CONVEX_MIN_Y)
-        iwt     R1, #63
-        with    R0
-        add     R1
-  .repeat 7
-        with    R0
-        asr
-  .endrepeat
-        moves   R0, R0
-        bpl     TextureShadeRasterFirstYPositive
-        nop
-        move    R0, #0
-TextureShadeRasterFirstYPositive:
-        move    R1, #BSP_VIEW_HEIGHT-1
-        with    R1
-        sub     R0
-        bpl     TextureShadeRasterFirstYReady
-        nop
-        bra     TextureShadeProjectRejected
-        nop
-TextureShadeRasterFirstYReady:
-        sm      (CONVEX_RASTER_Y), R0
-
-        lm      R0, (CONVEX_MAX_Y)
-        iwt     R1, #65
-        with    R0
-        sub     R1
-  .repeat 7
-        with    R0
-        asr
-  .endrepeat
-        moves   R0, R0
-        bpl     TextureShadeRasterLastYPositive
-        nop
-        bra     TextureShadeProjectRejected
-        nop
-TextureShadeRasterLastYPositive:
-        move    R1, #BSP_VIEW_HEIGHT-1
-        move    R2, R1
-        with    R2
-        sub     R0
-        bpl     TextureShadeRasterLastYReady
-        nop
-        move    R0, R1
-TextureShadeRasterLastYReady:
-        lm      R1, (CONVEX_RASTER_Y)
-        move    R2, R0
-        with    R2
-        sub     R1
-        bpl     TextureShadeRasterRowsReady
-        nop
-        bra     TextureShadeProjectRejected
-        nop
-TextureShadeRasterRowsReady:
-        sm      (CONVEX_TOP_PTR), R0
-        move    R0, #1
-        bra     TextureShadeProjectReturn
-        nop
-TextureShadeProjectRejected:
-        move    R0, #0
-TextureShadeProjectReturn:
-        lm      R11, (TEXTURE_PROJECT_RETURN)
-        ret
-        nop
+.include "quake/TexturePolygonProjection.sgs"

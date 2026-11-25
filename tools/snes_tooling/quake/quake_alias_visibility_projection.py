@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from snes_tooling import Workspace
@@ -12,13 +12,7 @@ from snes_tooling.quake import quake_alias_visibility_archive as archive
 from snes_tooling.shared.host_resources import physical_core_count
 
 
-def projection_replay(arguments: tuple[Path, int, int]) -> tuple[int, bytes]:
-    data, focal, workers = arguments
-    ordered = replay.build_replay(data, stride=1, render_scale=3, source_focal=focal, workers=workers)
-    return focal, replay.encode_replay(ordered)
-
-
-def input_bindings(data: Path, focal: int) -> dict:
+def input_bindings(data: Path) -> dict:
     root = Workspace.discover().root
     patterns = ("QuakeBSPWorld*.bin", "QuakeBSPWorld*.i", "QuakeBSPScene.i",
                 "QuakeBSPBrush*.bin", "QuakeBSPBrush*.json", "QuakeBSPBrush*.i",
@@ -32,17 +26,16 @@ def input_bindings(data: Path, focal: int) -> dict:
     sources += [root / "tools/snes_tooling/quake" / name for name in (
         "generate_quake_alias_visibility.py", "quake_alias_visibility_archive.py",
         "quake_alias_visibility_projection.py", "generate_quake_bsp_ordered_replay.py",
-        "quake_bsp_packet_oracle.py", "analyze_quake_bsp_packets.py")]
+        "quake_bsp_packet_oracle.py", "analyze_quake_bsp_packets.py", "quake_view_transform.py")]
     producers = {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
                  for path in sources}
     return dict(inputs=inputs, producers=producers, projections=[
         dict(scale=2, focal=96, width=128, height=112, center=[64,56]),
-        dict(scale=3, focal=64, width=85, height=74, center=[43,37]),
-        dict(scale=3, focal=focal, width=85, height=74, center=[43,37])])
+        dict(scale=3, focal=64, width=85, height=74, center=[43,37])])
 
 
-def require_bindings(metadata: dict, data: Path, focal: int) -> None:
-    if metadata.get("bindings") != input_bindings(data, focal):
+def require_bindings(metadata: dict, data: Path) -> None:
+    if metadata.get("bindings") != input_bindings(data):
         raise ValueError("QAV3 camera, geometry, sprite, producer or projection binding is stale")
     for name, expected in metadata["files"].items():
         path = data / name
@@ -51,61 +44,50 @@ def require_bindings(metadata: dict, data: Path, focal: int) -> None:
 
 
 def build_projection_archive(*, executable: Path, pak: Path, data: Path, temporary: Path,
-                             focal: int, codec: str, enabled, disabled,
+                             codec: str, enabled, disabled,
                              workers: int | None = None) -> tuple[dict, dict, tuple]:
     from snes_tooling.quake import generate_quake_alias_visibility as visibility
     corpora = [enabled, disabled]
     outputs = {}
-    focals = tuple(dict.fromkeys((64, focal)))
     workers = physical_core_count() if workers is None else workers
     if workers < 1:
         raise ValueError("visibility workers must be positive")
-    parallel = min(len(focals), workers)
-    jobs = [(data, f, max(1, workers//parallel)) for f in focals]
-    if parallel == 1:
-        replays = dict(map(projection_replay, jobs))
-    else:
-        with ProcessPoolExecutor(parallel) as pool:
-            replays = dict(pool.map(projection_replay, jobs))
-    paths = {}
-    for f, payload in replays.items():
-        path = temporary / f"x3-{f}.qor"
-        path.write_bytes(payload)
-        paths[f] = path
+    ordered = replay.build_replay(data, stride=1, render_scale=3, workers=workers)
+    replay_payload = replay.encode_replay(ordered)
+    path = temporary / "x3.qor"
+    path.write_bytes(replay_payload)
 
-    def export(job):
-        f, brushes = job
-        target = temporary / f"x3-{f}-{int(brushes)}.qav"
-        visibility._export(executable, pak, data, paths[f], target,
+    def export(brushes):
+        target = temporary / f"x3-{int(brushes)}.qav"
+        visibility._export(executable, pak, data, path, target,
             map_entry=visibility._configured_map_entry(data), brushes_enabled=brushes,
-            render_scale=3, source_focal=f)
-        return (f, brushes), target.read_bytes()
+            render_scale=3)
+        return brushes, target.read_bytes()
 
     supported = visibility._dynamic_brush_replay_supported(data)
-    jobs = [(f, brushes) for f in focals for brushes in ((True, False) if supported else (False,))]
+    jobs = (True, False) if supported else (False,)
     with ThreadPoolExecutor(min(workers, len(jobs))) as pool:
         exported = dict(pool.map(export, jobs))
     variants = []
-    for label, f in (("Unity", 64), ("Warp", focal)):
-        for brushes in (True, False):
-            raw = exported[f, brushes] if supported or not brushes else visibility._world_only_enabled_payload(exported[f, False])
-            corpus = visibility.parse_visibility(raw, expected_brushes=brushes,
-                expected_camera_fingerprint=enabled.camera_fingerprint,
-                expected_alias_fingerprint=enabled.alias_fingerprint)
-            corpora.append(corpus)
-            name = Path(f"QuakeBSPAliasVisibilityX3{label}{'Enabled' if brushes else 'Disabled'}.bin")
-            outputs[name] = raw
-            variants.append(dict(name=label, focal=f, brushesEnabled=brushes, file=name.name,
-                sha256=hashlib.sha256(raw).hexdigest(),
-                fullRateReplaySha256=hashlib.sha256(replays[f]).hexdigest(),
-                maximumRecords=corpus.maximum_records, maximumMasks=corpus.maximum_mask_bytes))
+    for brushes in (True, False):
+        raw = exported[brushes] if supported or not brushes else visibility._world_only_enabled_payload(exported[False])
+        corpus = visibility.parse_visibility(raw, expected_brushes=brushes,
+            expected_camera_fingerprint=enabled.camera_fingerprint,
+            expected_alias_fingerprint=enabled.alias_fingerprint)
+        corpora.append(corpus)
+        name = Path(f"QuakeBSPAliasVisibilityX3{'Enabled' if brushes else 'Disabled'}.bin")
+        outputs[name] = raw
+        variants.append(dict(focal=64, brushesEnabled=brushes, file=name.name,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            fullRateReplaySha256=hashlib.sha256(replay_payload).hexdigest(),
+            maximumRecords=corpus.maximum_records, maximumMasks=corpus.maximum_mask_bytes))
     payload, directory, metadata = archive.pack([c.row_payloads for c in corpora], codec=codec)
     for index in range(2):
         outputs[Path(f"QuakeBSPAliasVisibilityArchive{index}.bin")] = payload[index*32768:(index+1)*32768]
     outputs[Path("QuakeBSPAliasVisibilityDirectory.bin")] = directory
     metadata.update(schema="quake-shared-alias-visibility-v3", variants=variants,
-        bindings=input_bindings(data, focal),
-        directoryOrder=["x2-enabled", "x2-disabled", "x3-unity-enabled", "x3-unity-disabled", "x3-warp-enabled", "x3-warp-disabled"],
+        bindings=input_bindings(data),
+        directoryOrder=["x2-enabled", "x2-disabled", "x3-enabled", "x3-disabled"],
         directoryContract="CPU direct source-pose uint16 addresses into GSU bank $6f; $ffff means live fallback",
         rowContract="count byte, high bit RLE; token high bit hidden, otherwise candidate count uint16 and ordered opaque-texel bits",
         candidateOrder="QBA1 canonical token ordinal, clipped destination scan rows then columns, transparent sprite samples omitted",
@@ -117,7 +99,7 @@ def joint_temporal_ids(alias_package: bytes, corpora: tuple, *, brushes: bool) -
     """Conservatively bind every projection without enlarging the temporal tables."""
     from snes_tooling.quake import generate_quake_alias_visibility as visibility
     index = 0 if brushes else 1
-    ids = [visibility._temporal_alias_identity_ids(alias_package, corpora[index + 2*p]) for p in range(3)]
+    ids = [visibility._temporal_alias_identity_ids(alias_package, corpus) for corpus in corpora[index::2]]
     identities = {}
     result = []
     for key in zip(*ids, strict=True):
@@ -128,7 +110,7 @@ def joint_temporal_ids(alias_package: bytes, corpora: tuple, *, brushes: bool) -
 
 
 def assembly() -> bytes:
-    names = ("X2Enabled", "X2Disabled", "X3UnityEnabled", "X3UnityDisabled", "X3WarpEnabled", "X3WarpDisabled")
+    names = ("X2Enabled", "X2Disabled", "X3Enabled", "X3Disabled")
     lines = ['; Generated shared QAV3 archive.', '.segment "BSP_ALIAS_VISIBILITY_ENABLED"',
         '.assert * = $6F0000, lderror, "QAV3 first halfbank moved"',
         '.incbin "Data/QuakeBSPAliasVisibilityArchive0.bin"', '.segment "BSP_ALIAS_VISIBILITY_DISABLED"',

@@ -513,7 +513,8 @@ ExactTextureSample sample_brush_texture(
     std::uint16_t local_face,
     const Ray& ray,
     std::uint8_t entity_frame,
-    double server_time
+    double server_time,
+    bool freeze_texture_animation
 )
 {
     const auto& face = model.faces.at(local_face);
@@ -523,7 +524,12 @@ ExactTextureSample sample_brush_texture(
         fail("brush face references invalid texture information");
     }
     const auto& info = world.texture_infos[static_cast<std::size_t>(info_index)];
-    const int texture_id = resolve_brush_texture(scene.texture_animations, info.texture_id, entity_frame, server_time);
+    const int texture_id = resolve_brush_texture(
+        scene.texture_animations,
+        info.texture_id,
+        entity_frame,
+        freeze_texture_animation ? 0.0 : server_time
+    );
     if (texture_id < 0 || static_cast<std::size_t>(texture_id) >= world.textures.size())
     {
         fail("brush texture animation resolved outside the miptex array");
@@ -630,7 +636,16 @@ void write_brush_pixel(
 {
     const auto pixel = logical_pixel_index(x, y);
     const auto& face = model.faces.at(local_face);
-    const auto sample = sample_brush_texture(world, scene, model, local_face, local_ray, entity.frame, server_time);
+    const auto sample = sample_brush_texture(
+        world,
+        scene,
+        model,
+        local_face,
+        local_ray,
+        entity.frame,
+        server_time,
+        entity.freeze_texture_animation
+    );
     frame.faces[pixel] = face.source_face;
     frame.entities[pixel] = entity.entity;
     frame.models[pixel] = entity.inline_model;
@@ -760,7 +775,6 @@ void compose_source_brushes(
 }
 } // namespace
 
-namespace {
 ReferenceFrame render_source_reference_with_brushes(
     const SourceWorld& world,
     const Bvh& world_bvh,
@@ -783,8 +797,6 @@ ReferenceFrame render_source_reference_with_brushes(
     compose_source_brushes(world, scene, entities, sample_index, server_time, flat, view, frame);
     return frame;
 }
-} // namespace
-
 ReferenceFrame render_packed_camera_source_reference_with_brushes(
     const SourceWorld& world,
     const Bvh& world_bvh,

@@ -1,0 +1,624 @@
+; Shared integer sky magnitude and quotient helpers.
+SkySquareValue48:
+        sm      (SKY_SQUARE_RETURN), R11
+        lm      R8, (SKY_WORK_LO)
+        lm      R9, (SKY_WORK_HI)
+        move    R2, R9
+        with    R2
+        add     R2
+        move    R0, R8
+        moves   R0, R0
+        bpl     @BaseReady
+        nop
+        inc     R2
+@BaseReady:
+        iwt     R1, #$7FFF
+        with    R8
+        and     R1
+
+        move    R0, R8
+        move    R6, R8
+        with    R0
+        lmult
+        sm      (SKY_SQUARE_LO), R4
+        sm      (SKY_SQUARE_MID), R0
+        move    R1, #0
+        sm      (SKY_SQUARE_HI), R1
+
+        move    R0, R8
+        move    R6, R2
+        with    R0
+        lmult
+        lm      R1, (SKY_SQUARE_MID)
+        with    R1
+        add     R4
+        sm      (SKY_SQUARE_MID), R1
+        lm      R1, (SKY_SQUARE_HI)
+        with    R1
+        adc     R0
+        sm      (SKY_SQUARE_HI), R1
+
+        move    R0, R2
+        move    R6, R2
+        with    R0
+        lmult
+        move    R1, R4
+        ; Only low product bits 1..0 reach the middle word after <<30.
+        ; LOB removes the swapped high-byte leak while R4 remains intact for
+        ; the exact >>2 contribution to the high word below.
+        with    R1
+        lob
+        with    R1
+        swap
+  .repeat 6
+        with    R1
+        add     R1
+  .endrepeat
+        move    R2, R4
+  .repeat 2
+        with    R2
+        lsr
+  .endrepeat
+        lm      R0, (SKY_SQUARE_MID)
+        with    R0
+        add     R1
+        sm      (SKY_SQUARE_MID), R0
+        lm      R0, (SKY_SQUARE_HI)
+        with    R0
+        adc     R2
+        sm      (SKY_SQUARE_HI), R0
+        lm      R11, (SKY_SQUARE_RETURN)
+        ret
+        nop
+
+; Add WORK^2 to the exact unsigned 48-bit magnitude accumulator.
+SkyAccumulateSquares48:
+        sm      (SKY_ACCUM_RETURN), R11
+        jal     SkySquareValue48
+        nop
+        lm      R0, (SKY_SUM_LO)
+        lm      R1, (SKY_SQUARE_LO)
+        with    R0
+        add     R1
+        sm      (SKY_SUM_LO), R0
+        lm      R0, (SKY_SUM_MID)
+        lm      R1, (SKY_SQUARE_MID)
+        with    R0
+        adc     R1
+        sm      (SKY_SUM_MID), R0
+        lm      R0, (SKY_SUM_HI)
+        lm      R1, (SKY_SQUARE_HI)
+        with    R0
+        adc     R1
+        sm      (SKY_SUM_HI), R0
+        lm      R11, (SKY_ACCUM_RETURN)
+        ret
+        nop
+
+; Convert signed R0:R4 to an unsigned magnitude and accumulate its square.
+SkyAccumulateSignedComponent:
+        sm      (SKY_ACCUM_SIGNED_RETURN), R11
+        moves   R0, R0
+        bpl     @MagnitudeReady
+        nop
+        move    R1, #0
+        with    R1
+        sub     R4
+        move    R2, #0
+        with    R2
+        sbc     R0
+        move    R4, R1
+        move    R0, R2
+@MagnitudeReady:
+        sm      (SKY_WORK_LO), R4
+        sm      (SKY_WORK_HI), R0
+        jal     SkyAccumulateSquares48
+        nop
+        lm      R11, (SKY_ACCUM_SIGNED_RETURN)
+        ret
+        nop
+
+; Exact base-4 restoring square root of SUM[47:0].
+; X2 rays fit 42 bits; X3's scaled rays require 43 bits and a 22-bit root.
+; Consume SUM>>40 explicitly, then iterate over the remaining 20 digits.
+; The loop leaves the exact remainder SUM-root^2, allowing the accepted 3/4
+; magnitude threshold to round without another square:
+;   round up iff remainder >= root + ceil(root/2) + 1.
+.if BSP_RENDER_SCALE = 2
+; The packed-x2 exact squared numerator is below2^42. Six extra radicand bits
+; therefore fit48bits and give three fractional magnitude bits after sqrt.
+SkyFloorIsqrt48:
+        sm      (SKY_ISQRT_RETURN), R11
+        lm      R4, (SKY_SUM_LO)
+        lm      R5, (SKY_SUM_MID)
+        lm      R6, (SKY_SUM_HI)
+        .repeat 6
+          with  R4
+          add   R4
+          with  R5
+          adc   R5
+          with  R6
+          adc   R6
+        .endrepeat
+        move    R8, R6
+        with    R8
+        hib
+        .repeat 6
+          with  R8
+          lsr
+        .endrepeat
+        move    R9, #0
+        move    R12, #0
+        move    R13, #0
+        moves   R8, R8
+        beq     @SeedReady
+        nop
+        inc     R12
+        dec     R8
+@SeedReady:
+        .repeat 2
+          with  R4
+          add   R4
+          with  R5
+          adc   R5
+          with  R6
+          adc   R6
+        .endrepeat
+        move    R7, #23
+@DigitLoop:
+        .repeat 2
+          with  R4
+          add   R4
+          with  R5
+          adc   R5
+          with  R6
+          adc   R6
+          with  R8
+          rol
+          with  R9
+          rol
+        .endrepeat
+        with    R12
+        add     R12
+        with    R13
+        adc     R13
+        move    R2, R12
+        move    R3, R13
+        with    R2
+        add     R2
+        with    R3
+        adc     R3
+        inc     R2
+        with    R8
+        sub     R2
+        with    R9
+        sbc     R3
+        bcc     @RestoreTrial
+        nop
+        inc     R12
+        bra     @DigitDone
+        nop
+@RestoreTrial:
+        with    R8
+        add     R2
+        with    R9
+        adc     R3
+@DigitDone:
+        dec     R7
+        bne     @DigitLoop
+        cache
+        ; Integer radicand has no midpoint tie; nearest root uses remainder>q.
+        with    R8
+        sub     R12
+        with    R9
+        sbc     R13
+        bcc     @Publish
+        nop
+        with    R8
+        or      R9
+        beq     @Publish
+        nop
+        move    R0, #1
+        with    R12
+        add     R0
+        move    R0, #0
+        with    R13
+        adc     R0
+@Publish:
+        sm      (SKY_ROOT_LO), R12
+        sm      (SKY_ROOT_HI), R13
+        lm      R11, (SKY_ISQRT_RETURN)
+        ret
+        nop
+
+.else
+SkyFloorIsqrt48:
+        sm      (SKY_ISQRT_RETURN), R11
+        lm      R4, (SKY_SUM_LO)
+        lm      R5, (SKY_SUM_MID)
+        lm      R6, (SKY_SUM_HI)
+
+        ; Preserve the low limbs before aligning the remaining 40 input bits.
+        move    R2, R4
+        move    R3, R5
+
+        ; Seed floor(sqrt(p)) and p-root^2. X2 admits p=0..3; X3 admits
+        ; p=0..7, including p>=4 where the initial root is two, not one.
+        move    R8, R6
+        with    R8
+        hib
+        with    R8
+.if BSP_RENDER_SCALE = 3
+        and     #7
+.else
+        and     #3
+.endif
+        move    R9, #0
+        move    R12, #0
+        move    R13, #0
+        moves   R8, R8
+        beq     @TopDigitReady
+        nop
+        move    R12, #1
+.if BSP_RENDER_SCALE = 3
+        move    R0, R8
+        with    R0
+        and     #4
+        beq     @TopRootOne
+        nop
+        move    R12, #2
+        with    R8
+        sub     #3
+@TopRootOne:
+.endif
+        dec     R8
+@TopDigitReady:
+
+        ; Shift the low 40 bits left by one byte without paying eight serial
+        ; multiword shifts. The high digit was consumed above.
+        with    R4
+        lob
+        with    R4
+        swap
+        with    R5
+        lob
+        with    R5
+        swap
+        with    R2
+        hib
+        with    R5
+        or      R2
+        with    R6
+        lob
+        with    R6
+        swap
+        with    R3
+        hib
+        with    R6
+        or      R3
+
+        move    R7, #20
+@DigitLoop:
+  .repeat 2
+        ; Append the next input bit to the two-word remainder.
+        with    R4
+        add     R4
+        with    R5
+        adc     R5
+        with    R6
+        adc     R6
+        with    R8
+        rol
+        with    R9
+        rol
+  .endrepeat
+
+        ; trial = 2*(root<<1)+1. ROOT_LO is even after the shift, so each
+        ; successful digit increment is carry-free in the low word.
+        with    R12
+        add     R12
+        with    R13
+        adc     R13
+        move    R2, R12
+        move    R3, R13
+        with    R2
+        add     R2
+        with    R3
+        adc     R3
+        inc     R2
+
+        ; Subtract first and restore on borrow. This is the same unsigned
+        ; decision as a two-word compare but avoids its branch ladder.
+        with    R8
+        sub     R2
+        with    R9
+        sbc     R3
+        bcc     @RestoreTrial
+        nop
+        inc     R12
+        bra     @DigitDone
+        nop
+@RestoreTrial:
+        with    R8
+        add     R2
+        with    R9
+        adc     R3
+@DigitDone:
+        dec     R7
+        bne     @DigitLoop
+        ; A taken backedge makes R15 the loop target before this delay slot.
+        ; CACHE anchors the whole arithmetic loop without changing its flags.
+        cache
+
+        ; R4:R5 = root + floor(root/2) + 1 + (root&1)
+        ;       = root + ceil(root/2) + 1.
+        move    R4, R12
+        move    R5, R13
+        with    R5
+        lsr
+        with    R4
+        ror
+        with    R4
+        add     R12
+        with    R5
+        adc     R13
+        move    R0, R12
+        with    R0
+        and     #1
+        inc     R0
+        with    R4
+        add     R0
+        move    R0, #0
+        with    R5
+        adc     R0
+
+        ; Equality rounds upward per the generated accepted contract.
+        with    R8
+        sub     R4
+        with    R9
+        sbc     R5
+        bcc     @RootReady
+        nop
+        move    R0, #1
+        with    R12
+        add     R0
+        move    R0, #0
+        with    R13
+        adc     R0
+@RootReady:
+        sm      (SKY_ROOT_LO), R12
+        sm      (SKY_ROOT_HI), R13
+        lm      R11, (SKY_ISQRT_RETURN)
+        ret
+        nop
+
+.endif
+
+; Unsigned restoring NUMERATOR[47:0] / DENOMINATOR[31:0]. The audited result
+; fits 32 bits, so the high numerator word is strictly below the denominator.
+; Seed that word as the remainder: the first 16 restoring steps cannot
+; subtract or set a quotient bit. Consume only the remaining low 32 bits.
+; R5:R4 holds the unconsumed numerator followed by the quotient bits already
+; produced. Each shift frees bit zero for the next quotient bit; after step
+; 32 no numerator bits remain. This saves a separate two-word quotient shift.
+SkyUnsignedDivide48By32:
+        sm      (SKY_DIVIDE_RETURN), R11
+        lm      R4, (SKY_NUMERATOR_LO)
+        lm      R5, (SKY_NUMERATOR_MID)
+        lm      R8, (SKY_NUMERATOR_HI)
+        lm      R2, (SKY_DENOMINATOR_LO)
+        lm      R3, (SKY_DENOMINATOR_HI)
+ .if BSP_RENDER_SCALE = 2
+        lm      R9, (SKY_NUMERATOR_TOP)
+ .else
+        move    R9, #0
+ .endif
+        move    R7, #32
+@DivideLoop:
+        with    R4
+        add     R4
+        with    R5
+        adc     R5
+        with    R8
+        rol
+        with    R9
+        rol
+
+        move    R0, R9
+        with    R0
+        cmp     R3
+        bcc     @DivideNext
+        nop
+        bne     @SubtractDenominator
+        nop
+        move    R0, R8
+        with    R0
+        cmp     R2
+        bcc     @DivideNext
+        nop
+@SubtractDenominator:
+        with    R8
+        sub     R2
+        with    R9
+        sbc     R3
+        inc     R4
+@DivideNext:
+        dec     R7
+        bne     @DivideLoop
+        ; A taken backedge makes R15 the loop target before this delay slot.
+        ; CACHE anchors the whole arithmetic loop without changing its flags.
+        cache
+        sm      (SKY_QUOTIENT_LO), R4
+        sm      (SKY_QUOTIENT_HI), R5
+        lm      R11, (SKY_DIVIDE_RETURN)
+        ret
+        nop
+
+        ; Preserve the following sky/brush code's measured instruction alignment.
+.if BSP_RENDER_SCALE = 3
+        .res 95 - (* - SkyUnsignedDivide48By32), $01
+.endif
+
+; Build abs(378*N)<<16 and divide by the floor magnitude, restoring N's sign.
+SkySignedQuotient:
+        sm      (SKY_QUOTIENT_RETURN), R11
+        lm      R4, (SKY_WORK_LO)
+        lm      R0, (SKY_WORK_HI)
+        move    R1, #0
+        sm      (SKY_SIGN), R1
+        moves   R0, R0
+        bpl     @QuotientMagnitudeReady
+        nop
+        move    R1, #1
+        sm      (SKY_SIGN), R1
+        move    R1, #0
+        with    R1
+        sub     R4
+        move    R2, #0
+        with    R2
+        sbc     R0
+        move    R4, R1
+        move    R0, R2
+@QuotientMagnitudeReady:
+        ; Base-2^15 multiply by the positive constant 378.
+        move    R8, R4
+        move    R9, R0
+        move    R2, R9
+        with    R2
+        add     R2
+        move    R0, R8
+        moves   R0, R0
+        bpl     @QuotientBaseReady
+        nop
+        inc     R2
+@QuotientBaseReady:
+        iwt     R1, #$7FFF
+        with    R8
+        and     R1
+        move    R0, R8
+        iwt     R6, #BSP_SKY_PROJECTION_SCALE
+        with    R0
+        lmult
+        move    R8, R4
+        move    R9, R0
+        move    R0, R2
+        iwt     R6, #BSP_SKY_PROJECTION_SCALE
+        with    R0
+        lmult
+        move    R1, R4
+        move    R2, R4
+        with    R1
+        and     #1
+        beq     @QuotientLowContributionReady
+        nop
+        iwt     R1, #$8000
+@QuotientLowContributionReady:
+        with    R2
+        lsr
+        with    R8
+        add     R1
+        with    R9
+        adc     R2
+.if BSP_RENDER_SCALE = 2
+        ; Q3 root requires the numerator to carry three matching extra bits.
+        move    R7, #0
+        .repeat 3
+          with  R8
+          add   R8
+          with  R9
+          adc   R9
+          with  R7
+          adc   R7
+        .endrepeat
+        sm      (SKY_NUMERATOR_TOP), R7
+.endif
+        move    R0, #0
+        sm      (SKY_NUMERATOR_LO), R0
+        sm      (SKY_NUMERATOR_MID), R8
+        sm      (SKY_NUMERATOR_HI), R9
+        lm      R0, (SKY_ROOT_LO)
+        sm      (SKY_DENOMINATOR_LO), R0
+        lm      R0, (SKY_ROOT_HI)
+        sm      (SKY_DENOMINATOR_HI), R0
+        jal     SkyUnsignedDivide48By32
+        nop
+        lm      R0, (SKY_SIGN)
+        moves   R0, R0
+        beq     @SignedQuotientDone
+        nop
+        lm      R4, (SKY_QUOTIENT_LO)
+        lm      R0, (SKY_QUOTIENT_HI)
+        move    R1, #0
+        with    R1
+        sub     R4
+        move    R2, #0
+        with    R2
+        sbc     R0
+        sm      (SKY_QUOTIENT_LO), R1
+        sm      (SKY_QUOTIENT_HI), R2
+@SignedQuotientDone:
+        lm      R11, (SKY_QUOTIENT_RETURN)
+        ret
+        nop
+
+; Project one endpoint from exact numerators through floor-isqrt and signed
+; trunc0 division. Output is signed Q16 S/T with the staged low23 phase added.
+SkyProjectEndpoint:
+        sm      (SKY_PROJECT_RETURN), R11
+        jal     SkyBuildRayNumerators
+        nop
+        move    R1, #0
+        sm      (SKY_SUM_LO), R1
+        sm      (SKY_SUM_MID), R1
+        sm      (SKY_SUM_HI), R1
+        lm      R4, (SKY_NX_LO)
+        lm      R0, (SKY_NX_HI)
+        jal     SkyAccumulateSignedComponent
+        nop
+        lm      R4, (SKY_NY_LO)
+        lm      R0, (SKY_NY_HI)
+        jal     SkyAccumulateSignedComponent
+        nop
+        lm      R4, (SKY_NZ_LO)
+        lm      R0, (SKY_NZ_HI)
+        jal     SkyAccumulateSignedComponent
+        nop
+        jal     SkyFloorIsqrt48
+        nop
+
+        lm      R0, (SKY_NX_LO)
+        sm      (SKY_WORK_LO), R0
+        lm      R0, (SKY_NX_HI)
+        sm      (SKY_WORK_HI), R0
+        jal     SkySignedQuotient
+        nop
+        lm      R0, (SKY_QUOTIENT_LO)
+        lm      R1, (SKY_QUOTIENT_HI)
+        lm      R2, (SKY_PHASE_LO)
+        lm      R3, (SKY_PHASE_HI)
+        with    R0
+        add     R2
+        with    R1
+        adc     R3
+        sm      (SKY_ENDPOINT_S_LO), R0
+        sm      (SKY_ENDPOINT_S_HI), R1
+
+        lm      R0, (SKY_NY_LO)
+        sm      (SKY_WORK_LO), R0
+        lm      R0, (SKY_NY_HI)
+        sm      (SKY_WORK_HI), R0
+        jal     SkySignedQuotient
+        nop
+        lm      R0, (SKY_QUOTIENT_LO)
+        lm      R1, (SKY_QUOTIENT_HI)
+        lm      R2, (SKY_PHASE_LO)
+        lm      R3, (SKY_PHASE_HI)
+        with    R0
+        add     R2
+        with    R1
+        adc     R3
+        sm      (SKY_ENDPOINT_T_LO), R0
+        sm      (SKY_ENDPOINT_T_HI), R1
+        lm      R11, (SKY_PROJECT_RETURN)
+        ret
+        nop

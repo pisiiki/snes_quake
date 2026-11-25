@@ -27,6 +27,16 @@ BRUSH_FRAGMENT_RETURN          = BRUSH_RASTER_STATE + $2C
 BRUSH_VERTEX_RETURN            = BRUSH_RASTER_STATE + $2E
 BRUSH_POLYGON_RETURN           = BRUSH_RASTER_STATE + $30
 BRUSH_COORD_RETURN             = BRUSH_RASTER_STATE + $32
+.if .defined(PLAYABLE_MAP_ID) && .defined(PLAYABLE_BRUSH_FRAGMENT_AFFINE) && (BSP_RENDER_SCALE = 2)
+        .assert !.defined(BSP_BRUSH_ROTATED_YZ), error, "Affine brush setup requires axial texture coordinates"
+        ; These values expire before clipping or polygon rasterization.
+BRUSH_AFFINE_S_VERTEX          = BRUSH_RASTER_STATE + $30
+BRUSH_AFFINE_S_SCALE           = BRUSH_RASTER_STATE + $32
+BRUSH_AFFINE_S_BIAS            = BRUSH_RASTER_STATE + $34
+BRUSH_AFFINE_T_VERTEX          = BRUSH_RASTER_STATE + $36
+BRUSH_AFFINE_T_SCALE           = BRUSH_RASTER_STATE + $38
+BRUSH_AFFINE_T_BIAS            = BRUSH_RASTER_STATE + $3A
+.endif
 BRUSH_TEXTURE_OVERRIDE_CURSOR  = BRUSH_RASTER_STATE + $3C
 BRUSH_CURRENT_LEAF_KEY         = BRUSH_RASTER_STATE + $3E
 BRUSH_FACE_CULL_RETURN         = BRUSH_STATE + $84
@@ -38,11 +48,17 @@ BRUSH_CLIP_RETURN              = BRUSH_COORD_RETURN
 .assert BRUSH_RASTER_RETURN = BRUSH_RASTER_STATE, error, "Sky owner probe moved away from the brush raster return"
 
 BrushRenderMixedTokens:
+.if .defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2)
+        move    R0, #0
+BrushRenderMixedTokensAtCursor:
+.endif
         sm      (BRUSH_RASTER_RETURN), R11
         ; StageSkyCommand clears this word before every command. Publishing
         ; the ordinary mixed-walker return therefore doubles as sky ownership
         ; without another call or flag update in no-sky frames.
+.if !(.defined(PLAYABLE_RESIDENT_WORLD) && (BSP_RENDER_SCALE = 2))
         move    R0, #0
+.endif
         sm      (BRUSH_TOKEN_CURSOR), R0
         iwt     R0, #FACES
         sm      (BRUSH_WORLD_FACE_POINTER), R0
@@ -80,7 +96,17 @@ BrushMixedTokenPresent:
         and     R1
         bne     BrushMixedLeafMarker
         nop
+.if .defined(QUAKE_MSU_WORLD_KEEP) && (BSP_RENDER_SCALE = 2)
+        jal     MsuMixedWorldGateThunk
+.elseif .defined(E1M1_FLY_LARGE_PACKET) && (BSP_RENDER_SCALE = 2) && !.defined(QUAKE_MSU_CACHE) && (BSP_COMPOSED_CACHE_SELECTED_FACE_COUNT = 0)
+        jal     BrushRenderWorldFace
+.else
+  .if .defined(PLAYABLE_FLAT_MONOTONE_RASTER) && (BSP_RENDER_SCALE = 2)
+        .export FlatMixedWorldFaceTarget, BrushTryRenderComposedWorldFace
+FlatMixedWorldFaceTarget = *+2
+  .endif
         jal     BrushTryRenderComposedWorldFace
+.endif
         nop
         bra     BrushMixedTokenAdvance
         nop
@@ -108,7 +134,7 @@ BrushMixedAlias:
         bra     BrushMixedTokenAdvance
         nop
 BrushMixedFragment:
-        iwt     R1, #$01FF
+        iwt     R1, #BRUSH_LINK_INDEX_MASK
         with    R0
         and     R1
         sm      (BRUSH_CURRENT_LINK), R0
@@ -130,7 +156,7 @@ BrushRenderFragment:
         sm      (BRUSH_FRAGMENT_RETURN), R11
         jal     BrushLoadCurrentFragment
         nop
-        jal     BrushFaceFrontFacing
+        jal     BrushFaceLazyFacing
         nop
         moves   R0, R0
         beq     BrushRenderFragmentDone
@@ -150,7 +176,11 @@ BrushRenderFragment:
         jal     BrushLoadFaceLightmap
         nop
 BrushFragmentTextureReady:
+.if .defined(PLAYABLE_MAP_ID) && .defined(PLAYABLE_BRUSH_PROJECTED_REUSE_CODE) && (BSP_RENDER_SCALE = 2)
+        jal     BrushBuildOrReuseFragmentView
+.else
         jal     BrushBuildFragmentView
+.endif
         nop
         jal     BrushRasterPreparedPolygon
         nop
@@ -174,6 +204,7 @@ BrushLoadCurrentFragment:
         with    R10
         add     R0
         movew   R1, (R10)
+BrushLoadCurrentFragmentLinked:
         sm      (BRUSH_CURRENT_FRAGMENT_ID), R1
         inc     R10
         inc     R10
@@ -196,11 +227,20 @@ BrushLoadCurrentFragment:
 
         ; Descriptor records are eight-byte aligned and cannot cross banks.
         lm      R0, (BRUSH_CURRENT_FRAGMENT_ID)
-        move    R1, R0
-  .repeat 12
+        ; Word0 retains the facing bit for the cheap predicate below. Strip
+        ; it from the descriptor bank; the low12 address mask already does so.
+        to      R1
+        hib
+  .repeat 4
         with    R1
         lsr
   .endrepeat
+        with    R1
+.if BSP_BRUSH_TEN_BIT_LINKS
+        and     #1                      ; Exclude packed next-high bit13.
+.else
+        and     #3
+.endif
         iwt     R2, #BSP_BRUSH_FRAGMENT_DESCRIPTORS_FIRST_BANK
         with    R2
         add     R1
@@ -212,7 +252,7 @@ BrushLoadCurrentFragment:
         with    R3
         add     R3
   .endrepeat
-        iwt     R4, #$8000
+        iwt     R4, #BSP_BRUSH_FRAGMENT_DESCRIPTORS_ROM_ADDRESS
         with    R4
         add     R3
         move    R0, R2
@@ -230,6 +270,13 @@ BrushLoadCurrentFragment:
         lm      R11, (BRUSH_FRAGMENT_LOAD_RETURN)
         ret
         nop
+
+; Keep the public call slot and original arithmetic entry fixed. The cold
+; helper evaluates a raw link once, then returns its command-local memo.
+BrushFaceAdmittedFacing:
+        GSU_ABSOLUTE_GOTO BrushFaceLazyFacing
+        .res $AE - (* - BrushLoadCurrentFragment), $01
+.assert .loword(BrushFaceFrontFacing) = $95FA, lderror, "Facing arithmetic entry moved"
 
 ; Return one when the camera is on the visible side of the source face plane.
 ; QBSA stores Q6 planes in baseline Q2 world space. Variant origin is exact
@@ -353,10 +400,7 @@ BrushFaceCullDone:
         ret
         nop
 
-BrushRenderWorldFace:
-        sm      (BRUSH_TOKEN_RETURN), R11
-        lm      R3, (BRUSH_CURRENT_TOKEN)
-        sm      (PACKET_SOURCE_INDEX), R3
+.macro BrushPrepareWorldGeometry
         ; The mixed world subsequence is byte-for-byte the selector's painter
         ; order. Consume its already-emitted face records exactly as the
         ; standalone walker does, while leaf/fragment tags leave this cursor
@@ -376,6 +420,13 @@ BrushRenderWorldFace:
         with    R0
         add     #BSP_FACE_RECORD_BYTES
         sm      (BRUSH_WORLD_FACE_POINTER), R0
+.endmacro
+
+BrushRenderWorldFace:
+        sm      (BRUSH_TOKEN_RETURN), R11
+        lm      R3, (BRUSH_CURRENT_TOKEN)
+        sm      (PACKET_SOURCE_INDEX), R3
+        BrushPrepareWorldGeometry
 
         ; Source face record supplies the absolute world texture-coordinate
         ; cursor; packet face records deliberately retain only raster fields.
@@ -387,7 +438,7 @@ BrushRenderWorldFace:
         add     R1
         with    R1
         add     R2                       ; 6f.
-        iwt     R4, #$8000
+        iwt     R4, #WORLD_FACES_ROM_ADDRESS
         with    R4
         add     R1
         move    R0, #WORLD_FACES_ROM_BANK
@@ -425,9 +476,10 @@ BrushWorldTextureReady:
         dec     R0
         bne     BrushWorldNotLightmapped
         nop
-        jal     TextureLoadFaceLightmap
+        TexturePrepareWorldLightmap
         jal     TextureRenderConvexFaceShaded
         GSU_ABSOLUTE_GOTO BrushRenderWorldFaceDone
+        TextureWorldLightmapDispatchPadding
 BrushWorldNotLightmapped:
         jal     TextureRenderConvexFaceAlbedo
         nop
@@ -521,6 +573,9 @@ BrushSelectTextureSampleRoutine:
 BrushSelectTextureSampleRoutineTextured:
         .res    1
 
+.if .defined(PLAYABLE_FLAT_BRUSH_MATERIAL) && (BSP_RENDER_SCALE = 2)
+        .export BrushLoadFaceMaterial
+.endif
 BrushLoadFaceMaterial:
         sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
         lm      R0, (BRUSH_CURRENT_PACKED_FACE)
@@ -560,6 +615,93 @@ BrushLoadFaceMaterial:
 ; Inline overrides precede external-BSP overrides. Ordinary brushes stop at
 ; that suffix so pickup animation does not lengthen their material lookup.
 BrushResolveTextureOverride:
+.if .defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)
+.if BSP_BRUSH_VTEX_COUNT = 0
+        ret
+        nop
+.else
+.ifdef PLAYABLE_BRUSH_OVERRIDE_SLOT_MASK
+        ; The generated mask is the union of every canonical override row.
+        ; For slot n, consume n shifts, then read bit n from carry.
+        lm      R2, (BRUSH_CURRENT_SLOT)
+        move    R0, #16
+        with    R2
+        cmp     R0
+        bcs     @NoOverride
+        nop
+        iwt     R0, #PLAYABLE_BRUSH_OVERRIDE_SLOT_MASK
+        moves   R2, R2
+        beq     @CheckSlot
+        nop
+@ShiftSlot:
+        dec     R2
+        bne     @ShiftSlot
+        lsr
+@CheckSlot:
+        lsr
+        bcc     @NoOverride
+        nop
+.endif
+        ; Keep the immutable row window and the requested material in
+        ; registers. R11 is available once its caller return is saved.
+        sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
+        lm      R11, (BRUSH_TEXTURE_OVERRIDE_COUNT)
+        moves   R11, R11
+        beq     @Done
+        nop
+        lm      R0, (BRUSH_FIRST_TEXTURE)
+        move    R1, R0
+        add     R0
+        add     R1
+        iwt     R4, #BSP_BRUSH_VTEX_ADDRESS
+        with    R4
+        add     R0
+        move    R0, #BSP_BRUSH_VTEX_BANK
+        romb
+        GSU_SET_ROM_BUFFER_ADDRESS R4
+
+        lm      R1, (BRUSH_CURRENT_SLOT)
+        lm      R2, (BRUSH_CURRENT_LOCAL_FACE)
+        iwt     R3, #BSP_EXTERNAL_BSP_ENTITY_SLOT_FIRST
+        with    R1
+        cmp     R3
+        bcc     @Read
+        nop
+        iwt     R3, #$0100              ; External callers can scan every slot.
+@Read:
+        BSP_ROM_LOAD_BYTE R0
+        cmp     R3
+        bcs     @Done
+        nop
+        cmp     R1
+        bne     @SkipFace
+        nop
+        BSP_ROM_LOAD_BYTE R0
+        cmp     R2
+        bne     @SkipTexture
+        nop
+        BSP_ROM_LOAD_BYTE R0
+        sm      (TEXTURE_ID), R0
+        bra     @Done
+        nop
+@SkipFace:
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+@SkipTexture:
+        inc     R14                     ; gsu-lint: allow-r14-rom-buffer
+        dec     R11
+        bne     @Read
+        nop
+@Done:
+        lm      R11, (BRUSH_TEXTURE_LOAD_RETURN)
+@NoOverride:
+        ret
+        nop
+.endif
+        .assert BSP_BRUSH_VTEX_RECORD_BYTES = 3, error, "Brush texture override record changed"
+        .assert BSP_EXTERNAL_BSP_ENTITY_SLOT_FIRST <= $0100, error, "Brush override slot exceeds its byte domain"
+        .assert BSP_BRUSH_VTEX_ADDRESS + BSP_BRUSH_VTEX_COUNT * 3 <= $10000, lderror, "Brush texture overrides cross their ROM bank"
+        .res $7C - (* - BrushResolveTextureOverride), $01
+.else
         sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
         move    R0, #0
         sm      (BRUSH_TEXTURE_OVERRIDE_CURSOR), R0
@@ -621,6 +763,7 @@ BrushResolveTextureOverrideDone:
         lm      R11, (BRUSH_TEXTURE_LOAD_RETURN)
         ret
         nop
+.endif
 
 BrushLoadFaceLightmap:
         sm      (BRUSH_TEXTURE_LOAD_RETURN), R11
@@ -711,8 +854,15 @@ BrushLoadFaceLightmapDone:
 ; R13 retains the current ROM bank and R9 the output cursor across the transform,
 ; classifier, and coordinate helpers. Records are four-byte aligned, so the six
 ; known 32 KiB crossings occur exactly between vertices.
+.if .defined(PLAYABLE_FLAT_BRUSH_MATERIAL) && (BSP_RENDER_SCALE = 2)
+        .export BrushBuildFragmentView
+.endif
 BrushBuildFragmentView:
         sm      (BRUSH_VERTEX_RETURN), R11
+.if .defined(PLAYABLE_MAP_ID) && .defined(PLAYABLE_BRUSH_FRAGMENT_AFFINE) && (BSP_RENDER_SCALE = 2)
+        jal     BrushPrepareFragmentAffine
+        nop
+.endif
         ; Resolve the first occurrence's bank/address once. Subsequent records
         ; advance R14 sequentially until its exact zero wrap selects a new bank.
         lm      R3, (BRUSH_FRAGMENT_FIRST_VERTEX_LO)
@@ -744,7 +894,7 @@ BrushBuildFragmentView:
         add     R3
         with    R3
         add     R3
-        iwt     R4, #$8000
+        iwt     R4, #BSP_BRUSH_FRAGMENT_VERTICES_ROM_ADDRESS
         with    R4
         add     R3
         GSU_SET_ROM_BUFFER_ADDRESS R4
@@ -767,10 +917,49 @@ BrushFragmentVertexLoop:
         inc     R13
         move    R0, R13
         romb
-        iwt     R0, #$8000
+        iwt     R0, #BSP_BRUSH_FRAGMENT_VERTICES_ROM_ADDRESS
         GSU_SET_ROM_BUFFER_ADDRESS R0
 BrushFragmentVertexAddressReady:
+.ifdef GSU_PLATFORM_HEIGHTS
+        jal     BrushResolvePlatformVertex
+        nop
+.endif
         ; Decode signed-byte bases plus two residual bits per axis exactly once.
+.if (.defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)) || .defined(GSU_PLATFORM_HEIGHTS)
+        ; Immediate signed multiply reads the low byte and emits signed Q2.
+        with    R1
+        mult    #4
+        move    R2, R4
+        with    R2
+        hib
+        with    R2
+        mult    #4
+        move    R3, R7
+        with    R3
+        mult    #4
+        with    R7
+        hib
+        move    R0, R7
+        and     #3
+        with    R1
+        add     R0
+  .repeat 2
+        with    R7
+        lsr
+  .endrepeat
+        move    R0, R7
+        and     #3
+        with    R2
+        add     R0
+  .repeat 2
+        with    R7
+        lsr
+  .endrepeat
+        move    R0, R7
+        and     #3
+        with    R3
+        add     R0
+.else
         with    R1
         sex
         move    R2, R4
@@ -818,6 +1007,7 @@ BrushFragmentVertexAddressReady:
         and     #3
         with    R3
         add     R0
+.endif
         sm      (BRUSH_VERTEX_X_Q2), R1
         sm      (BRUSH_VERTEX_Y_Q2), R2
         sm      (BRUSH_VERTEX_Z_Q2), R3
@@ -871,10 +1061,53 @@ BrushFragmentVertexDone:
         lm      R11, (BRUSH_VERTEX_RETURN)
         ret
         nop
+.if .defined(PLAYABLE_MAP_ID) && (BSP_RENDER_SCALE = 2)
+.ifdef PLAYABLE_BRUSH_PROJECTED_REUSE_CODE
+BrushReuseFragmentProjectionThunk:
+        ibt     R12, #BSP_GSU_ROM3_BANK
+        iwt     R0, #.loword(BrushRestoreProjectedFragmentROM)
+        from    R0
+        ljmp    R12
+        nop
+.endif
+        ; Keep the brush coordinate helper and later overlay entries pinned.
+        .res $123 - (* - BrushBuildFragmentView), $01
+.elseif .defined(GSU_PLATFORM_HEIGHTS)
+        .res $123 - (* - BrushBuildFragmentView), $01
+.endif
 
 BrushComputeFragmentCoordinates:
+.if .defined(PLAYABLE_FLAT_BRUSH_FRAGMENT) && (BSP_RENDER_SCALE = 2)
+        .export BrushComputeFragmentCoordinates
+.endif
+.if .defined(PLAYABLE_MAP_ID) && .defined(PLAYABLE_BRUSH_FRAGMENT_AFFINE) && (BSP_RENDER_SCALE = 2)
+.include "quake/BrushFragmentAffine.sgs"
+        .res $CC - (* - BrushComputeFragmentCoordinates), $01
+.else
+.ifdef BSP_BRUSH_ROTATED_YZ
+        move    R12, #BSP_GSU_ROM3_BANK
+        iwt     R0, #.loword(BrushComputeFragmentCoordinatesROM)
+        ljmp    R12
+        nop
+        ; Preserve the pinned brush raster patch after the coordinate code.
+        .res $CC - (* - BrushComputeFragmentCoordinates), $01
+.pushseg
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+BrushComputeFragmentCoordinatesROM:
+.endif
         sm      (BRUSH_COORD_RETURN), R11
         lm      R7, (BRUSH_FACE_S_AXIS)
+.ifdef BSP_BRUSH_ROTATED_YZ
+        moves   R7, R7
+        bmi     :+
+        nop
+        move    R0, #4
+        with    R7
+        cmp     R0
+        bcs     BrushComputeRotatedCoordinates
+        nop
+:
+.endif
         lm      R8, (BRUSH_FACE_S_OFFSET)
         jal     BrushComputeAxisCoordinate
         nop
@@ -884,9 +1117,95 @@ BrushComputeFragmentCoordinates:
         jal     BrushComputeAxisCoordinate
         nop
         sm      (TEXTURE_CUR_T), R0
+.ifdef BSP_BRUSH_ROTATED_YZ
+        GSU_ABSOLUTE_GOTO BrushComputeCoordinatesReturn
+.else
         lm      R11, (BRUSH_COORD_RETURN)
         ret
         nop
+.endif
+
+.ifdef BSP_BRUSH_ROTATED_YZ
+.macro BRUSH_ROTATED_COORD output, y_coefficient, z_coefficient, offset_code, negate_z
+        lm      R6, (y_coefficient)
+        move    R0, R7
+        lmult
+        move    R2, R4
+        move    R3, R0
+        lm      R6, (z_coefficient)
+  .if negate_z
+        move    R0, #0
+        with    R0
+        sub     R6
+        move    R6, R0
+  .endif
+        move    R0, R8
+        lmult
+        with    R2
+        add     R4
+        with    R0
+        adc     R3
+        ; Convert Q3*Q14 to Q4 by extracting bits 13..28.
+  .repeat 3
+        add     R0
+  .endrepeat
+        with    R2
+        hib
+  .repeat 5
+        with    R2
+        lsr
+  .endrepeat
+        or      R2
+        lm      R3, (offset_code)
+        with    R3
+        swap
+        iwt     R2, #$4000
+        with    R3
+        sub     R2
+        add     R3
+        sm      (output), R0
+.endmacro
+
+BrushComputeRotatedCoordinates:
+        lm      R10, (BRUSH_CURRENT_SLOT)
+  .repeat 3
+        with    R10
+        add     R10
+  .endrepeat
+        iwt     R0, #BRUSH_SLOT_TABLE+BRUSH_SLOT_ORIGIN_Y_Q3
+        with    R10
+        add     R0
+        lm      R7, (BRUSH_VERTEX_Y_Q2)
+        lm      R8, (BRUSH_VERTEX_Z_Q2)
+  .repeat 5
+        with    R7
+        add     R7
+        with    R8
+        add     R8
+  .endrepeat
+        iwt     R0, #BSP_WORLD_ORIGIN_Y*8
+        with    R7
+        add     R0
+        iwt     R0, #BSP_WORLD_ORIGIN_Z*8
+        with    R8
+        add     R0
+        movew   R0, (R10)
+        with    R7
+        sub     R0
+        inc     R10
+        inc     R10
+        movew   R0, (R10)
+        with    R8
+        sub     R0
+        BRUSH_ROTATED_COORD TEXTURE_CUR_S, BRUSH_FACE_S_OFFSET, BRUSH_FACE_T_OFFSET, BRUSH_FACE_S_AXIS, 0
+        BRUSH_ROTATED_COORD TEXTURE_CUR_T, BRUSH_FACE_T_OFFSET, BRUSH_FACE_S_OFFSET, BRUSH_FACE_T_AXIS, 1
+BrushComputeCoordinatesReturn:
+        lm      R11, (BRUSH_COORD_RETURN)
+        move    R12, #$70
+        from    R11
+        ljmp    R12
+        nop
+.endif
 
 ; R7 is signed ±(axis+1), R8 is the source texture offset in Quake units.
 ; Return signed Q4 in R0. The exact Q3 variant origin is subtracted before
@@ -981,6 +1300,10 @@ BrushCoordinateSignReady:
         lm      R11, (BRUSH_POLYGON_RETURN)
         ret
         nop
+.ifdef BSP_BRUSH_ROTATED_YZ
+.popseg
+.endif
+.endif
 
 ; Both direct fragments and same-leaf candidates consume the same prepared
 ; view polygon. Clip only planes named by the OR of its exact vertex outcodes;
@@ -1055,6 +1378,7 @@ BrushRasterPreparedPolygon:
         beq     BrushRasterPreparedDone
         nop
         jal     TextureProjectPolygonShaded
+BrushRasterPreparedProjected:
         nop
         moves   R0, R0
         beq     BrushRasterPreparedDone
@@ -1073,11 +1397,25 @@ BrushRasterPreparedLightmap:
         nop
   .endrepeat
 BrushRasterPreparedLightmapEnd:
-  .repeat $14
+.if .defined(PLAYABLE_MAP_ID) && .defined(PLAYABLE_BRUSH_PROJECTED_REUSE_CODE) && (BSP_RENDER_SCALE = 2)
+        ; Only the collected single-face call owns a saved projection.
+BrushBuildOrReuseFragmentView:
+        lm      R0, (BRUSH_FRAGMENT_RETURN)
+        iwt     R1, #.loword(BrushArbiterRenderSingleReturn)
+        sub     R1
+        bne     @Build
         nop
-  .endrepeat
+        GSU_ABSOLUTE_GOTO BrushReuseFragmentProjectionThunk
+@Build:
+        GSU_ABSOLUTE_GOTO BrushBuildFragmentView
+.endif
+        .res $14 - (* - BrushRasterPreparedLightmapEnd), $01
 BrushRasterPreparedAlbedo:
+.ifdef PLAYABLE_MAP_ID
+        jal     BakedRenderBrushFace
+.else
         jal     TextureRasterPolygon
+.endif
         nop
 BrushRasterPreparedDone:
         lm      R11, (BRUSH_POLYGON_RETURN)

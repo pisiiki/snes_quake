@@ -1,0 +1,71 @@
+; X2 packed world faces share the capacity retry's conservative Q6 plane
+; proof. A common distance <= -3 stays outside after up to three earlier
+; nearest-rounded plane clips. Raw outcodes only decide whether to try it.
+.if BSP_RENDER_SCALE = 2
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+TextureWorldFrustumROM:
+        move    R8, R10
+        move    R10, R4
+        with    R10
+        sub     #6
+        move    R7, R0
+        lm      R9, (CONVEX_FACE_VERTICES)
+        iwt     R6, #PACKET_VIEW_CACHE
+TextureWorldFrustumProofVertex:
+        movew   R1, (R10)
+        inc     R10
+        inc     R10
+        movew   R2, (R10)
+        inc     R10
+        inc     R10
+        movew   R3, (R10)
+        with    R1
+        asr
+        with    R2
+        asr
+        with    R3
+        asr
+        move    R0, #0
+        BSP_CLASSIFY_CLIP_MARGIN_PLANE R1, 0, 1
+        BSP_CLASSIFY_CLIP_MARGIN_PLANE R1, 1, 2
+        BSP_CLASSIFY_CLIP_MARGIN_PLANE R2, 1, 4
+        BSP_CLASSIFY_CLIP_MARGIN_PLANE R2, 0, 8
+        to      R7
+        and     R7
+        beq     TextureWorldFrustumKeep
+        nop
+        dec     R9
+        beq     TextureWorldFrustumReject
+        nop
+
+        inc     R8
+        inc     R8
+        movew   R0, (R8)
+        add     R0
+        add     R0
+        add     R0
+        move    R10, R6
+        with    R10
+        add     R0
+        bra     TextureWorldFrustumProofVertex
+        nop
+TextureWorldFrustumKeep:
+.ifdef PLAYABLE_WORLD_AFFINE_UV
+        GSU_ABSOLUTE_GOTO TextureLookupAffineWorldCoordinatesROM
+        .res 2, $01
+.else
+        iwt     R0, #.loword(TextureBeginCoordinateStream)
+        bra     TextureWorldFrustumReturn
+        nop
+.endif
+TextureWorldFrustumReject:
+        iwt     R0, #.loword(WorldLightmapRasterReturn)
+TextureWorldFrustumReturn:
+        move    R12, #$70
+        from    R0
+        ljmp    R12
+        nop
+TextureWorldFrustumROMEnd:
+.assert .bankbyte(TextureWorldFrustumROM) = ($80+BSP_GSU_ROM3_BANK), lderror, "World frustum gate left ROM3"
+.assert .bankbyte(TextureWorldFrustumROMEnd-1) = ($80+BSP_GSU_ROM3_BANK), lderror, "World frustum gate crosses ROM3"
+.endif

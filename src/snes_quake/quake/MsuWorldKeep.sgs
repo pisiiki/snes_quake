@@ -1,0 +1,97 @@
+; Cold ROM3 gate preserves the saturated RAM renderer overlays byte-for-byte.
+; R6=0 mixed world, R6=1 standalone world. Both call sites visit each packet
+; world face once, in selector order; tagged brush/alias tokens never enter.
+.segment "GSU_TEXTURE_GENERAL_ROM_CODE"
+MsuWorldGateROM:
+        sm      (MSU_WORLD_KEEP_RETURN), R11
+        sm      (MSU_WORLD_KEEP_MODE), R6
+        jal     MsuWorldKeepNext
+        nop
+        moves   R0, R0
+        beq     MsuWorldGateSkip
+        nop
+        lm      R0, (MSU_WORLD_KEEP_MODE)
+        moves   R0, R0
+        beq     MsuWorldGateMixed
+        nop
+        iwt     R8, #TextureTryRenderComposedFace
+        bra     MsuWorldGateTail
+        nop
+MsuWorldGateMixed:
+        iwt     R8, #BrushTryRenderComposedWorldFace
+MsuWorldGateTail:
+        lm      R11, (MSU_WORLD_KEEP_RETURN)
+        move    R9, #$70
+        from    R8
+        ljmp    R9
+        nop
+MsuWorldGateSkip:
+        lm      R0, (MSU_WORLD_KEEP_MODE)
+        moves   R0, R0
+        bne     MsuWorldGateSkipped
+        nop
+        lm      R0, (BRUSH_WORLD_FACE_POINTER)
+        with    R0
+        add     #BSP_FACE_RECORD_BYTES
+        sm      (BRUSH_WORLD_FACE_POINTER), R0
+MsuWorldGateSkipped:
+        lm      R8, (MSU_WORLD_KEEP_RETURN)
+        move    R9, #$70
+        move    R0, #1 ; standalone caller handles the ordinary face advance.
+        from    R8
+        ljmp    R9
+        nop
+
+MsuWorldKeepNext:
+        lm      R0, (MSU_WORLD_KEEP_READY)
+        iwt     R1, #MSU_WORLD_KEEP_MAGIC
+        cmp     R1
+        bne     MsuWorldKeepAll
+        nop
+        lm      R0, (MSU_WORLD_KEEP_COUNT)
+        lm      R1, (GSU_TELEMETRY_PACKET_FACE_COUNT)
+        with    R0
+        cmp     R1
+        bne     MsuWorldKeepInvalidate
+        nop
+        lm      R1, (MSU_WORLD_KEEP_ORDINAL)
+        with    R1
+        cmp     R0
+        bcs     MsuWorldKeepInvalidate
+        nop
+        move    R0, R1
+        inc     R1
+        sm      (MSU_WORLD_KEEP_ORDINAL), R1
+        move    R1, R0
+        with    R1
+        and     #7
+  .repeat 3
+        lsr
+  .endrepeat
+        iwt     R10, #MSU_WORLD_KEEP_MASK
+        with    R10
+        add     R0
+        move    R3, #1
+MsuWorldKeepShift:
+        moves   R1, R1
+        beq     MsuWorldKeepBit
+        nop
+        with    R3
+        add     R3
+        dec     R1
+        bra     MsuWorldKeepShift
+        nop
+MsuWorldKeepBit:
+        moveb   R0, (R10)
+        with    R0
+        and     R3
+        ret
+        nop
+MsuWorldKeepInvalidate:
+        move    R0, #0
+        sm      (MSU_WORLD_KEEP_READY), R0
+MsuWorldKeepAll:
+        move    R0, #1
+        ret
+        nop
+

@@ -21,7 +21,7 @@ from typing import Any, Mapping
 TOOLS = Workspace.discover().path('tools', 'snes_tooling', 'quake')
 WORKSPACE = Workspace.discover().root
 EXAMPLE = WORKSPACE / "src/snes_quake"
-VALIDATION_PROFILES = WORKSPACE / "config/profiles"
+VALIDATION_PROFILES = WORKSPACE / "validation/snes_quake/profiles"
 DEFAULT_DATA = EXAMPLE / "Data"
 DEFAULT_OUTPUT = Path("quake-sky-assets-audit.json")
 DEFAULT_ENDPOINT_CORPUS = VALIDATION_PROFILES / "QuakeBSPSkyEndpointCorpus.json"
@@ -29,6 +29,7 @@ DEFAULT_ENDPOINT_CORPUS = VALIDATION_PROFILES / "QuakeBSPSkyEndpointCorpus.json"
 
 import snes_tooling.quake.generate_quake_bsp_ordered_replay as ordered_replay  # noqa: E402
 import snes_tooling.quake.quake_bsp_sky_assets as sky  # noqa: E402
+from snes_tooling.quake.quake_target_layout import alias_halfbank_limit
 from snes_tooling.quake.quake_rom_config import MESEN_TARGETS  # noqa: E402
 
 
@@ -348,7 +349,7 @@ def _alias_opaque_pixels(
         and type(maximum_bank) is int
         and type(actual_bank) is int
         and type(chunk_count) is int
-        and 0 < chunk_count <= configured_count <= target.max_alias_halfbank_count
+        and 0 < chunk_count <= configured_count <= alias_halfbank_limit(target, storage)
         and len(storage) == configured_count
         and len(set(storage)) == len(storage)
         and maximum_bank == target.max_gsu_rom_bank
@@ -435,7 +436,7 @@ def _portable_source_path(path: Path, data_dir: Path) -> str:
     roots = (
         (data_dir.resolve(), Path("Data")),
         (TOOLS.resolve(), Path("tools/commands/snes_quake")),
-        (VALIDATION_PROFILES.resolve(), Path("config/profiles")),
+        (VALIDATION_PROFILES.resolve(), Path("validation/snes_quake/profiles")),
     )
     for root, prefix in roots:
         if resolved.is_relative_to(root):
@@ -1095,13 +1096,18 @@ def build_report(
     domain = sky.audit_opaque_palette_domain(
         (*ordinary_world, *brush_textures), colormaps, alias_opaque
     )
+    row_tokens = sky.sky_row_tokens(domain, enabled=markers_enabled)
     if markers_enabled:
         markers = sky.assign_sky_face_markers(domain, sky_faces)
     else:
         markers = ()
 
-    replay_payload = _read(data_dir / "QuakeBSPOrderedReplay.bin", bindings)
-    replay = ordered_replay.decode_replay(replay_payload)
+    if world_metadata.get("target", {}).get("mode") == "fly":
+        from types import SimpleNamespace
+        replay = SimpleNamespace(frames=(), source_pose_count=0, stride=10)
+    else:
+        replay_payload = _read(data_dir / "QuakeBSPOrderedReplay.bin", bindings)
+        replay = ordered_replay.decode_replay(replay_payload)
     sky_face_set = set(sky_faces)
     candidate_rows = []
     empty_source_poses = []
@@ -1124,17 +1130,15 @@ def build_report(
     _require(not cached_sky_faces, "composed cache bypasses the sky marker path")
 
     try:
-        demo = world_metadata["demo"]
-        first_server_time = float(demo["first_server_time"])
-        source_pose_count = int(demo["precise_track_pose_count"])
-        sample_rate = int(demo["precise_track_sample_rate_hz"])
+        from snes_tooling.quake.quake_level_assets import recorded_surface_clock
+        first_server_time, source_pose_count, sample_rate = recorded_surface_clock(world_metadata)
     except (KeyError, TypeError, ValueError) as error:
         raise AuditError(
             "world metadata lacks the canonical sky clock origin"
         ) from error
-    proposed_phases = sky.build_demo_phase_asset(
+    proposed_phases = (sky.build_demo_phase_asset(
         first_server_time, source_pose_count, sample_rate
-    )
+    ) if source_pose_count else b"")
     sky_record = exact["textures"][contract.packed_texture_id]
     report = {
         "schema": REPORT_SCHEMA,
@@ -1170,7 +1174,9 @@ def build_report(
                 bindings[(data_dir / "QuakeBSPWorldTextureDirectory.bin").resolve()]
             ),
         },
+        "rowTokens": row_tokens,
         "faceMarkers": {
+            "usage": "historical palette allocation only; not runtime face ownership",
             "skyFaces": list(sky_faces),
             "assignments": [
                 {"face": face, "marker": marker} for face, marker in markers
@@ -1202,7 +1208,7 @@ def build_report(
             "candidateEmptySourcePoseStreamSha256": _sha256(empty_stream),
             "expectedSurvivors": {
                 "available": False,
-                "reason": "depth/brush/alias survivors require the runtime face markers or a rendered owner plane",
+                "reason": "depth/brush/alias survivors require runtime row tokens or a rendered owner plane",
             },
             "regressionGate": "baseline and candidate frame bytes must match whenever runtime surviving-marker count is zero",
         },

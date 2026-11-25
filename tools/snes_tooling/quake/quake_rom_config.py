@@ -17,17 +17,20 @@ from typing import Any
 from snes_tooling.quake.quake_demo import discover_demo_map
 
 
-CONFIG_NAME = "rom-config.json"
+CONFIG_NAME = "fly-start.json"
 CONFIG_SCHEMA = "quake-snes-rom-build-v1"
-DEFAULT_CONFIG = Workspace.discover().root / "config" / CONFIG_NAME
+DEFAULT_CONFIG = Workspace.discover().root / "config/snes_quake" / CONFIG_NAME
 DEFAULT_PLAYBACK_SAMPLE_RATE_HZ = 30
 PLAYBACK_STEP_SAMPLE_RATE_HZ = 3
 TEXTURE_ANIMATION_RATE_HZ = 10
 DEFAULT_SOUNDTRACK_SAMPLE_RATE_HZ = 8000
 DEFAULT_SOUNDTRACK_VOLUME = 0.7
 DEFAULT_ALIAS_HALFBANK_COUNT = 16
-MAX_ALIAS_HALFBANK_COUNT = 18
-DEFAULT_MDL_WORLD_UNITS_PER_TEXEL = 1
+MAX_ALIAS_HALFBANK_COUNT = 21
+MDL_BILLBOARD_CONFIG = (
+    Workspace.discover().root / "config/snes_quake/mdl-billboards.json"
+)
+MDL_BILLBOARD_SCHEMA = "quake-mdl-billboard-density-v1"
 MIN_MDL_WORLD_UNITS_PER_TEXEL = 1.0
 MAX_MDL_WORLD_UNITS_PER_TEXEL = 2.0
 MESENCE_NIGHTLY_TARGET = "mesence-nightly"
@@ -95,6 +98,36 @@ class AliasSpriteConfig:
 
 
 @dataclass(frozen=True)
+class ComposedCachePolicy:
+    demo_weight: int = 3
+    fly_weight: int = 1
+    priority: bool = True
+
+
+def configured_composed_cache(config_path: Path | None = None) -> ComposedCachePolicy:
+    value = load_rom_config(config_path).get("composedCache", {})
+    if not isinstance(value, dict) or set(value) - {
+        "demoWeight",
+        "flyWeight",
+        "priority",
+    }:
+        raise ValueError(
+            "composedCache must contain only demoWeight, flyWeight and priority"
+        )
+    demo, fly = value.get("demoWeight", 3), value.get("flyWeight", 1)
+    priority = value.get("priority", True)
+    if any(
+        type(weight) is not int or not 0 <= weight <= 65535 for weight in (demo, fly)
+    ):
+        raise ValueError("composedCache weights must be unsigned 16-bit integers")
+    if demo + fly == 0 or type(priority) is not bool:
+        raise ValueError(
+            "composedCache requires a positive weight and boolean priority"
+        )
+    return ComposedCachePolicy(demo, fly, priority)
+
+
+@dataclass(frozen=True)
 class MesenTarget:
     name: str
     max_alias_halfbank_count: int
@@ -151,9 +184,54 @@ def load_rom_config(config_path: Path | None = None) -> dict[str, Any]:
     return value
 
 
+def configured_target(config_path: Path | None = None) -> dict[str, str]:
+    """Select a demo recording or an independent level, never an implicit DEM."""
+    config = load_rom_config(config_path)
+    target = config.get("target", {"mode": "demo"})
+    if not isinstance(target, dict) or target.get("mode") not in ("demo", "fly"):
+        raise ValueError("target mode must be 'demo' or 'fly'")
+    if target["mode"] == "demo":
+        if set(target) != {"mode"}:
+            raise ValueError("demo target selects its map from the recording")
+    else:
+        entry = target.get("map")
+        if (
+            set(target) - {"mode", "map", "bspSha256", "gameplay", "standaloneFly"}
+            or not isinstance(entry, str)
+            or not entry.startswith("maps/")
+            or not entry.endswith(".bsp")
+            or ".." in Path(entry).parts
+            or "\\" in entry
+            or ":" in entry
+        ):
+            raise ValueError("fly target requires a safe maps/*.bsp entry")
+        if "gameplay" in target and not (
+            target["gameplay"] == "basic"
+            or target["gameplay"] == "start-hub" and entry == "maps/start.bsp"
+            or target["gameplay"] == "e1m1-button-door"
+            and entry == "maps/e1m1.bsp"
+        ):
+            raise ValueError("unsupported Fly gameplay slice")
+        if "standaloneFly" in target and (target["standaloneFly"] is not True
+                or target.get("gameplay") != "e1m1-button-door"):
+            raise ValueError("standaloneFly requires the E1M1 gameplay slice")
+        if "demo" in config:
+            raise ValueError("fly target must not configure a demo")
+        digest = target.get("bspSha256")
+        if "bspSha256" in target and (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+        ):
+            raise ValueError("fly target bspSha256 must be a lowercase SHA-256")
+    return dict(target)
+
+
 def configured_demo_source(config_path: Path | None = None) -> DemoSource:
     path = (config_path or DEFAULT_CONFIG).resolve()
     config = load_rom_config(path)
+    if configured_target(path)["mode"] != "demo":
+        raise ValueError("Fly-only target has no demo source")
     demo = config.get("demo")
     if not isinstance(demo, dict):
         raise ValueError("ROM build config demo must be an object")
@@ -201,17 +279,6 @@ def configured_playback_sample_rate(config_path: Path | None = None) -> int:
             "Quake texture-animation clock"
         )
     return rate
-
-
-def configured_warp_source_focal(config_path: Path | None = None) -> int:
-    """Fixed source focal; display zoom is derived as 64/focal at build time."""
-    warp = load_rom_config(config_path).get('warp', {})
-    if not isinstance(warp, dict) or set(warp)-{'sourceFocal'}:
-        raise ValueError('ROM warp must be an object containing only sourceFocal; zoom is derived')
-    focal = warp.get('sourceFocal', 64)
-    if type(focal) is not int or not 32 < focal <= 64:
-        raise ValueError('ROM warp sourceFocal must be an integer in (32, 64]')
-    return focal
 
 
 def configured_soundtrack(config_path: Path | None = None) -> SoundtrackConfig:
@@ -439,8 +506,38 @@ def configured_mesen_target(config_path: Path | None = None) -> MesenTarget:
     return MESEN_TARGETS[name]
 
 
+def configured_mdl_billboard_density() -> float:
+    """Read the one mandatory density setting shared by all MDL impostor builds."""
+    try:
+        document = json.loads(MDL_BILLBOARD_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(
+            f"mandatory MDL billboard config cannot be read: {MDL_BILLBOARD_CONFIG}"
+        ) from error
+    if (
+        not isinstance(document, dict)
+        or document.get("schema") != MDL_BILLBOARD_SCHEMA
+        or set(document) != {"schema", "mdlWorldUnitsPerTexel"}
+    ):
+        raise ValueError(
+            "shared MDL billboard config must declare its schema and mdlWorldUnitsPerTexel"
+        )
+    density = document["mdlWorldUnitsPerTexel"]
+    if (
+        isinstance(density, bool)
+        or not isinstance(density, (int, float))
+        or not math.isfinite(density)
+        or not MIN_MDL_WORLD_UNITS_PER_TEXEL <= density <= MAX_MDL_WORLD_UNITS_PER_TEXEL
+    ):
+        raise ValueError(
+            "shared mdlWorldUnitsPerTexel must be a finite number "
+            f"from {MIN_MDL_WORLD_UNITS_PER_TEXEL} through {MAX_MDL_WORLD_UNITS_PER_TEXEL}"
+        )
+    return float(density)
+
+
 def configured_alias_sprites(config_path: Path | None = None) -> AliasSpriteConfig:
-    """Return the bounded QBA1 capacity and explicit MDL storage density."""
+    """Return per-ROM QBA1 capacity and the single shared MDL storage density."""
 
     config = load_rom_config(config_path)
     target = configured_mesen_target(config_path)
@@ -448,32 +545,27 @@ def configured_alias_sprites(config_path: Path | None = None) -> AliasSpriteConf
     if not isinstance(alias, dict):
         raise ValueError("ROM build config aliasSprites must be an object")
     count = alias.get("halfbankCount", DEFAULT_ALIAS_HALFBANK_COUNT)
+    maximum = target.max_alias_halfbank_count
+    level = config.get("target", {})
+    if level.get("mode") == "fly" and level.get("map") == "maps/e1m1.bsp":
+        from snes_tooling.quake.quake_target_layout import alias_halfbank_limit, asset_layout
+        maximum = alias_halfbank_limit(target, asset_layout(False, level["map"]).alias_halfbanks)
     if (
         isinstance(count, bool)
         or not isinstance(count, int)
-        or not DEFAULT_ALIAS_HALFBANK_COUNT <= count <= target.max_alias_halfbank_count
+        or not DEFAULT_ALIAS_HALFBANK_COUNT <= count <= maximum
     ):
         raise ValueError(
             "ROM build aliasSprites halfbankCount must be an integer from "
             f"{DEFAULT_ALIAS_HALFBANK_COUNT} through "
-            f"{target.max_alias_halfbank_count} for mesenTarget {target.name!r}"
+            f"{maximum} for mesenTarget {target.name!r}"
         )
-    density = alias.get("mdlWorldUnitsPerTexel", DEFAULT_MDL_WORLD_UNITS_PER_TEXEL)
-    if isinstance(density, bool) or not isinstance(density, (int, float)):
+    if "mdlWorldUnitsPerTexel" in alias:
         raise ValueError(
-            "ROM build aliasSprites mdlWorldUnitsPerTexel must be a finite number "
-            f"from {MIN_MDL_WORLD_UNITS_PER_TEXEL} through "
-            f"{MAX_MDL_WORLD_UNITS_PER_TEXEL}"
+            "per-ROM aliasSprites mdlWorldUnitsPerTexel is forbidden; "
+            "edit the shared config/snes_quake/mdl-billboards.json setting"
         )
-    density = float(density)
-    if not math.isfinite(density) or not (
-        MIN_MDL_WORLD_UNITS_PER_TEXEL <= density <= MAX_MDL_WORLD_UNITS_PER_TEXEL
-    ):
-        raise ValueError(
-            "ROM build aliasSprites mdlWorldUnitsPerTexel must be a finite number "
-            f"from {MIN_MDL_WORLD_UNITS_PER_TEXEL} through "
-            f"{MAX_MDL_WORLD_UNITS_PER_TEXEL}"
-        )
+    density = configured_mdl_billboard_density()
     return AliasSpriteConfig(count, density)
 
 
@@ -520,6 +612,15 @@ def resolve_demo_source(
 
 
 def configured_input_paths(config_path: Path | None = None) -> tuple[Path, ...]:
+    if configured_target(config_path)["mode"] == "fly":
+        return (
+            (config_path or DEFAULT_CONFIG).resolve(),
+            MDL_BILLBOARD_CONFIG.resolve(),
+        )
     source = configured_demo_source(config_path)
     file_path = source.file_path
-    return (source.config_path, *(() if file_path is None else (file_path,)))
+    return (
+        source.config_path,
+        MDL_BILLBOARD_CONFIG.resolve(),
+        *(() if file_path is None else (file_path,)),
+    )

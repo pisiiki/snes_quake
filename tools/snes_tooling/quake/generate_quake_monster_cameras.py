@@ -16,7 +16,7 @@ from typing import Any
 
 
 TOOLS = Workspace.discover().path('tools', 'snes_tooling', 'quake')
-EXAMPLE = Workspace.discover().root / "src/snes_quake"
+EXAMPLE = Workspace.discover().quake_example
 SHARED = Workspace.discover().shared_tools
 
 
